@@ -169,7 +169,7 @@ func (c *completer) deepSearch(ctx context.Context) {
 			c.addCandidate(ctx, &cand)
 
 			c.deepState.candidateCount++
-			if c.opts.budget > 0 && c.deepState.candidateCount%100 == 0 {
+			if c.opts.budget > 0 && c.deepState.candidateCount%10000 == 0 {
 				spent := float64(time.Since(c.startTime)) / float64(c.opts.budget)
 				select {
 				case <-ctx.Done():

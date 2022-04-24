@@ -1070,7 +1070,7 @@ func (c *completer) wantTypeName() bool {
 
 // See https://golang.org/issue/36001. Unimported completions are expensive.
 const (
-	maxUnimportedPackageNames = 5
+	maxUnimportedPackageNames = 10000
 	unimportedMemberTarget    = 100
 )
 
