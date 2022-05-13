@@ -52,6 +52,40 @@ func (f *Function) instanceType(id *ast.Ident) types.Type {
 	return f.typeOf(id)
 }
 
+// selection returns a *selection corresponding to f.info.Selections[selector]
+// with potential updates for type substitution.
+func (f *Function) selection(selector *ast.SelectorExpr) *selection {
+	sel := f.info.Selections[selector]
+	if sel == nil {
+		return nil
+	}
+
+	switch sel.Kind() {
+	case types.MethodExpr, types.MethodVal:
+		if recv := f.typ(sel.Recv()); recv != sel.Recv() {
+			// recv changed during type substitution.
+			pkg := f.declaredPackage().Pkg
+			obj, index, indirect := types.LookupFieldOrMethod(recv, true, pkg, sel.Obj().Name())
+
+			// sig replaces sel.Type(). See (types.Selection).Typ() for details.
+			sig := obj.Type().(*types.Signature)
+			sig = changeRecv(sig, newVar(sig.Recv().Name(), recv))
+			if sel.Kind() == types.MethodExpr {
+				sig = recvAsFirstArg(sig)
+			}
+			return &selection{
+				kind:     sel.Kind(),
+				recv:     recv,
+				typ:      sig,
+				obj:      obj,
+				index:    index,
+				indirect: indirect,
+			}
+		}
+	}
+	return toSelection(sel)
+}
+
 // Destinations associated with unlabelled for/switch/select stmts.
 // We push/pop one of these as we enter/leave each construct and for
 // each BranchStmt we scan for the innermost target of the right type.
@@ -440,7 +474,7 @@ func (f *Function) RelString(from *types.Package) string {
 
 	// Thunk?
 	if f.method != nil {
-		return f.relMethod(from, f.method.Recv())
+		return f.relMethod(from, f.method.recv)
 	}
 
 	// Bound?

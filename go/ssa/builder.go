@@ -443,19 +443,19 @@ func (b *builder) addr(fn *Function, e ast.Expr, escaping bool) lvalue {
 		return b.addr(fn, e.X, escaping)
 
 	case *ast.SelectorExpr:
-		sel, ok := fn.info.Selections[e]
-		if !ok {
+		sel := fn.selection(e)
+		if sel == nil {
 			// qualified identifier
 			return b.addr(fn, e.Sel, escaping)
 		}
-		if sel.Kind() != types.FieldVal {
+		if sel.kind != types.FieldVal {
 			panic(sel)
 		}
 		wantAddr := true
 		v := b.receiver(fn, e.X, wantAddr, escaping, sel)
-		last := len(sel.Index()) - 1
+		last := len(sel.index) - 1
 		return &address{
-			addr: emitFieldSelection(fn, v, sel.Index()[last], true, e.Sel),
+			addr: emitFieldSelection(fn, v, sel.index[last], true, e.Sel),
 			pos:  e.Sel.Pos(),
 			expr: e.Sel,
 		}
@@ -786,8 +786,8 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 		return emitLoad(fn, fn.lookup(obj, false)) // var (address)
 
 	case *ast.SelectorExpr:
-		sel, ok := fn.info.Selections[e]
-		if !ok {
+		sel := fn.selection(e)
+		if sel == nil {
 			// builtin unsafe.{Add,Slice}
 			if obj, ok := fn.info.Uses[e.Sel].(*types.Builtin); ok {
 				return &Builtin{name: obj.Name(), sig: fn.typ(tv.Type).(*types.Signature)}
@@ -795,33 +795,17 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 			// qualified identifier
 			return b.expr(fn, e.Sel)
 		}
-		switch sel.Kind() {
+		switch sel.kind {
 		case types.MethodExpr:
 			// (*T).f or T.f, the method f from the method-set of type T.
 			// The result is a "thunk".
-
-			sel := selection(sel)
-			if base := fn.typ(sel.Recv()); base != sel.Recv() {
-				// instantiate sel as sel.Recv is not equal after substitution.
-				pkg := fn.declaredPackage().Pkg
-				// mv is the instantiated method value.
-				mv := types.NewMethodSet(base).Lookup(pkg, sel.Obj().Name())
-				sel = toMethodExpr(mv)
-			}
 			thunk := makeThunk(fn.Prog, sel, b.created)
 			return emitConv(fn, thunk, fn.typ(tv.Type))
 
 		case types.MethodVal:
 			// e.f where e is an expression and f is a method.
 			// The result is a "bound".
-
-			if base := fn.typ(sel.Recv()); base != sel.Recv() {
-				// instantiate sel as sel.Recv is not equal after substitution.
-				pkg := fn.declaredPackage().Pkg
-				// mv is the instantiated method value.
-				sel = types.NewMethodSet(base).Lookup(pkg, sel.Obj().Name())
-			}
-			obj := sel.Obj().(*types.Func)
+			obj := sel.obj.(*types.Func)
 			rt := fn.typ(recvType(obj))
 			wantAddr := isPointer(rt)
 			escaping := true
@@ -845,7 +829,7 @@ func (b *builder) expr0(fn *Function, e ast.Expr, tv types.TypeAndValue) Value {
 			return fn.emit(c)
 
 		case types.FieldVal:
-			indices := sel.Index()
+			indices := sel.index
 			last := len(indices) - 1
 			v := b.expr(fn, e.X)
 			v = emitImplicitSelections(fn, v, indices[:last], e.Pos())
@@ -935,21 +919,21 @@ func (b *builder) stmtList(fn *Function, list []ast.Stmt) {
 // selections of sel.
 //
 // wantAddr requests that the result is an an address.  If
-// !sel.Indirect(), this may require that e be built in addr() mode; it
+// !sel.indirect, this may require that e be built in addr() mode; it
 // must thus be addressable.
 //
 // escaping is defined as per builder.addr().
-func (b *builder) receiver(fn *Function, e ast.Expr, wantAddr, escaping bool, sel *types.Selection) Value {
+func (b *builder) receiver(fn *Function, e ast.Expr, wantAddr, escaping bool, sel *selection) Value {
 	var v Value
-	if wantAddr && !sel.Indirect() && !isPointer(fn.typeOf(e)) {
+	if wantAddr && !sel.indirect && !isPointer(fn.typeOf(e)) {
 		v = b.addr(fn, e, escaping).address(fn)
 	} else {
 		v = b.expr(fn, e)
 	}
 
-	last := len(sel.Index()) - 1
+	last := len(sel.index) - 1
 	// The position of implicit selection is the position of the inducing receiver expression.
-	v = emitImplicitSelections(fn, v, sel.Index()[:last], e.Pos())
+	v = emitImplicitSelections(fn, v, sel.index[:last], e.Pos())
 	if !wantAddr && isPointer(v.Type()) {
 		v = emitLoad(fn, v)
 	}
@@ -964,15 +948,9 @@ func (b *builder) setCallFunc(fn *Function, e *ast.CallExpr, c *CallCommon) {
 
 	// Is this a method call?
 	if selector, ok := unparen(e.Fun).(*ast.SelectorExpr); ok {
-		sel, ok := fn.info.Selections[selector]
-		if ok && sel.Kind() == types.MethodVal {
-			obj := sel.Obj().(*types.Func)
-			if recv := fn.typ(sel.Recv()); recv != sel.Recv() {
-				// adjust obj if the sel.Recv() changed during monomorphization.
-				pkg := fn.declaredPackage().Pkg
-				method, _, _ := types.LookupFieldOrMethod(recv, true, pkg, sel.Obj().Name())
-				obj = method.(*types.Func)
-			}
+		sel := fn.selection(selector)
+		if sel != nil && sel.kind == types.MethodVal {
+			obj := sel.obj.(*types.Func)
 			recv := recvType(obj)
 
 			wantAddr := isPointer(recv)
@@ -994,7 +972,7 @@ func (b *builder) setCallFunc(fn *Function, e *ast.CallExpr, c *CallCommon) {
 			return
 		}
 
-		// sel.Kind()==MethodExpr indicates T.f() or (*T).f():
+		// sel.kind==MethodExpr indicates T.f() or (*T).f():
 		// a statically dispatched call to the method f in the
 		// method-set of T or *T.  T may be an interface.
 		//

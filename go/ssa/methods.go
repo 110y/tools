@@ -98,10 +98,11 @@ func (prog *Program) addMethod(mset *methodSet, sel *types.Selection, cr *creato
 	id := sel.Obj().Id()
 	fn := mset.mapping[id]
 	if fn == nil {
-		obj := sel.Obj().(*types.Func)
+		sel := toSelection(sel)
+		obj := sel.obj.(*types.Func)
 
-		needsPromotion := len(sel.Index()) > 1
-		needsIndirection := !isPointer(recvType(obj)) && isPointer(sel.Recv())
+		needsPromotion := len(sel.index) > 1
+		needsIndirection := !isPointer(recvType(obj)) && isPointer(sel.recv)
 		if needsPromotion || needsIndirection {
 			fn = makeWrapper(prog, sel, cr)
 		} else {

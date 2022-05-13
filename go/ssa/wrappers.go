@@ -42,15 +42,15 @@ import (
 //   - the result may be a thunk or a wrapper.
 //
 // EXCLUSIVE_LOCKS_REQUIRED(prog.methodsMu)
-func makeWrapper(prog *Program, sel selection, cr *creator) *Function {
-	obj := sel.Obj().(*types.Func)       // the declared function
-	sig := sel.Type().(*types.Signature) // type of this wrapper
+func makeWrapper(prog *Program, sel *selection, cr *creator) *Function {
+	obj := sel.obj.(*types.Func)      // the declared function
+	sig := sel.typ.(*types.Signature) // type of this wrapper
 
 	var recv *types.Var // wrapper's receiver or thunk's params[0]
 	name := obj.Name()
 	var description string
 	var start int // first regular param
-	if sel.Kind() == types.MethodExpr {
+	if sel.kind == types.MethodExpr {
 		name += "$thunk"
 		description = "thunk"
 		recv = sig.Params().At(0)
@@ -60,7 +60,7 @@ func makeWrapper(prog *Program, sel selection, cr *creator) *Function {
 		recv = sig.Recv()
 	}
 
-	description = fmt.Sprintf("%s for %s", description, sel.Obj())
+	description = fmt.Sprintf("%s for %s", description, sel.obj)
 	if prog.mode&LogSource != 0 {
 		defer logStack("make %s to (%s)", description, recv.Type())()
 	}
@@ -79,10 +79,10 @@ func makeWrapper(prog *Program, sel selection, cr *creator) *Function {
 	fn.addSpilledParam(recv)
 	createParams(fn, start)
 
-	indices := sel.Index()
+	indices := sel.index
 
 	var v Value = fn.Locals[0] // spilled receiver
-	if isPointer(sel.Recv()) {
+	if isPointer(sel.recv) {
 		v = emitLoad(fn, v)
 
 		// For simple indirection wrappers, perform an informative nil-check:
@@ -92,13 +92,13 @@ func makeWrapper(prog *Program, sel selection, cr *creator) *Function {
 			c.Call.Value = &Builtin{
 				name: "ssa:wrapnilchk",
 				sig: types.NewSignature(nil,
-					types.NewTuple(anonVar(sel.Recv()), anonVar(tString), anonVar(tString)),
-					types.NewTuple(anonVar(sel.Recv())), false),
+					types.NewTuple(anonVar(sel.recv), anonVar(tString), anonVar(tString)),
+					types.NewTuple(anonVar(sel.recv)), false),
 			}
 			c.Call.Args = []Value{
 				v,
-				stringConst(deref(sel.Recv()).String()),
-				stringConst(sel.Obj().Name()),
+				stringConst(deref(sel.recv).String()),
+				stringConst(sel.obj.Name()),
 			}
 			c.setType(v.Type())
 			v = fn.emit(&c)
@@ -234,11 +234,11 @@ func makeBound(prog *Program, obj *types.Func, cr *creator) *Function {
 // -- thunks -----------------------------------------------------------
 
 // makeThunk returns a thunk, a synthetic function that delegates to a
-// concrete or interface method denoted by sel.Obj().  The resulting
+// concrete or interface method denoted by sel.obj.  The resulting
 // function has no receiver, but has an additional (first) regular
 // parameter.
 //
-// Precondition: sel.Kind() == types.MethodExpr.
+// Precondition: sel.kind == types.MethodExpr.
 //
 //	type T int          or:  type T interface { meth() }
 //	func (t T) meth()
@@ -255,19 +255,19 @@ func makeBound(prog *Program, obj *types.Func, cr *creator) *Function {
 // than inlining the stub.
 //
 // EXCLUSIVE_LOCKS_ACQUIRED(meth.Prog.methodsMu)
-func makeThunk(prog *Program, sel selection, cr *creator) *Function {
-	if sel.Kind() != types.MethodExpr {
+func makeThunk(prog *Program, sel *selection, cr *creator) *Function {
+	if sel.kind != types.MethodExpr {
 		panic(sel)
 	}
 
-	// Canonicalize sel.Recv() to avoid constructing duplicate thunks.
-	canonRecv := prog.canon.Type(sel.Recv())
+	// Canonicalize sel.recv to avoid constructing duplicate thunks.
+	canonRecv := prog.canon.Type(sel.recv)
 	key := selectionKey{
-		kind:     sel.Kind(),
+		kind:     sel.kind,
 		recv:     canonRecv,
-		obj:      sel.Obj(),
-		index:    fmt.Sprint(sel.Index()),
-		indirect: sel.Indirect(),
+		obj:      sel.obj,
+		index:    fmt.Sprint(sel.index),
+		indirect: sel.indirect,
 	}
 
 	prog.methodsMu.Lock()
@@ -303,9 +303,10 @@ type boundsKey struct {
 	inst *typeList    // canonical type instantiation list.
 }
 
-// methodExpr is an copy of a *types.Selection.
-// This exists as there is no way to create MethodExpr's for an instantiation.
-type methodExpr struct {
+// A local version of *types.Selection.
+// Needed for some additional control, such as creating a MethodExpr for an instantiation.
+type selection struct {
+	kind     types.SelectionKind
 	recv     types.Type
 	typ      types.Type
 	obj      types.Object
@@ -313,33 +314,13 @@ type methodExpr struct {
 	indirect bool
 }
 
-func (*methodExpr) Kind() types.SelectionKind { return types.MethodExpr }
-func (m *methodExpr) Type() types.Type        { return m.typ }
-func (m *methodExpr) Recv() types.Type        { return m.recv }
-func (m *methodExpr) Obj() types.Object       { return m.obj }
-func (m *methodExpr) Index() []int            { return m.index }
-func (m *methodExpr) Indirect() bool          { return m.indirect }
-
-// create MethodExpr from a MethodValue.
-func toMethodExpr(mv *types.Selection) *methodExpr {
-	if mv.Kind() != types.MethodVal {
-		panic(mv)
+func toSelection(sel *types.Selection) *selection {
+	return &selection{
+		kind:     sel.Kind(),
+		recv:     sel.Recv(),
+		typ:      sel.Type(),
+		obj:      sel.Obj(),
+		index:    sel.Index(),
+		indirect: sel.Indirect(),
 	}
-	return &methodExpr{
-		recv:     mv.Recv(),
-		typ:      recvAsFirstArg(mv.Type().(*types.Signature)),
-		obj:      mv.Obj(),
-		index:    mv.Index(),
-		indirect: mv.Indirect(),
-	}
-}
-
-// generalization of a *types.Selection and a methodExpr.
-type selection interface {
-	Kind() types.SelectionKind
-	Type() types.Type
-	Recv() types.Type
-	Obj() types.Object
-	Index() []int
-	Indirect() bool
 }
