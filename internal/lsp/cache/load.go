@@ -204,18 +204,28 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...interf
 		}
 	}
 
+	var loadedIDs []PackageID
+	for id := range updates {
+		loadedIDs = append(loadedIDs, id)
+	}
+
 	s.mu.Lock()
+
+	// invalidate the reverse transitive closure of packages that have changed.
+	invalidatedPackages := s.meta.reverseTransitiveClosure(true, loadedIDs...)
 	s.meta = s.meta.Clone(updates)
+
 	// Invalidate any packages we may have associated with this metadata.
 	//
-	// TODO(rfindley): if we didn't already invalidate these in snapshot.clone,
-	// shouldn't we invalidate the reverse transitive closure?
-	for _, m := range updates {
+	// TODO(rfindley): this should not be necessary, as we should have already
+	// invalidated in snapshot.clone.
+	for id := range invalidatedPackages {
 		for _, mode := range []source.ParseMode{source.ParseHeader, source.ParseExported, source.ParseFull} {
-			key := packageKey{mode, m.ID}
+			key := packageKey{mode, id}
 			delete(s.packages, key)
 		}
 	}
+
 	s.workspacePackages = computeWorkspacePackagesLocked(s, s.meta)
 	s.dumpWorkspace("load")
 	s.mu.Unlock()
@@ -253,7 +263,7 @@ func (m *moduleErrorMap) Error() string {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "%d modules have errors:\n", len(paths))
 	for _, path := range paths {
-		fmt.Fprintf(&buf, "\t%s", m.errs[path][0].Msg)
+		fmt.Fprintf(&buf, "\t%s:%s\n", path, m.errs[path][0].Msg)
 	}
 
 	return buf.String()
@@ -444,24 +454,42 @@ func getWorkspaceDir(ctx context.Context, h *memoize.Handle, g *memoize.Generati
 // metadata exists for all dependencies.
 func computeMetadataUpdates(ctx context.Context, g *metadataGraph, pkgPath PackagePath, pkg *packages.Package, cfg *packages.Config, query []string, updates map[PackageID]*KnownMetadata, path []PackageID) error {
 	id := PackageID(pkg.ID)
-	if new := updates[id]; new != nil {
-		return nil
-	}
 	if source.IsCommandLineArguments(pkg.ID) {
 		suffix := ":" + strings.Join(query, ",")
 		id = PackageID(string(id) + suffix)
 		pkgPath = PackagePath(string(pkgPath) + suffix)
 	}
+
+	// If we have valid metadata for this package, don't update. This minimizes
+	// the amount of subsequent invalidation.
+	//
+	// TODO(rfindley): perform a sanity check that metadata matches here. If not,
+	// we have an invalidation bug elsewhere.
+	if existing := g.metadata[id]; existing != nil && existing.Valid {
+		return nil
+	}
+
 	if _, ok := updates[id]; ok {
 		// If we've already seen this dependency, there may be an import cycle, or
 		// we may have reached the same package transitively via distinct paths.
 		// Check the path to confirm.
+
+		// TODO(rfindley): this doesn't look right. Any single piece of new
+		// metadata could theoretically introduce import cycles in the metadata
+		// graph. What's the point of this limited check here (and is it even
+		// possible to get an import cycle in data from go/packages)? Consider
+		// simply returning, so that this function need not return an error.
+		//
+		// We should consider doing a more complete guard against import cycles
+		// elsewhere.
 		for _, prev := range path {
 			if prev == id {
 				return fmt.Errorf("import cycle detected: %q", id)
 			}
 		}
+		return nil
 	}
+
 	// Recreate the metadata rather than reusing it to avoid locking.
 	m := &KnownMetadata{
 		Metadata: &Metadata{
@@ -504,6 +532,14 @@ func computeMetadataUpdates(ctx context.Context, g *metadataGraph, pkgPath Packa
 	}
 
 	for importPath, importPkg := range pkg.Imports {
+		// TODO(rfindley): in rare cases it is possible that the import package
+		// path is not the same as the package path of the import. That is to say
+		// (quoting adonovan):
+		// "The importPath string is the path by which one package is imported from
+		// another, but that needn't be the same as its internal name (sometimes
+		// called the "package path") used to prefix its linker symbols"
+		//
+		// We should not set this package path on the metadata of the dep.
 		importPkgPath := PackagePath(importPath)
 		importID := PackageID(importPkg.ID)
 
@@ -517,10 +553,8 @@ func computeMetadataUpdates(ctx context.Context, g *metadataGraph, pkgPath Packa
 			m.MissingDeps[importPkgPath] = struct{}{}
 			continue
 		}
-		if noValidMetadataForID(g, importID) {
-			if err := computeMetadataUpdates(ctx, g, importPkgPath, importPkg, cfg, query, updates, append(path, id)); err != nil {
-				event.Error(ctx, "error in dependency", err)
-			}
+		if err := computeMetadataUpdates(ctx, g, importPkgPath, importPkg, cfg, query, updates, append(path, id)); err != nil {
+			event.Error(ctx, "error in dependency", err)
 		}
 	}
 
