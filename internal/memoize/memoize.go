@@ -31,27 +31,15 @@ var (
 // Store binds keys to functions, returning handles that can be used to access
 // the functions results.
 type Store struct {
-	mu sync.Mutex
-	// handles is the set of values stored.
-	handles map[interface{}]*Handle
-
-	// generations is the set of generations live in this store.
-	generations map[*Generation]struct{}
+	handlesMu sync.Mutex // lock ordering: Store.handlesMu before Handle.mu
+	handles   map[interface{}]*Handle
 }
 
 // Generation creates a new Generation associated with s. Destroy must be
 // called on the returned Generation once it is no longer in use. name is
 // for debugging purposes only.
 func (s *Store) Generation(name string) *Generation {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.handles == nil {
-		s.handles = map[interface{}]*Handle{}
-		s.generations = map[*Generation]struct{}{}
-	}
-	g := &Generation{store: s, name: name}
-	s.generations[g] = struct{}{}
-	return g
+	return &Generation{store: s, name: name}
 }
 
 // A Generation is a logical point in time of the cache life-cycle. Cache
@@ -81,22 +69,21 @@ func (g *Generation) Destroy(destroyedBy string) {
 		panic("Destroy on generation " + g.name + " already destroyed by " + prevDestroyedBy)
 	}
 
-	g.store.mu.Lock()
-	defer g.store.mu.Unlock()
-	for _, e := range g.store.handles {
-		if !e.trackGenerations {
+	g.store.handlesMu.Lock()
+	defer g.store.handlesMu.Unlock()
+	for _, h := range g.store.handles {
+		if !h.trackGenerations {
 			continue
 		}
-		e.mu.Lock()
-		if _, ok := e.generations[g]; ok {
-			delete(e.generations, g) // delete even if it's dead, in case of dangling references to the entry.
-			if len(e.generations) == 0 {
-				e.destroy(g.store)
+		h.mu.Lock()
+		if _, ok := h.generations[g]; ok {
+			delete(h.generations, g) // delete even if it's dead, in case of dangling references to the entry.
+			if len(h.generations) == 0 {
+				h.destroy(g.store)
 			}
 		}
-		e.mu.Unlock()
+		h.mu.Unlock()
 	}
-	delete(g.store.generations, g)
 }
 
 // Acquire creates a new reference to g, and returns a func to release that
@@ -120,6 +107,12 @@ type Function func(ctx context.Context, arg Arg) interface{}
 
 type state int
 
+// TODO(rfindley): remove stateDestroyed; Handles should not need to know
+// whether or not they have been destroyed.
+//
+// TODO(rfindley): also consider removing stateIdle. Why create a handle if you
+// aren't certain you're going to need its result? And if you know you need its
+// result, why wait to begin computing it?
 const (
 	stateIdle = iota
 	stateRunning
@@ -139,9 +132,15 @@ const (
 // they decrement waiters. If it drops to zero, the inner context is cancelled,
 // computation is abandoned, and state resets to idle to start the process over
 // again.
+//
+// Handles may be tracked by generations, or directly reference counted, as
+// determined by the trackGenerations field. See the field comments for more
+// information about the differences between these two forms.
+//
+// TODO(rfindley): eliminate generational handles.
 type Handle struct {
 	key interface{}
-	mu  sync.Mutex
+	mu  sync.Mutex // lock ordering: Store.handlesMu before Handle.mu
 
 	// generations is the set of generations in which this handle is valid.
 	generations map[*Generation]struct{}
@@ -159,6 +158,11 @@ type Handle struct {
 	value interface{}
 	// cleanup, if non-nil, is used to perform any necessary clean-up on values
 	// produced by function.
+	//
+	// cleanup is never set for reference counted handles.
+	//
+	// TODO(rfindley): remove this field once workspace folders no longer need to
+	// be tracked.
 	cleanup func(interface{})
 
 	// If trackGenerations is set, this handle tracks generations in which it
@@ -190,19 +194,27 @@ func (g *Generation) Bind(key interface{}, function Function, cleanup func(inter
 //
 // As in opposite to Bind it returns a release callback which has to be called
 // once this reference to handle is not needed anymore.
-func (g *Generation) GetHandle(key interface{}, function Function, cleanup func(interface{})) (*Handle, func()) {
-	handle := g.getHandle(key, function, cleanup, false)
+func (g *Generation) GetHandle(key interface{}, function Function) (*Handle, func()) {
+	h := g.getHandle(key, function, nil, false)
 	store := g.store
 	release := func() {
-		store.mu.Lock()
-		defer store.mu.Unlock()
+		// Acquire store.handlesMu before mutating refCounter
+		store.handlesMu.Lock()
+		defer store.handlesMu.Unlock()
 
-		handle.refCounter--
-		if handle.refCounter == 0 {
-			handle.destroy(store)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+
+		h.refCounter--
+		if h.refCounter == 0 {
+			// Don't call h.destroy: for reference counted handles we can't know when
+			// they are no longer reachable from runnable goroutines. For example,
+			// gopls could have a current operation that is using a packageHandle.
+			// Destroying the handle here would cause that operation to hang.
+			delete(store.handles, h.key)
 		}
 	}
-	return handle, release
+	return h, release
 }
 
 func (g *Generation) getHandle(key interface{}, function Function, cleanup func(interface{}), trackGenerations bool) *Handle {
@@ -214,8 +226,8 @@ func (g *Generation) getHandle(key interface{}, function Function, cleanup func(
 	if atomic.LoadUint32(&g.destroyed) != 0 {
 		panic("operation on generation " + g.name + " destroyed by " + g.destroyedBy)
 	}
-	g.store.mu.Lock()
-	defer g.store.mu.Unlock()
+	g.store.handlesMu.Lock()
+	defer g.store.handlesMu.Unlock()
 	h, ok := g.store.handles[key]
 	if !ok {
 		h = &Handle{
@@ -227,6 +239,10 @@ func (g *Generation) getHandle(key interface{}, function Function, cleanup func(
 		if trackGenerations {
 			h.generations = make(map[*Generation]struct{}, 1)
 		}
+
+		if g.store.handles == nil {
+			g.store.handles = map[interface{}]*Handle{}
+		}
 		g.store.handles[key] = h
 	}
 
@@ -236,10 +252,11 @@ func (g *Generation) getHandle(key interface{}, function Function, cleanup func(
 
 // Stats returns the number of each type of value in the store.
 func (s *Store) Stats() map[reflect.Type]int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	result := map[reflect.Type]int{}
+
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
+
 	for k := range s.handles {
 		result[reflect.TypeOf(k)]++
 	}
@@ -249,16 +266,16 @@ func (s *Store) Stats() map[reflect.Type]int {
 // DebugOnlyIterate iterates through all live cache entries and calls f on them.
 // It should only be used for debugging purposes.
 func (s *Store) DebugOnlyIterate(f func(k, v interface{})) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
 
-	for k, e := range s.handles {
+	for k, h := range s.handles {
 		var v interface{}
-		e.mu.Lock()
-		if e.state == stateCompleted {
-			v = e.value
+		h.mu.Lock()
+		if h.state == stateCompleted {
+			v = h.value
 		}
-		e.mu.Unlock()
+		h.mu.Unlock()
 		if v == nil {
 			continue
 		}
@@ -278,6 +295,7 @@ func (g *Generation) Inherit(h *Handle) {
 	h.incrementRef(g)
 }
 
+// destroy marks h as destroyed. h.mu and store.handlesMu must be held.
 func (h *Handle) destroy(store *Store) {
 	h.state = stateDestroyed
 	if h.cleanup != nil && h.value != nil {
@@ -409,6 +427,12 @@ func (h *Handle) run(ctx context.Context, g *Generation, arg Arg) (interface{}, 
 				}
 				return
 			}
+
+			if h.cleanup != nil && h.value != nil {
+				// Clean up before overwriting an existing value.
+				h.cleanup(h.value)
+			}
+
 			// At this point v will be cleaned up whenever h is destroyed.
 			h.value = v
 			h.function = nil
