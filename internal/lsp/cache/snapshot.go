@@ -89,7 +89,7 @@ type snapshot struct {
 
 	// packages maps a packageKey to a set of packageHandles to which that file belongs.
 	// It may be invalidated when a file's content changes.
-	packages map[packageKey]*packageHandle
+	packages packagesMap
 
 	// actions maps an actionkey to its actionHandle.
 	actions map[actionKey]*actionHandle
@@ -115,8 +115,11 @@ type snapshot struct {
 	modTidyHandles map[span.URI]*modTidyHandle
 	modWhyHandles  map[span.URI]*modWhyHandle
 
-	workspace          *workspace
-	workspaceDirHandle *memoize.Handle
+	workspace *workspace // (not guarded by mu)
+
+	// The cached result of makeWorkspaceDir, created on demand and deleted by Snapshot.Destroy.
+	workspaceDir    string
+	workspaceDirErr error
 
 	// knownSubdirs is the set of subdirectories in the workspace, used to
 	// create glob patterns for file watching.
@@ -140,9 +143,16 @@ type actionKey struct {
 
 func (s *snapshot) Destroy(destroyedBy string) {
 	s.generation.Destroy(destroyedBy)
+	s.packages.Destroy()
 	s.files.Destroy()
 	s.goFiles.Destroy()
 	s.parseKeysByURI.Destroy()
+
+	if s.workspaceDir != "" {
+		if err := os.RemoveAll(s.workspaceDir); err != nil {
+			event.Error(context.Background(), "cleaning workspace dir", err)
+		}
+	}
 }
 
 func (s *snapshot) ID() uint64 {
@@ -711,16 +721,17 @@ func (s *snapshot) getImportedBy(id PackageID) []PackageID {
 	return s.meta.importedBy[id]
 }
 
-func (s *snapshot) addPackageHandle(ph *packageHandle) *packageHandle {
+func (s *snapshot) addPackageHandle(ph *packageHandle, release func()) *packageHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// If the package handle has already been cached,
 	// return the cached handle instead of overriding it.
-	if ph, ok := s.packages[ph.packageKey()]; ok {
-		return ph
+	if result, ok := s.packages.Get(ph.packageKey()); ok {
+		release()
+		return result
 	}
-	s.packages[ph.packageKey()] = ph
+	s.packages.Set(ph.packageKey(), ph, release)
 	return ph
 }
 
@@ -1090,10 +1101,10 @@ func (s *snapshot) CachedImportPaths(ctx context.Context) (map[string]source.Pac
 	defer s.mu.Unlock()
 
 	results := map[string]source.Package{}
-	for _, ph := range s.packages {
+	s.packages.Range(func(key packageKey, ph *packageHandle) {
 		cachedPkg, err := ph.cached(s.generation)
 		if err != nil {
-			continue
+			return
 		}
 		for importPath, newPkg := range cachedPkg.imports {
 			if oldPkg, ok := results[string(importPath)]; ok {
@@ -1105,7 +1116,7 @@ func (s *snapshot) CachedImportPaths(ctx context.Context) (map[string]source.Pac
 				results[string(importPath)] = newPkg
 			}
 		}
-	}
+	})
 	return results, nil
 }
 
@@ -1134,7 +1145,8 @@ func (s *snapshot) getPackage(id PackageID, mode source.ParseMode) *packageHandl
 		id:   id,
 		mode: mode,
 	}
-	return s.packages[key]
+	ph, _ := s.packages.Get(key)
+	return ph
 }
 
 func (s *snapshot) getSymbolHandle(uri span.URI) *symbolHandle {
@@ -1690,7 +1702,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		builtin:           s.builtin,
 		initializeOnce:    s.initializeOnce,
 		initializedErr:    s.initializedErr,
-		packages:          make(map[packageKey]*packageHandle, len(s.packages)),
+		packages:          s.packages.Clone(),
 		actions:           make(map[actionKey]*actionHandle, len(s.actions)),
 		files:             s.files.Clone(),
 		goFiles:           s.goFiles.Clone(),
@@ -1704,11 +1716,6 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		modWhyHandles:     make(map[span.URI]*modWhyHandle, len(s.modWhyHandles)),
 		knownSubdirs:      make(map[span.URI]struct{}, len(s.knownSubdirs)),
 		workspace:         newWorkspace,
-	}
-
-	if !workspaceChanged && s.workspaceDirHandle != nil {
-		result.workspaceDirHandle = s.workspaceDirHandle
-		newGen.Inherit(s.workspaceDirHandle)
 	}
 
 	// Copy all of the FileHandles.
@@ -1894,13 +1901,12 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		addRevDeps(id, invalidateMetadata)
 	}
 
-	// Copy the package type information.
-	for k, v := range s.packages {
-		if _, ok := idsToInvalidate[k.id]; ok {
-			continue
+	// Delete invalidated package type information.
+	for id := range idsToInvalidate {
+		for _, mode := range source.AllParseModes {
+			key := packageKey{mode, id}
+			result.packages.Delete(key)
 		}
-		newGen.Inherit(v.handle)
-		result.packages[k] = v
 	}
 
 	// Copy the package analysis information.
