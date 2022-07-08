@@ -16,6 +16,7 @@ import (
 	"golang.org/x/tools/internal/imports"
 	"golang.org/x/tools/internal/lsp/progress"
 	"golang.org/x/tools/internal/lsp/source"
+	"golang.org/x/tools/internal/persistent"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/xcontext"
 )
@@ -225,26 +226,28 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 		},
 	}
 	v.snapshot = &snapshot{
-		id:                snapshotID,
-		view:              v,
-		backgroundCtx:     backgroundCtx,
-		cancel:            cancel,
-		initializeOnce:    &sync.Once{},
-		generation:        s.cache.store.Generation(generationName(v, 0)),
-		packages:          newPackagesMap(),
-		meta:              &metadataGraph{},
-		files:             newFilesMap(),
-		goFiles:           newGoFilesMap(),
-		parseKeysByURI:    newParseKeysByURIMap(),
-		symbols:           make(map[span.URI]*symbolHandle),
-		actions:           make(map[actionKey]*actionHandle),
-		workspacePackages: make(map[PackageID]PackagePath),
-		unloadableFiles:   make(map[span.URI]struct{}),
-		parseModHandles:   make(map[span.URI]*parseModHandle),
-		parseWorkHandles:  make(map[span.URI]*parseWorkHandle),
-		modTidyHandles:    make(map[span.URI]*modTidyHandle),
-		modWhyHandles:     make(map[span.URI]*modWhyHandle),
-		workspace:         workspace,
+		id:                   snapshotID,
+		view:                 v,
+		backgroundCtx:        backgroundCtx,
+		cancel:               cancel,
+		initializeOnce:       &sync.Once{},
+		generation:           s.cache.store.Generation(generationName(v, 0)),
+		packages:             newPackagesMap(),
+		meta:                 &metadataGraph{},
+		files:                newFilesMap(),
+		isActivePackageCache: newIsActivePackageCacheMap(),
+		goFiles:              newGoFilesMap(),
+		parseKeysByURI:       newParseKeysByURIMap(),
+		symbolizeHandles:     persistent.NewMap(uriLessInterface),
+		actions:              persistent.NewMap(actionKeyLessInterface),
+		workspacePackages:    make(map[PackageID]PackagePath),
+		unloadableFiles:      make(map[span.URI]struct{}),
+		parseModHandles:      persistent.NewMap(uriLessInterface),
+		parseWorkHandles:     persistent.NewMap(uriLessInterface),
+		modTidyHandles:       persistent.NewMap(uriLessInterface),
+		modWhyHandles:        persistent.NewMap(uriLessInterface),
+		knownSubdirs:         newKnownDirsSet(),
+		workspace:            workspace,
 	}
 
 	// Initialize the view without blocking.
@@ -537,9 +540,11 @@ func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes 
 		snapshots = append(snapshots, snapshot)
 	}
 	knownDirs := knownDirectories(ctx, snapshots)
+	defer knownDirs.Destroy()
+
 	var result []source.FileModification
 	for _, c := range changes {
-		if _, ok := knownDirs[c.URI]; !ok {
+		if !knownDirs.Contains(c.URI) {
 			result = append(result, c)
 			continue
 		}
@@ -561,16 +566,17 @@ func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes 
 
 // knownDirectories returns all of the directories known to the given
 // snapshots, including workspace directories and their subdirectories.
-func knownDirectories(ctx context.Context, snapshots []*snapshot) map[span.URI]struct{} {
-	result := map[span.URI]struct{}{}
+// It is responsibility of the caller to destroy the returned set.
+func knownDirectories(ctx context.Context, snapshots []*snapshot) knownDirsSet {
+	result := newKnownDirsSet()
 	for _, snapshot := range snapshots {
 		dirs := snapshot.workspace.dirs(ctx, snapshot)
 		for _, dir := range dirs {
-			result[dir] = struct{}{}
+			result.Insert(dir)
 		}
-		for _, dir := range snapshot.getKnownSubdirs(dirs) {
-			result[dir] = struct{}{}
-		}
+		knownSubdirs := snapshot.getKnownSubdirs(dirs)
+		result.SetAll(knownSubdirs)
+		knownSubdirs.Destroy()
 	}
 	return result
 }

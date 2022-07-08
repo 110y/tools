@@ -220,7 +220,7 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...interf
 	// invalidate the reverse transitive closure of packages that have changed.
 	invalidatedPackages := s.meta.reverseTransitiveClosure(true, loadedIDs...)
 	s.meta = s.meta.Clone(updates)
-
+	s.resetIsActivePackageLocked()
 	// Invalidate any packages we may have associated with this metadata.
 	//
 	// TODO(rfindley): this should not be necessary, as we should have already
@@ -359,7 +359,7 @@ func (s *snapshot) applyCriticalErrorToFiles(ctx context.Context, msg string, fi
 		switch s.view.FileKind(fh) {
 		case source.Go:
 			if pgf, err := s.ParseGo(ctx, fh, source.ParseHeader); err == nil {
-				pkgDecl := span.NewRange(s.FileSet(), pgf.File.Package, pgf.File.Name.End())
+				pkgDecl := span.NewRange(pgf.Tok, pgf.File.Package, pgf.File.Name.End())
 				if spn, err := pkgDecl.Span(); err == nil {
 					rng, _ = pgf.Mapper.Range(spn)
 				}

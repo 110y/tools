@@ -36,6 +36,7 @@ import (
 	"golang.org/x/tools/internal/lsp/source"
 	"golang.org/x/tools/internal/memoize"
 	"golang.org/x/tools/internal/packagesinternal"
+	"golang.org/x/tools/internal/persistent"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/typesinternal"
 )
@@ -84,15 +85,21 @@ type snapshot struct {
 	goFiles        goFilesMap
 	parseKeysByURI parseKeysByURIMap
 
-	// TODO(rfindley): consider merging this with files to reduce burden on clone.
-	symbols map[span.URI]*symbolHandle
+	// symbolizeHandles maps each file URI to a handle for the future
+	// result of computing the symbols declared in that file.
+	symbolizeHandles *persistent.Map // from span.URI to *memoize.Handle
 
-	// packages maps a packageKey to a set of packageHandles to which that file belongs.
+	// packages maps a packageKey to a *packageHandle.
 	// It may be invalidated when a file's content changes.
 	packages packagesMap
 
-	// actions maps an actionkey to its actionHandle.
-	actions map[actionKey]*actionHandle
+	// isActivePackageCache maps package ID to the cached value if it is active or not.
+	// It may be invalidated when metadata changes or a new file is opened or closed.
+	isActivePackageCache isActivePackageCacheMap
+
+	// actions maps an actionKey to the handle for the future
+	// result of execution an analysis pass on a package.
+	actions *persistent.Map // from actionKey to *actionHandle
 
 	// workspacePackages contains the workspace's packages, which are loaded
 	// when the view is created.
@@ -103,17 +110,17 @@ type snapshot struct {
 
 	// parseModHandles keeps track of any parseModHandles for the snapshot.
 	// The handles need not refer to only the view's go.mod file.
-	parseModHandles map[span.URI]*parseModHandle
+	parseModHandles *persistent.Map // from span.URI to *memoize.Handle
 
 	// parseWorkHandles keeps track of any parseWorkHandles for the snapshot.
 	// The handles need not refer to only the view's go.work file.
-	parseWorkHandles map[span.URI]*parseWorkHandle
+	parseWorkHandles *persistent.Map // from span.URI to *memoize.Handle
 
 	// Preserve go.mod-related handles to avoid garbage-collecting the results
 	// of various calls to the go command. The handles need not refer to only
 	// the view's go.mod file.
-	modTidyHandles map[span.URI]*modTidyHandle
-	modWhyHandles  map[span.URI]*modWhyHandle
+	modTidyHandles *persistent.Map // from span.URI to *memoize.Handle
+	modWhyHandles  *persistent.Map // from span.URI to *memoize.Handle
 
 	workspace *workspace // (not guarded by mu)
 
@@ -123,7 +130,7 @@ type snapshot struct {
 
 	// knownSubdirs is the set of subdirectories in the workspace, used to
 	// create glob patterns for file watching.
-	knownSubdirs             map[span.URI]struct{}
+	knownSubdirs             knownDirsSet
 	knownSubdirsPatternCache string
 	// unprocessedSubdirChanges are any changes that might affect the set of
 	// subdirectories in the workspace. They are not reflected to knownSubdirs
@@ -144,9 +151,17 @@ type actionKey struct {
 func (s *snapshot) Destroy(destroyedBy string) {
 	s.generation.Destroy(destroyedBy)
 	s.packages.Destroy()
+	s.isActivePackageCache.Destroy()
+	s.actions.Destroy()
 	s.files.Destroy()
 	s.goFiles.Destroy()
 	s.parseKeysByURI.Destroy()
+	s.knownSubdirs.Destroy()
+	s.symbolizeHandles.Destroy()
+	s.parseModHandles.Destroy()
+	s.parseWorkHandles.Destroy()
+	s.modTidyHandles.Destroy()
+	s.modWhyHandles.Destroy()
 
 	if s.workspaceDir != "" {
 		if err := os.RemoveAll(s.workspaceDir); err != nil {
@@ -691,30 +706,6 @@ func (s *snapshot) addGoFile(key parseKey, pgh *parseGoHandle, release func()) *
 	return pgh
 }
 
-func (s *snapshot) getParseModHandle(uri span.URI) *parseModHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.parseModHandles[uri]
-}
-
-func (s *snapshot) getParseWorkHandle(uri span.URI) *parseWorkHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.parseWorkHandles[uri]
-}
-
-func (s *snapshot) getModWhyHandle(uri span.URI) *modWhyHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.modWhyHandles[uri]
-}
-
-func (s *snapshot) getModTidyHandle(uri span.URI) *modTidyHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.modTidyHandles[uri]
-}
-
 func (s *snapshot) getImportedBy(id PackageID) []PackageID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -753,24 +744,20 @@ func (s *snapshot) activePackageIDs() (ids []PackageID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	seen := make(map[PackageID]bool)
 	for id := range s.workspacePackages {
-		if s.isActiveLocked(id, seen) {
+		if s.isActiveLocked(id) {
 			ids = append(ids, id)
 		}
 	}
 	return ids
 }
 
-func (s *snapshot) isActiveLocked(id PackageID, seen map[PackageID]bool) (active bool) {
-	if seen == nil {
-		seen = make(map[PackageID]bool)
-	}
-	if seen, ok := seen[id]; ok {
+func (s *snapshot) isActiveLocked(id PackageID) (active bool) {
+	if seen, ok := s.isActivePackageCache.Get(id); ok {
 		return seen
 	}
 	defer func() {
-		seen[id] = active
+		s.isActivePackageCache.Set(id, active)
 	}()
 	m, ok := s.meta.metadata[id]
 	if !ok {
@@ -784,11 +771,16 @@ func (s *snapshot) isActiveLocked(id PackageID, seen map[PackageID]bool) (active
 	// TODO(rfindley): it looks incorrect that we don't also check GoFiles here.
 	// If a CGo file is open, we want to consider the package active.
 	for _, dep := range m.Deps {
-		if s.isActiveLocked(dep, seen) {
+		if s.isActiveLocked(dep) {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *snapshot) resetIsActivePackageLocked() {
+	s.isActivePackageCache.Destroy()
+	s.isActivePackageCache = newIsActivePackageCacheMap()
 }
 
 const fileExtensions = "go,mod,sum,work"
@@ -842,17 +834,20 @@ func (s *snapshot) getKnownSubdirsPattern(wsDirs []span.URI) string {
 	// It may change list of known subdirs and therefore invalidate the cache.
 	s.applyKnownSubdirsChangesLocked(wsDirs)
 
-	if len(s.knownSubdirs) == 0 {
-		return ""
-	}
-
 	if s.knownSubdirsPatternCache == "" {
-		dirNames := make([]string, 0, len(s.knownSubdirs))
-		for uri := range s.knownSubdirs {
-			dirNames = append(dirNames, uri.Filename())
+		var builder strings.Builder
+		s.knownSubdirs.Range(func(uri span.URI) {
+			if builder.Len() == 0 {
+				builder.WriteString("{")
+			} else {
+				builder.WriteString(",")
+			}
+			builder.WriteString(uri.Filename())
+		})
+		if builder.Len() > 0 {
+			builder.WriteString("}")
+			s.knownSubdirsPatternCache = builder.String()
 		}
-		sort.Strings(dirNames)
-		s.knownSubdirsPatternCache = fmt.Sprintf("{%s}", strings.Join(dirNames, ","))
 	}
 
 	return s.knownSubdirsPatternCache
@@ -867,14 +862,15 @@ func (s *snapshot) collectAllKnownSubdirs(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.knownSubdirs = map[span.URI]struct{}{}
+	s.knownSubdirs.Destroy()
+	s.knownSubdirs = newKnownDirsSet()
 	s.knownSubdirsPatternCache = ""
 	s.files.Range(func(uri span.URI, fh source.VersionedFileHandle) {
 		s.addKnownSubdirLocked(uri, dirs)
 	})
 }
 
-func (s *snapshot) getKnownSubdirs(wsDirs []span.URI) []span.URI {
+func (s *snapshot) getKnownSubdirs(wsDirs []span.URI) knownDirsSet {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -882,11 +878,7 @@ func (s *snapshot) getKnownSubdirs(wsDirs []span.URI) []span.URI {
 	// subdirectories.
 	s.applyKnownSubdirsChangesLocked(wsDirs)
 
-	result := make([]span.URI, 0, len(s.knownSubdirs))
-	for uri := range s.knownSubdirs {
-		result = append(result, uri)
-	}
-	return result
+	return s.knownSubdirs.Clone()
 }
 
 func (s *snapshot) applyKnownSubdirsChangesLocked(wsDirs []span.URI) {
@@ -907,7 +899,7 @@ func (s *snapshot) addKnownSubdirLocked(uri span.URI, dirs []span.URI) {
 	dir := filepath.Dir(uri.Filename())
 	// First check if the directory is already known, because then we can
 	// return early.
-	if _, ok := s.knownSubdirs[span.URIFromPath(dir)]; ok {
+	if s.knownSubdirs.Contains(span.URIFromPath(dir)) {
 		return
 	}
 	var matched span.URI
@@ -926,10 +918,10 @@ func (s *snapshot) addKnownSubdirLocked(uri span.URI, dirs []span.URI) {
 			break
 		}
 		uri := span.URIFromPath(dir)
-		if _, ok := s.knownSubdirs[uri]; ok {
+		if s.knownSubdirs.Contains(uri) {
 			break
 		}
-		s.knownSubdirs[uri] = struct{}{}
+		s.knownSubdirs.Insert(uri)
 		dir = filepath.Dir(dir)
 		s.knownSubdirsPatternCache = ""
 	}
@@ -939,11 +931,11 @@ func (s *snapshot) removeKnownSubdirLocked(uri span.URI) {
 	dir := filepath.Dir(uri.Filename())
 	for dir != "" {
 		uri := span.URIFromPath(dir)
-		if _, ok := s.knownSubdirs[uri]; !ok {
+		if !s.knownSubdirs.Contains(uri) {
 			break
 		}
 		if info, _ := os.Stat(dir); info == nil {
-			delete(s.knownSubdirs, uri)
+			s.knownSubdirs.Remove(uri)
 			s.knownSubdirsPatternCache = ""
 		}
 		dir = filepath.Dir(dir)
@@ -1029,12 +1021,12 @@ func (s *snapshot) Symbols(ctx context.Context) map[span.URI][]source.Symbol {
 		iolimit <- struct{}{} // acquire token
 		group.Go(func() error {
 			defer func() { <-iolimit }() // release token
-			v, err := s.buildSymbolHandle(ctx, f).handle.Get(ctx, s.generation, s)
+			symbols, err := s.symbolize(ctx, f)
 			if err != nil {
 				return err
 			}
 			resultMu.Lock()
-			result[uri] = v.(*symbolData).symbols
+			result[uri] = symbols
 			resultMu.Unlock()
 			return nil
 		})
@@ -1149,30 +1141,7 @@ func (s *snapshot) getPackage(id PackageID, mode source.ParseMode) *packageHandl
 	return ph
 }
 
-func (s *snapshot) getSymbolHandle(uri span.URI) *symbolHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.symbols[uri]
-}
-
-func (s *snapshot) addSymbolHandle(uri span.URI, sh *symbolHandle) *symbolHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// If the package handle has already been cached,
-	// return the cached handle instead of overriding it.
-	if sh, ok := s.symbols[uri]; ok {
-		return sh
-	}
-	s.symbols[uri] = sh
-	return sh
-}
-
 func (s *snapshot) getActionHandle(id PackageID, m source.ParseMode, a *analysis.Analyzer) *actionHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	key := actionKey{
 		pkg: packageKey{
 			id:   id,
@@ -1180,13 +1149,18 @@ func (s *snapshot) getActionHandle(id PackageID, m source.ParseMode, a *analysis
 		},
 		analyzer: a,
 	}
-	return s.actions[key]
-}
 
-func (s *snapshot) addActionHandle(ah *actionHandle) *actionHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	ah, ok := s.actions.Get(key)
+	if !ok {
+		return nil
+	}
+	return ah.(*actionHandle)
+}
+
+func (s *snapshot) addActionHandle(ah *actionHandle, release func()) *actionHandle {
 	key := actionKey{
 		analyzer: ah.analyzer,
 		pkg: packageKey{
@@ -1194,10 +1168,17 @@ func (s *snapshot) addActionHandle(ah *actionHandle) *actionHandle {
 			mode: ah.pkg.mode,
 		},
 	}
-	if ah, ok := s.actions[key]; ok {
-		return ah
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If another thread since cached a different handle,
+	// return it instead of overriding it.
+	if result, ok := s.actions.Get(key); ok {
+		release()
+		return result.(*actionHandle)
 	}
-	s.actions[key] = ah
+	s.actions.Set(key, ah, func(_, _ interface{}) { release() })
 	return ah
 }
 
@@ -1286,6 +1267,7 @@ func (s *snapshot) clearShouldLoad(scopes ...interface{}) {
 		}
 	}
 	s.meta = g.Clone(updates)
+	s.resetIsActivePackageLocked()
 }
 
 // noValidMetadataForURILocked reports whether there is any valid metadata for
@@ -1376,7 +1358,7 @@ func (s *snapshot) openFiles() []source.VersionedFileHandle {
 
 	var open []source.VersionedFileHandle
 	s.files.Range(func(uri span.URI, fh source.VersionedFileHandle) {
-		if s.isOpenLocked(fh.URI()) {
+		if isFileOpen(fh) {
 			open = append(open, fh)
 		}
 	})
@@ -1385,6 +1367,10 @@ func (s *snapshot) openFiles() []source.VersionedFileHandle {
 
 func (s *snapshot) isOpenLocked(uri span.URI) bool {
 	fh, _ := s.files.Get(uri)
+	return isFileOpen(fh)
+}
+
+func isFileOpen(fh source.VersionedFileHandle) bool {
 	_, open := fh.(*overlay)
 	return open
 }
@@ -1694,55 +1680,37 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	newGen := s.view.session.cache.store.Generation(generationName(s.view, s.id+1))
 	bgCtx, cancel := context.WithCancel(bgCtx)
 	result := &snapshot{
-		id:                s.id + 1,
-		generation:        newGen,
-		view:              s.view,
-		backgroundCtx:     bgCtx,
-		cancel:            cancel,
-		builtin:           s.builtin,
-		initializeOnce:    s.initializeOnce,
-		initializedErr:    s.initializedErr,
-		packages:          s.packages.Clone(),
-		actions:           make(map[actionKey]*actionHandle, len(s.actions)),
-		files:             s.files.Clone(),
-		goFiles:           s.goFiles.Clone(),
-		parseKeysByURI:    s.parseKeysByURI.Clone(),
-		symbols:           make(map[span.URI]*symbolHandle, len(s.symbols)),
-		workspacePackages: make(map[PackageID]PackagePath, len(s.workspacePackages)),
-		unloadableFiles:   make(map[span.URI]struct{}, len(s.unloadableFiles)),
-		parseModHandles:   make(map[span.URI]*parseModHandle, len(s.parseModHandles)),
-		parseWorkHandles:  make(map[span.URI]*parseWorkHandle, len(s.parseWorkHandles)),
-		modTidyHandles:    make(map[span.URI]*modTidyHandle, len(s.modTidyHandles)),
-		modWhyHandles:     make(map[span.URI]*modWhyHandle, len(s.modWhyHandles)),
-		knownSubdirs:      make(map[span.URI]struct{}, len(s.knownSubdirs)),
-		workspace:         newWorkspace,
-	}
-
-	// Copy all of the FileHandles.
-	for k, v := range s.symbols {
-		if change, ok := changes[k]; ok {
-			if change.exists {
-				result.symbols[k] = result.buildSymbolHandle(ctx, change.fileHandle)
-			}
-			continue
-		}
-		newGen.Inherit(v.handle)
-		result.symbols[k] = v
+		id:                   s.id + 1,
+		generation:           newGen,
+		view:                 s.view,
+		backgroundCtx:        bgCtx,
+		cancel:               cancel,
+		builtin:              s.builtin,
+		initializeOnce:       s.initializeOnce,
+		initializedErr:       s.initializedErr,
+		packages:             s.packages.Clone(),
+		isActivePackageCache: s.isActivePackageCache.Clone(),
+		actions:              s.actions.Clone(),
+		files:                s.files.Clone(),
+		goFiles:              s.goFiles.Clone(),
+		parseKeysByURI:       s.parseKeysByURI.Clone(),
+		symbolizeHandles:     s.symbolizeHandles.Clone(),
+		workspacePackages:    make(map[PackageID]PackagePath, len(s.workspacePackages)),
+		unloadableFiles:      make(map[span.URI]struct{}, len(s.unloadableFiles)),
+		parseModHandles:      s.parseModHandles.Clone(),
+		parseWorkHandles:     s.parseWorkHandles.Clone(),
+		modTidyHandles:       s.modTidyHandles.Clone(),
+		modWhyHandles:        s.modWhyHandles.Clone(),
+		knownSubdirs:         s.knownSubdirs.Clone(),
+		workspace:            newWorkspace,
 	}
 
 	// Copy the set of unloadable files.
 	for k, v := range s.unloadableFiles {
 		result.unloadableFiles[k] = v
 	}
-	// Copy all of the modHandles.
-	for k, v := range s.parseModHandles {
-		result.parseModHandles[k] = v
-	}
-	// Copy all of the parseWorkHandles.
-	for k, v := range s.parseWorkHandles {
-		result.parseWorkHandles[k] = v
-	}
 
+	// TODO(adonovan): merge loops over "changes".
 	for uri := range changes {
 		keys, ok := result.parseKeysByURI.Get(uri)
 		if ok {
@@ -1751,29 +1719,19 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 			}
 			result.parseKeysByURI.Delete(uri)
 		}
-	}
 
-	// Copy all of the go.mod-related handles. They may be invalidated later,
-	// so we inherit them at the end of the function.
-	for k, v := range s.modTidyHandles {
-		if _, ok := changes[k]; ok {
-			continue
-		}
-		result.modTidyHandles[k] = v
-	}
-	for k, v := range s.modWhyHandles {
-		if _, ok := changes[k]; ok {
-			continue
-		}
-		result.modWhyHandles[k] = v
+		// Invalidate go.mod-related handles.
+		result.modTidyHandles.Delete(uri)
+		result.modWhyHandles.Delete(uri)
+
+		// Invalidate handles for cached symbols.
+		result.symbolizeHandles.Delete(uri)
 	}
 
 	// Add all of the known subdirectories, but don't update them for the
 	// changed files. We need to rebuild the workspace module to know the
 	// true set of known subdirectories, but we don't want to do that in clone.
-	for k, v := range s.knownSubdirs {
-		result.knownSubdirs[k] = v
-	}
+	result.knownSubdirs = s.knownSubdirs.Clone()
 	result.knownSubdirsPatternCache = s.knownSubdirsPatternCache
 	for _, c := range changes {
 		result.unprocessedSubdirChanges = append(result.unprocessedSubdirChanges, c)
@@ -1834,17 +1792,16 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		// Invalidate the previous modTidyHandle if any of the files have been
 		// saved or if any of the metadata has been invalidated.
 		if invalidateMetadata || fileWasSaved(originalFH, change.fileHandle) {
-			// TODO(rstambler): Only delete mod handles for which the
-			// withoutURI is relevant.
-			for k := range s.modTidyHandles {
-				delete(result.modTidyHandles, k)
-			}
-			for k := range s.modWhyHandles {
-				delete(result.modWhyHandles, k)
-			}
+			// TODO(maybe): Only delete mod handles for
+			// which the withoutURI is relevant.
+			// Requires reverse-engineering the go command. (!)
+
+			result.modTidyHandles.Clear()
+			result.modWhyHandles.Clear()
 		}
-		delete(result.parseModHandles, uri)
-		delete(result.parseWorkHandles, uri)
+
+		result.parseModHandles.Delete(uri)
+		result.parseWorkHandles.Delete(uri)
 		// Handle the invalidated file; it may have new contents or not exist.
 		if !change.exists {
 			result.files.Delete(uri)
@@ -1909,13 +1866,17 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		}
 	}
 
-	// Copy the package analysis information.
-	for k, v := range s.actions {
-		if _, ok := idsToInvalidate[k.pkg.id]; ok {
-			continue
+	// Copy actions.
+	// TODO(adonovan): opt: avoid iteration over s.actions.
+	var actionsToDelete []actionKey
+	s.actions.Range(func(k, _ interface{}) {
+		key := k.(actionKey)
+		if _, ok := idsToInvalidate[key.pkg.id]; ok {
+			actionsToDelete = append(actionsToDelete, key)
 		}
-		newGen.Inherit(v.handle)
-		result.actions[k] = v
+	})
+	for _, key := range actionsToDelete {
+		result.actions.Delete(key)
 	}
 
 	// If the workspace mode has changed, we must delete all metadata, as it
@@ -1976,26 +1937,14 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		result.meta = s.meta
 	}
 
-	// Update workspace packages, if necessary.
+	// Update workspace and active packages, if necessary.
 	if result.meta != s.meta || anyFileOpenedOrClosed {
 		result.workspacePackages = computeWorkspacePackagesLocked(result, result.meta)
+		result.resetIsActivePackageLocked()
 	} else {
 		result.workspacePackages = s.workspacePackages
 	}
 
-	// Inherit all of the go.mod-related handles.
-	for _, v := range result.modTidyHandles {
-		newGen.Inherit(v.handle)
-	}
-	for _, v := range result.modWhyHandles {
-		newGen.Inherit(v.handle)
-	}
-	for _, v := range result.parseModHandles {
-		newGen.Inherit(v.handle)
-	}
-	for _, v := range result.parseWorkHandles {
-		newGen.Inherit(v.handle)
-	}
 	// Don't bother copying the importedBy graph,
 	// as it changes each time we update metadata.
 

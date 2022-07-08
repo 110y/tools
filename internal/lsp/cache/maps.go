@@ -16,11 +16,14 @@ type filesMap struct {
 	impl *persistent.Map
 }
 
+// uriLessInterface is the < relation for "any" values containing span.URIs.
+func uriLessInterface(a, b interface{}) bool {
+	return a.(span.URI) < b.(span.URI)
+}
+
 func newFilesMap() filesMap {
 	return filesMap{
-		impl: persistent.NewMap(func(a, b interface{}) bool {
-			return a.(span.URI) < b.(span.URI)
-		}),
+		impl: persistent.NewMap(uriLessInterface),
 	}
 }
 
@@ -112,15 +115,47 @@ func (m goFilesMap) Delete(key parseKey) {
 	m.impl.Delete(key)
 }
 
+type isActivePackageCacheMap struct {
+	impl *persistent.Map
+}
+
+func newIsActivePackageCacheMap() isActivePackageCacheMap {
+	return isActivePackageCacheMap{
+		impl: persistent.NewMap(func(a, b interface{}) bool {
+			return a.(PackageID) < b.(PackageID)
+		}),
+	}
+}
+
+func (m isActivePackageCacheMap) Clone() isActivePackageCacheMap {
+	return isActivePackageCacheMap{
+		impl: m.impl.Clone(),
+	}
+}
+
+func (m isActivePackageCacheMap) Destroy() {
+	m.impl.Destroy()
+}
+
+func (m isActivePackageCacheMap) Get(key PackageID) (bool, bool) {
+	value, ok := m.impl.Get(key)
+	if !ok {
+		return false, false
+	}
+	return value.(bool), true
+}
+
+func (m isActivePackageCacheMap) Set(key PackageID, value bool) {
+	m.impl.Set(key, value, nil)
+}
+
 type parseKeysByURIMap struct {
 	impl *persistent.Map
 }
 
 func newParseKeysByURIMap() parseKeysByURIMap {
 	return parseKeysByURIMap{
-		impl: persistent.NewMap(func(a, b interface{}) bool {
-			return a.(span.URI) < b.(span.URI)
-		}),
+		impl: persistent.NewMap(uriLessInterface),
 	}
 }
 
@@ -163,14 +198,16 @@ type packagesMap struct {
 func newPackagesMap() packagesMap {
 	return packagesMap{
 		impl: persistent.NewMap(func(a, b interface{}) bool {
-			left := a.(packageKey)
-			right := b.(packageKey)
-			if left.mode != right.mode {
-				return left.mode < right.mode
-			}
-			return left.id < right.id
+			return packageKeyLess(a.(packageKey), b.(packageKey))
 		}),
 	}
+}
+
+func packageKeyLess(x, y packageKey) bool {
+	if x.mode != y.mode {
+		return x.mode < y.mode
+	}
+	return x.id < y.id
 }
 
 func (m packagesMap) Clone() packagesMap {
@@ -205,4 +242,59 @@ func (m packagesMap) Set(key packageKey, value *packageHandle, release func()) {
 
 func (m packagesMap) Delete(key packageKey) {
 	m.impl.Delete(key)
+}
+
+type knownDirsSet struct {
+	impl *persistent.Map
+}
+
+func newKnownDirsSet() knownDirsSet {
+	return knownDirsSet{
+		impl: persistent.NewMap(func(a, b interface{}) bool {
+			return a.(span.URI) < b.(span.URI)
+		}),
+	}
+}
+
+func (s knownDirsSet) Clone() knownDirsSet {
+	return knownDirsSet{
+		impl: s.impl.Clone(),
+	}
+}
+
+func (s knownDirsSet) Destroy() {
+	s.impl.Destroy()
+}
+
+func (s knownDirsSet) Contains(key span.URI) bool {
+	_, ok := s.impl.Get(key)
+	return ok
+}
+
+func (s knownDirsSet) Range(do func(key span.URI)) {
+	s.impl.Range(func(key, value interface{}) {
+		do(key.(span.URI))
+	})
+}
+
+func (s knownDirsSet) SetAll(other knownDirsSet) {
+	s.impl.SetAll(other.impl)
+}
+
+func (s knownDirsSet) Insert(key span.URI) {
+	s.impl.Set(key, nil, nil)
+}
+
+func (s knownDirsSet) Remove(key span.URI) {
+	s.impl.Delete(key)
+}
+
+// actionKeyLessInterface is the less-than relation for actionKey
+// values wrapped in an interface.
+func actionKeyLessInterface(a, b interface{}) bool {
+	x, y := a.(actionKey), b.(actionKey)
+	if x.analyzer.Name != y.analyzer.Name {
+		return x.analyzer.Name < y.analyzer.Name
+	}
+	return packageKeyLess(x.pkg, y.pkg)
 }

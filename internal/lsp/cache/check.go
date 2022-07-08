@@ -224,7 +224,7 @@ func (s *snapshot) workspaceParseMode(id PackageID) source.ParseMode {
 	if s.view.Options().MemoryMode == source.ModeNormal {
 		return source.ParseFull
 	}
-	if s.isActiveLocked(id, nil) {
+	if s.isActiveLocked(id) {
 		return source.ParseFull
 	}
 	return source.ParseExported
@@ -664,7 +664,7 @@ func (s *snapshot) depsErrors(ctx context.Context, pkg *pkg) ([]*source.Diagnost
 			}
 
 			for _, imp := range allImports[item] {
-				rng, err := source.NewMappedRange(s.FileSet(), imp.cgf.Mapper, imp.imp.Pos(), imp.imp.End()).Range()
+				rng, err := source.NewMappedRange(imp.cgf.Tok, imp.cgf.Mapper, imp.imp.Pos(), imp.imp.End()).Range()
 				if err != nil {
 					return nil, err
 				}
