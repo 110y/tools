@@ -35,7 +35,7 @@ func (s *snapshot) symbolize(ctx context.Context, fh source.FileHandle) ([]sourc
 	if !hit {
 		type symbolHandleKey source.Hash
 		key := symbolHandleKey(fh.FileIdentity().Hash)
-		handle, release := s.generation.GetHandle(key, func(_ context.Context, arg memoize.Arg) interface{} {
+		handle, release := s.store.Handle(key, func(_ context.Context, arg interface{}) interface{} {
 			symbols, err := symbolizeImpl(arg.(*snapshot), fh)
 			return symbolizeResult{symbols, err}
 		})
@@ -48,7 +48,7 @@ func (s *snapshot) symbolize(ctx context.Context, fh source.FileHandle) ([]sourc
 	}
 
 	// Await result.
-	v, err := entry.(*memoize.Handle).Get(ctx, s.generation, s)
+	v, err := s.awaitHandle(ctx, entry.(*memoize.Handle))
 	if err != nil {
 		return nil, err
 	}
@@ -70,9 +70,13 @@ func symbolizeImpl(snapshot *snapshot, fh source.FileHandle) ([]source.Symbol, e
 		fileDesc *token.File
 	)
 
-	// If the file has already been fully parsed through the cache, we can just
-	// use the result.
-	if pgf := snapshot.cachedPGF(fh, source.ParseFull); pgf != nil {
+	// If the file has already been fully parsed through the
+	// cache, we can just use the result. But we don't want to
+	// populate the cache after a miss.
+	snapshot.mu.Lock()
+	pgf, _ := snapshot.peekParseGoLocked(fh, source.ParseFull)
+	snapshot.mu.Unlock()
+	if pgf != nil {
 		file = pgf.File
 		fileDesc = pgf.Tok
 	}

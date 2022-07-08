@@ -167,7 +167,7 @@ func (s *snapshot) buildPackageHandle(ctx context.Context, id PackageID, mode so
 	// Create a handle for the result of type checking.
 	experimentalKey := s.View().Options().ExperimentalPackageCacheKey
 	key := computePackageKey(m.ID, compiledGoFiles, m, depKeys, mode, experimentalKey)
-	handle, release := s.generation.GetHandle(key, func(ctx context.Context, arg memoize.Arg) interface{} {
+	handle, release := s.store.Handle(key, func(ctx context.Context, arg interface{}) interface{} {
 		// TODO(adonovan): eliminate use of arg with this handle.
 		// (In all cases snapshot is equal to the enclosing s.)
 		snapshot := arg.(*snapshot)
@@ -209,9 +209,7 @@ func (s *snapshot) buildPackageHandle(ctx context.Context, id PackageID, mode so
 	// been cached, addPackage will return the cached value. This is fine,
 	// since the original package handle above will have no references and be
 	// garbage collected.
-	ph = s.addPackageHandle(ph, release)
-
-	return ph, nil
+	return s.addPackageHandle(ph, release)
 }
 
 func (s *snapshot) workspaceParseMode(id PackageID) source.ParseMode {
@@ -288,7 +286,7 @@ func hashConfig(config *packages.Config) source.Hash {
 }
 
 func (ph *packageHandle) check(ctx context.Context, s *snapshot) (*pkg, error) {
-	v, err := ph.handle.Get(ctx, s.generation, s)
+	v, err := s.awaitHandle(ctx, ph.handle)
 	if err != nil {
 		return nil, err
 	}
@@ -304,8 +302,8 @@ func (ph *packageHandle) ID() string {
 	return string(ph.m.ID)
 }
 
-func (ph *packageHandle) cached(g *memoize.Generation) (*pkg, error) {
-	v := ph.handle.Cached(g)
+func (ph *packageHandle) cached() (*pkg, error) {
+	v := ph.handle.Cached()
 	if v == nil {
 		return nil, fmt.Errorf("no cached type information for %s", ph.m.PkgPath)
 	}
@@ -570,15 +568,13 @@ func parseCompiledGoFiles(ctx context.Context, compiledGoFiles []source.FileHand
 	// TODO(adonovan): opt: parallelize this loop, which takes 1-25ms.
 	for _, fh := range compiledGoFiles {
 		var pgf *source.ParsedGoFile
-		var fixed bool
 		var err error
 		// Only parse Full through the cache -- we need to own Exported ASTs
 		// to prune them.
 		if mode == source.ParseFull {
-			pgf, fixed, err = snapshot.parseGo(ctx, fh, mode)
+			pgf, err = snapshot.ParseGo(ctx, fh, mode)
 		} else {
-			d := parseGo(ctx, snapshot.FileSet(), fh, mode) // ~20us/KB
-			pgf, fixed, err = d.parsed, d.fixed, d.err
+			pgf, err = parseGoImpl(ctx, snapshot.FileSet(), fh, mode) // ~20us/KB
 		}
 		if err != nil {
 			return err
@@ -589,7 +585,7 @@ func parseCompiledGoFiles(ctx context.Context, compiledGoFiles []source.FileHand
 		}
 		// If we have fixed parse errors in any of the files, we should hide type
 		// errors, as they may be completely nonsensical.
-		pkg.hasFixedFiles = pkg.hasFixedFiles || fixed
+		pkg.hasFixedFiles = pkg.hasFixedFiles || pgf.Fixed
 	}
 	if mode != source.ParseExported {
 		return nil

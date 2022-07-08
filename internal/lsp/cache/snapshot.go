@@ -14,6 +14,7 @@ import (
 	"go/types"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"unsafe"
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
@@ -42,16 +45,16 @@ import (
 )
 
 type snapshot struct {
-	memoize.Arg // allow as a memoize.Function arg
-
 	id   uint64
 	view *View
 
 	cancel        func()
 	backgroundCtx context.Context
 
-	// the cache generation that contains the data for this snapshot.
-	generation *memoize.Generation
+	store *memoize.Store // cache of handles shared by all snapshots
+
+	refcount    sync.WaitGroup // number of references
+	destroyedBy *string        // atomically set to non-nil in Destroy once refcount = 0
 
 	// The snapshot's initialization state is controlled by the fields below.
 	//
@@ -81,8 +84,13 @@ type snapshot struct {
 	// It may invalidated when a file's content changes.
 	files filesMap
 
-	// goFiles maps a parseKey to its parseGoHandle.
-	goFiles        goFilesMap
+	// parsedGoFiles maps a parseKey to the handle of the future result of parsing it.
+	parsedGoFiles *persistent.Map // from parseKey to *memoize.Handle
+
+	// parseKeysByURI records the set of keys of parsedGoFiles that
+	// need to be invalidated for each URI.
+	// TODO(adonovan): opt: parseKey = ParseMode + URI, so this could
+	// be just a set of ParseModes, or we could loop over AllParseModes.
 	parseKeysByURI parseKeysByURIMap
 
 	// symbolizeHandles maps each file URI to a handle for the future
@@ -91,6 +99,11 @@ type snapshot struct {
 
 	// packages maps a packageKey to a *packageHandle.
 	// It may be invalidated when a file's content changes.
+	//
+	// Invariants to preserve:
+	//  - packages.Get(id).m.Metadata == meta.metadata[id].Metadata for all ids
+	//  - if a package is in packages, then all of its dependencies should also
+	//    be in packages, unless there is a missing import
 	packages packagesMap
 
 	// isActivePackageCache maps package ID to the cached value if it is active or not.
@@ -138,6 +151,22 @@ type snapshot struct {
 	unprocessedSubdirChanges []*fileChange
 }
 
+var _ memoize.RefCounted = (*snapshot)(nil) // snapshots are reference-counted
+
+// Acquire prevents the snapshot from being destroyed until the returned function is called.
+func (s *snapshot) Acquire() func() {
+	type uP = unsafe.Pointer
+	if destroyedBy := atomic.LoadPointer((*uP)(uP(&s.destroyedBy))); destroyedBy != nil {
+		log.Panicf("%d: acquire() after Destroy(%q)", s.id, *(*string)(destroyedBy))
+	}
+	s.refcount.Add(1)
+	return s.refcount.Done
+}
+
+func (s *snapshot) awaitHandle(ctx context.Context, h *memoize.Handle) (interface{}, error) {
+	return h.Get(ctx, s)
+}
+
 type packageKey struct {
 	mode source.ParseMode
 	id   PackageID
@@ -149,12 +178,21 @@ type actionKey struct {
 }
 
 func (s *snapshot) Destroy(destroyedBy string) {
-	s.generation.Destroy(destroyedBy)
+	// Wait for all leases to end before commencing destruction.
+	s.refcount.Wait()
+
+	// Report bad state as a debugging aid.
+	// Not foolproof: another thread could acquire() at this moment.
+	type uP = unsafe.Pointer // looking forward to generics...
+	if old := atomic.SwapPointer((*uP)(uP(&s.destroyedBy)), uP(&destroyedBy)); old != nil {
+		log.Panicf("%d: Destroy(%q) after Destroy(%q)", s.id, destroyedBy, *(*string)(old))
+	}
+
 	s.packages.Destroy()
 	s.isActivePackageCache.Destroy()
 	s.actions.Destroy()
 	s.files.Destroy()
-	s.goFiles.Destroy()
+	s.parsedGoFiles.Destroy()
 	s.parseKeysByURI.Destroy()
 	s.knownSubdirs.Destroy()
 	s.symbolizeHandles.Destroy()
@@ -345,6 +383,7 @@ func (s *snapshot) RunGoCommands(ctx context.Context, allowNetwork bool, wd stri
 	return true, modBytes, sumBytes, nil
 }
 
+// TODO(adonovan): remove unused cleanup mechanism.
 func (s *snapshot) goCommandInvocation(ctx context.Context, flags source.InvocationFlags, inv *gocommand.Invocation) (tmpURI span.URI, updatedInv *gocommand.Invocation, cleanup func(), err error) {
 	s.view.optionsMu.Lock()
 	allowModfileModificationOption := s.view.options.AllowModfileModifications
@@ -683,47 +722,35 @@ func (s *snapshot) checkedPackage(ctx context.Context, id PackageID, mode source
 	return ph.check(ctx, s)
 }
 
-func (s *snapshot) getGoFile(key parseKey) *parseGoHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if result, ok := s.goFiles.Get(key); ok {
-		return result
-	}
-	return nil
-}
-
-func (s *snapshot) addGoFile(key parseKey, pgh *parseGoHandle, release func()) *parseGoHandle {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if result, ok := s.goFiles.Get(key); ok {
-		release()
-		return result
-	}
-	s.goFiles.Set(key, pgh, release)
-	keys, _ := s.parseKeysByURI.Get(key.file.URI)
-	keys = append([]parseKey{key}, keys...)
-	s.parseKeysByURI.Set(key.file.URI, keys)
-	return pgh
-}
-
 func (s *snapshot) getImportedBy(id PackageID) []PackageID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.meta.importedBy[id]
 }
 
-func (s *snapshot) addPackageHandle(ph *packageHandle, release func()) *packageHandle {
+// addPackageHandle stores ph in the snapshot, or returns a pre-existing handle
+// for the given package key, if it exists.
+//
+// An error is returned if the metadata used to build ph is no longer relevant.
+func (s *snapshot) addPackageHandle(ph *packageHandle, release func()) (*packageHandle, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.meta.metadata[ph.m.ID].Metadata != ph.m.Metadata {
+		return nil, fmt.Errorf("stale metadata for %s", ph.m.ID)
+	}
 
 	// If the package handle has already been cached,
 	// return the cached handle instead of overriding it.
 	if result, ok := s.packages.Get(ph.packageKey()); ok {
 		release()
-		return result
+		if result.m.Metadata != ph.m.Metadata {
+			return nil, bug.Errorf("existing package handle does not match for %s", ph.m.ID)
+		}
+		return result, nil
 	}
 	s.packages.Set(ph.packageKey(), ph, release)
-	return ph
+	return ph, nil
 }
 
 func (s *snapshot) workspacePackageIDs() (ids []PackageID) {
@@ -1094,7 +1121,7 @@ func (s *snapshot) CachedImportPaths(ctx context.Context) (map[string]source.Pac
 
 	results := map[string]source.Package{}
 	s.packages.Range(func(key packageKey, ph *packageHandle) {
-		cachedPkg, err := ph.cached(s.generation)
+		cachedPkg, err := ph.cached()
 		if err != nil {
 			return
 		}
@@ -1647,10 +1674,6 @@ func inVendor(uri span.URI) bool {
 	return strings.Contains(split[1], "/")
 }
 
-func generationName(v *View, snapshotID uint64) string {
-	return fmt.Sprintf("v%v/%v", v.id, snapshotID)
-}
-
 // unappliedChanges is a file source that handles an uncloned snapshot.
 type unappliedChanges struct {
 	originalSnapshot *snapshot
@@ -1677,11 +1700,10 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	newGen := s.view.session.cache.store.Generation(generationName(s.view, s.id+1))
 	bgCtx, cancel := context.WithCancel(bgCtx)
 	result := &snapshot{
 		id:                   s.id + 1,
-		generation:           newGen,
+		store:                s.store,
 		view:                 s.view,
 		backgroundCtx:        bgCtx,
 		cancel:               cancel,
@@ -1692,7 +1714,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		isActivePackageCache: s.isActivePackageCache.Clone(),
 		actions:              s.actions.Clone(),
 		files:                s.files.Clone(),
-		goFiles:              s.goFiles.Clone(),
+		parsedGoFiles:        s.parsedGoFiles.Clone(),
 		parseKeysByURI:       s.parseKeysByURI.Clone(),
 		symbolizeHandles:     s.symbolizeHandles.Clone(),
 		workspacePackages:    make(map[PackageID]PackagePath, len(s.workspacePackages)),
@@ -1715,7 +1737,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		keys, ok := result.parseKeysByURI.Get(uri)
 		if ok {
 			for _, key := range keys {
-				result.goFiles.Delete(key)
+				result.parsedGoFiles.Delete(key)
 			}
 			result.parseKeysByURI.Delete(uri)
 		}
@@ -2131,28 +2153,20 @@ func metadataChanges(ctx context.Context, lockedSnapshot *snapshot, oldFH, newFH
 	return invalidate, pkgFileChanged, importDeleted
 }
 
-// peekOrParse returns the cached ParsedGoFile if it exists, otherwise parses
-// without caching.
+// peekOrParse returns the cached ParsedGoFile if it exists,
+// otherwise parses without populating the cache.
 //
 // It returns an error if the file could not be read (note that parsing errors
 // are stored in ParsedGoFile.ParseErr).
 //
 // lockedSnapshot must be locked.
 func peekOrParse(ctx context.Context, lockedSnapshot *snapshot, fh source.FileHandle, mode source.ParseMode) (*source.ParsedGoFile, error) {
-	key := parseKey{file: fh.FileIdentity(), mode: mode}
-	if pgh, ok := lockedSnapshot.goFiles.Get(key); ok {
-		cached := pgh.handle.Cached(lockedSnapshot.generation)
-		if cached != nil {
-			cached := cached.(*parseGoData)
-			if cached.parsed != nil {
-				return cached.parsed, nil
-			}
-		}
+	// Peek in the cache without populating it.
+	// We do this to reduce retained heap, not work.
+	if parsed, _ := lockedSnapshot.peekParseGoLocked(fh, mode); parsed != nil {
+		return parsed, nil // cache hit
 	}
-
-	fset := token.NewFileSet()
-	data := parseGo(ctx, fset, fh, mode)
-	return data.parsed, data.err
+	return parseGoImpl(ctx, token.NewFileSet(), fh, mode)
 }
 
 func magicCommentsChanged(original *ast.File, current *ast.File) bool {
