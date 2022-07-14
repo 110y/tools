@@ -14,8 +14,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -24,6 +22,7 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/internal/event"
+	"golang.org/x/tools/internal/lsp/bug"
 	"golang.org/x/tools/internal/lsp/debug/tag"
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
@@ -34,55 +33,35 @@ import (
 	"golang.org/x/tools/internal/typesinternal"
 )
 
+// A packageKey identifies a packageHandle in the snapshot.packages map.
+type packageKey struct {
+	mode source.ParseMode
+	id   PackageID
+}
+
 type packageHandleKey source.Hash
 
+// A packageHandle is a handle to the future result of type-checking a package.
+// The resulting package is obtained from the check() method.
 type packageHandle struct {
-	handle *memoize.Handle
-
-	// goFiles and compiledGoFiles are the lists of files in the package.
-	// The latter is the list of files seen by the type checker (in which
-	// those that import "C" have been replaced by generated code).
-	goFiles, compiledGoFiles []source.FileHandle
-
-	// mode is the mode the files were parsed in.
-	mode source.ParseMode
+	promise *memoize.Promise // [typeCheckResult]
 
 	// m is the metadata associated with the package.
 	m *KnownMetadata
 
 	// key is the hashed key for the package.
+	//
+	// It includes the all bits of the transitive closure of
+	// dependencies's sources. This is more than type checking
+	// really depends on: export data of direct deps should be
+	// enough. (The key for analysis actions could similarly
+	// hash only Facts of direct dependencies.)
 	key packageHandleKey
 }
 
-func (ph *packageHandle) packageKey() packageKey {
-	return packageKey{
-		id:   ph.m.ID,
-		mode: ph.mode,
-	}
-}
-
-func (ph *packageHandle) imports(ctx context.Context, s source.Snapshot) (result []string) {
-	for _, goFile := range ph.goFiles {
-		f, err := s.ParseGo(ctx, goFile, source.ParseHeader)
-		if err != nil {
-			continue
-		}
-		seen := map[string]struct{}{}
-		for _, impSpec := range f.File.Imports {
-			imp, _ := strconv.Unquote(impSpec.Path.Value)
-			if _, ok := seen[imp]; !ok {
-				seen[imp] = struct{}{}
-				result = append(result, imp)
-			}
-		}
-	}
-
-	sort.Strings(result)
-	return result
-}
-
-// packageData contains the data produced by type-checking a package.
-type packageData struct {
+// typeCheckResult contains the result of a call to
+// typeCheck, which type-checks a package.
+type typeCheckResult struct {
 	pkg *pkg
 	err error
 }
@@ -93,13 +72,19 @@ type packageData struct {
 // attempt to reload missing or invalid metadata. The caller must reload
 // metadata if needed.
 func (s *snapshot) buildPackageHandle(ctx context.Context, id PackageID, mode source.ParseMode) (*packageHandle, error) {
-	if ph := s.getPackage(id, mode); ph != nil {
-		return ph, nil
-	}
+	packageKey := packageKey{id: id, mode: mode}
 
-	m := s.getMetadata(id)
+	s.mu.Lock()
+	entry, hit := s.packages.Get(packageKey)
+	m := s.meta.metadata[id]
+	s.mu.Unlock()
+
 	if m == nil {
 		return nil, fmt.Errorf("no metadata for %s", id)
+	}
+
+	if hit {
+		return entry.(*packageHandle), nil
 	}
 
 	// Begin computing the key by getting the depKeys for all dependencies.
@@ -145,31 +130,18 @@ func (s *snapshot) buildPackageHandle(ctx context.Context, id PackageID, mode so
 	}
 
 	// Read both lists of files of this package, in parallel.
-	var group errgroup.Group
-	getFileHandles := func(files []span.URI) []source.FileHandle {
-		fhs := make([]source.FileHandle, len(files))
-		for i, uri := range files {
-			i, uri := i, uri
-			group.Go(func() (err error) {
-				fhs[i], err = s.GetFile(ctx, uri) // ~25us
-				return
-			})
-		}
-		return fhs
-	}
-	goFiles := getFileHandles(m.GoFiles)
-	compiledGoFiles := getFileHandles(m.CompiledGoFiles)
-	if err := group.Wait(); err != nil {
+	goFiles, compiledGoFiles, err := readGoFiles(ctx, s, m.Metadata)
+	if err != nil {
 		return nil, err
 	}
 
 	// All the file reading has now been done.
 	// Create a handle for the result of type checking.
 	experimentalKey := s.View().Options().ExperimentalPackageCacheKey
-	key := computePackageKey(m.ID, compiledGoFiles, m, depKeys, mode, experimentalKey)
+	phKey := computePackageKey(m.ID, compiledGoFiles, m, depKeys, mode, experimentalKey)
 	// TODO(adonovan): extract lambda into a standalone function to
 	// avoid implicit lexical dependencies.
-	handle, release := s.store.Handle(key, func(ctx context.Context, arg interface{}) interface{} {
+	promise, release := s.store.Promise(phKey, func(ctx context.Context, arg interface{}) interface{} {
 		snapshot := arg.(*snapshot)
 
 		// Start type checking of direct dependencies,
@@ -193,23 +165,63 @@ func (s *snapshot) buildPackageHandle(ctx context.Context, id PackageID, mode so
 		defer wg.Wait()
 
 		pkg, err := typeCheck(ctx, snapshot, goFiles, compiledGoFiles, m.Metadata, mode, deps)
-		return &packageData{pkg, err}
+		return typeCheckResult{pkg, err}
 	})
 
 	ph := &packageHandle{
-		handle:          handle,
-		goFiles:         goFiles,
-		compiledGoFiles: compiledGoFiles,
-		mode:            mode,
-		m:               m,
-		key:             key,
+		promise: promise,
+		m:       m,
+		key:     phKey,
 	}
 
-	// Cache the handle in the snapshot. If a package handle has already
-	// been cached, addPackage will return the cached value. This is fine,
-	// since the original package handle above will have no references and be
-	// garbage collected.
-	return s.addPackageHandle(ph, release)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check that the metadata has not changed
+	// (which should invalidate this handle).
+	//
+	// (In future, handles should form a graph with edges from a
+	// packageHandle to the handles for parsing its files and the
+	// handles for type-checking its immediate deps, at which
+	// point there will be no need to even access s.meta.)
+	if s.meta.metadata[ph.m.ID].Metadata != ph.m.Metadata {
+		return nil, fmt.Errorf("stale metadata for %s", ph.m.ID)
+	}
+
+	// Check cache again in case another thread got there first.
+	if prev, ok := s.packages.Get(packageKey); ok {
+		prevPH := prev.(*packageHandle)
+		release()
+		if prevPH.m.Metadata != ph.m.Metadata {
+			return nil, bug.Errorf("existing package handle does not match for %s", ph.m.ID)
+		}
+		return prevPH, nil
+	}
+
+	// Update the map.
+	s.packages.Set(packageKey, ph, func(_, _ interface{}) { release() })
+
+	return ph, nil
+}
+
+// readGoFiles reads the content of Metadata.GoFiles and
+// Metadata.CompiledGoFiles, in parallel.
+func readGoFiles(ctx context.Context, s *snapshot, m *Metadata) (goFiles, compiledGoFiles []source.FileHandle, err error) {
+	var group errgroup.Group
+	getFileHandles := func(files []span.URI) []source.FileHandle {
+		fhs := make([]source.FileHandle, len(files))
+		for i, uri := range files {
+			i, uri := i, uri
+			group.Go(func() (err error) {
+				fhs[i], err = s.GetFile(ctx, uri) // ~25us
+				return
+			})
+		}
+		return fhs
+	}
+	return getFileHandles(m.GoFiles),
+		getFileHandles(m.CompiledGoFiles),
+		group.Wait()
 }
 
 func (s *snapshot) workspaceParseMode(id PackageID) source.ParseMode {
@@ -257,15 +269,6 @@ func computePackageKey(id PackageID, files []source.FileHandle, m *KnownMetadata
 	return packageHandleKey(source.HashOf(b.Bytes()))
 }
 
-// hashEnv returns a hash of the snapshot's configuration.
-func hashEnv(s *snapshot) source.Hash {
-	s.view.optionsMu.Lock()
-	env := s.view.options.EnvSlice()
-	s.view.optionsMu.Unlock()
-
-	return source.Hashf("%s", env)
-}
-
 // hashConfig returns the hash for the *packages.Config.
 func hashConfig(config *packages.Config) source.Hash {
 	// TODO(adonovan): opt: don't materialize the bytes; hash them directly.
@@ -286,11 +289,11 @@ func hashConfig(config *packages.Config) source.Hash {
 }
 
 func (ph *packageHandle) check(ctx context.Context, s *snapshot) (*pkg, error) {
-	v, err := s.awaitHandle(ctx, ph.handle)
+	v, err := s.awaitPromise(ctx, ph.promise)
 	if err != nil {
 		return nil, err
 	}
-	data := v.(*packageData)
+	data := v.(typeCheckResult)
 	return data.pkg, data.err
 }
 
@@ -303,11 +306,11 @@ func (ph *packageHandle) ID() string {
 }
 
 func (ph *packageHandle) cached() (*pkg, error) {
-	v := ph.handle.Cached()
+	v := ph.promise.Cached()
 	if v == nil {
 		return nil, fmt.Errorf("no cached type information for %s", ph.m.PkgPath)
 	}
-	data := v.(*packageData)
+	data := v.(typeCheckResult)
 	return data.pkg, data.err
 }
 
@@ -587,20 +590,24 @@ func parseCompiledGoFiles(ctx context.Context, compiledGoFiles []source.FileHand
 		// errors, as they may be completely nonsensical.
 		pkg.hasFixedFiles = pkg.hasFixedFiles || pgf.Fixed
 	}
-	if mode != source.ParseExported {
-		return nil
-	}
-	if astFilter != nil {
-		var files []*ast.File
-		for _, cgf := range pkg.compiledGoFiles {
-			files = append(files, cgf.File)
+
+	// Optionally remove parts that don't affect the exported API.
+	if mode == source.ParseExported {
+		if astFilter != nil {
+			// aggressive pruning based on reachability
+			var files []*ast.File
+			for _, cgf := range pkg.compiledGoFiles {
+				files = append(files, cgf.File)
+			}
+			astFilter.Filter(files)
+		} else {
+			// simple trimming of function bodies
+			for _, cgf := range pkg.compiledGoFiles {
+				trimAST(cgf.File)
+			}
 		}
-		astFilter.Filter(files)
-	} else {
-		for _, cgf := range pkg.compiledGoFiles {
-			trimAST(cgf.File)
-		}
 	}
+
 	return nil
 }
 

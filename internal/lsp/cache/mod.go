@@ -39,19 +39,19 @@ func (s *snapshot) ParseMod(ctx context.Context, fh source.FileHandle) (*source.
 
 	// cache miss?
 	if !hit {
-		handle, release := s.store.Handle(fh.FileIdentity(), func(ctx context.Context, _ interface{}) interface{} {
+		promise, release := s.store.Promise(fh.FileIdentity(), func(ctx context.Context, _ interface{}) interface{} {
 			parsed, err := parseModImpl(ctx, fh)
 			return parseModResult{parsed, err}
 		})
 
-		entry = handle
+		entry = promise
 		s.mu.Lock()
 		s.parseModHandles.Set(uri, entry, func(_, _ interface{}) { release() })
 		s.mu.Unlock()
 	}
 
 	// Await result.
-	v, err := s.awaitHandle(ctx, entry.(*memoize.Handle))
+	v, err := s.awaitPromise(ctx, entry.(*memoize.Promise))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func (s *snapshot) ParseWork(ctx context.Context, fh source.FileHandle) (*source
 
 	// cache miss?
 	if !hit {
-		handle, release := s.store.Handle(fh.FileIdentity(), func(ctx context.Context, _ interface{}) interface{} {
+		handle, release := s.store.Promise(fh.FileIdentity(), func(ctx context.Context, _ interface{}) interface{} {
 			parsed, err := parseWorkImpl(ctx, fh)
 			return parseWorkResult{parsed, err}
 		})
@@ -128,7 +128,7 @@ func (s *snapshot) ParseWork(ctx context.Context, fh source.FileHandle) (*source
 	}
 
 	// Await result.
-	v, err := s.awaitHandle(ctx, entry.(*memoize.Handle))
+	v, err := s.awaitPromise(ctx, entry.(*memoize.Promise))
 	if err != nil {
 		return nil, err
 	}
@@ -223,37 +223,19 @@ func (s *snapshot) ModWhy(ctx context.Context, fh source.FileHandle) (map[string
 
 	// cache miss?
 	if !hit {
-		// TODO(adonovan): use a simpler cache of promises that
-		// is shared across snapshots. See comment at modTidyKey.
-		type modWhyKey struct {
-			// TODO(rfindley): is sessionID used to identify overlays because modWhy
-			// looks at overlay state? In that case, I am not sure that this key
-			// is actually correct. The key should probably just be URI, and
-			// invalidated in clone when any import changes.
-			sessionID string
-			env       source.Hash
-			view      string
-			mod       source.FileIdentity
-		}
-		key := modWhyKey{
-			sessionID: s.view.session.id,
-			env:       hashEnv(s),
-			mod:       fh.FileIdentity(),
-			view:      s.view.rootURI.Filename(),
-		}
-		handle, release := s.store.Handle(key, func(ctx context.Context, arg interface{}) interface{} {
+		handle := memoize.NewPromise("modWhy", func(ctx context.Context, arg interface{}) interface{} {
 			why, err := modWhyImpl(ctx, arg.(*snapshot), fh)
 			return modWhyResult{why, err}
 		})
 
 		entry = handle
 		s.mu.Lock()
-		s.modWhyHandles.Set(uri, entry, func(_, _ interface{}) { release() })
+		s.modWhyHandles.Set(uri, entry, nil)
 		s.mu.Unlock()
 	}
 
 	// Await result.
-	v, err := s.awaitHandle(ctx, entry.(*memoize.Handle))
+	v, err := s.awaitPromise(ctx, entry.(*memoize.Promise))
 	if err != nil {
 		return nil, err
 	}
