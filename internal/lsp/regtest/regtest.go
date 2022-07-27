@@ -8,6 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"go/token"
 	"io/ioutil"
 	"os"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 
 	"golang.org/x/tools/internal/lsp/cmd"
 	"golang.org/x/tools/internal/lsp/source"
+	"golang.org/x/tools/internal/memoize"
 	"golang.org/x/tools/internal/testenv"
 	"golang.org/x/tools/internal/tool"
 )
@@ -77,24 +79,17 @@ func (r RunMultiple) Run(t *testing.T, files string, f TestFunc) {
 	}
 }
 
-// The regtests run significantly slower on these operating systems, due to (we
-// believe) kernel locking behavior. Only run in singleton mode on these
-// operating system when using -short.
-var slowGOOS = map[string]bool{
-	"darwin":  true,
-	"openbsd": true,
-	"plan9":   true,
-}
-
+// DefaultModes returns the default modes to run for each regression test (they
+// may be reconfigured by the tests themselves).
 func DefaultModes() Mode {
-	normal := Singleton | Experimental
-	if slowGOOS[runtime.GOOS] && testing.Short() {
-		normal = Singleton
+	modes := Default
+	if !testing.Short() {
+		modes |= Experimental | Forwarded
 	}
 	if *runSubprocessTests {
-		return normal | SeparateProcess
+		modes |= SeparateProcess
 	}
-	return normal
+	return modes
 }
 
 // Main sets up and tears down the shared regtest state.
@@ -116,6 +111,8 @@ func Main(m *testing.M, hook func(*source.Options)) {
 		PrintGoroutinesOnFailure: *printGoroutinesOnFailure,
 		SkipCleanup:              *skipCleanup,
 		OptionsHook:              hook,
+		fset:                     token.NewFileSet(),
+		store:                    memoize.NewStore(memoize.NeverEvict),
 	}
 	if *runSubprocessTests {
 		goplsPath := *goplsBinaryPath
@@ -126,13 +123,13 @@ func Main(m *testing.M, hook func(*source.Options)) {
 				panic(fmt.Sprintf("finding test binary path: %v", err))
 			}
 		}
-		runner.GoplsPath = goplsPath
+		runner.goplsPath = goplsPath
 	}
 	dir, err := ioutil.TempDir("", "gopls-regtest-")
 	if err != nil {
 		panic(fmt.Errorf("creating regtest temp directory: %v", err))
 	}
-	runner.TempDir = dir
+	runner.tempDir = dir
 
 	code := m.Run()
 	if err := runner.Close(); err != nil {

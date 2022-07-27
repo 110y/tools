@@ -15,7 +15,6 @@ import (
 	"golang.org/x/tools/internal/lsp/bug"
 	"golang.org/x/tools/internal/lsp/fake"
 	"golang.org/x/tools/internal/lsp/protocol"
-	"golang.org/x/tools/internal/lsp/source"
 	"golang.org/x/tools/internal/testenv"
 
 	. "golang.org/x/tools/internal/lsp/regtest"
@@ -138,36 +137,22 @@ func TestReferences(t *testing.T) {
 	}
 }
 
-// make sure that directory filters work
-func TestFilters(t *testing.T) {
-	for _, tt := range []struct {
-		name, rootPath string
-	}{
-		{
-			name:     "module root",
-			rootPath: "pkg",
+func TestDirectoryFilters(t *testing.T) {
+	WithOptions(
+		ProxyFiles(workspaceProxy),
+		WorkspaceFolders("pkg"),
+		Settings{
+			"directoryFilters": []string{"-inner"},
 		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			opts := []RunOption{ProxyFiles(workspaceProxy)}
-			if tt.rootPath != "" {
-				opts = append(opts, WorkspaceFolders(tt.rootPath))
+	).Run(t, workspaceModule, func(t *testing.T, env *Env) {
+		syms := env.WorkspaceSymbol("Hi")
+		sort.Slice(syms, func(i, j int) bool { return syms[i].ContainerName < syms[j].ContainerName })
+		for _, s := range syms {
+			if strings.Contains(s.ContainerName, "inner") {
+				t.Errorf("WorkspaceSymbol: found symbol %q with container %q, want \"inner\" excluded", s.Name, s.ContainerName)
 			}
-			f := func(o *source.Options) {
-				o.DirectoryFilters = append(o.DirectoryFilters, "-inner")
-			}
-			opts = append(opts, Options(f))
-			WithOptions(opts...).Run(t, workspaceModule, func(t *testing.T, env *Env) {
-				syms := env.WorkspaceSymbol("Hi")
-				sort.Slice(syms, func(i, j int) bool { return syms[i].ContainerName < syms[j].ContainerName })
-				for i, s := range syms {
-					if strings.Contains(s.ContainerName, "/inner") {
-						t.Errorf("%s %v %s %s %d\n", s.Name, s.Kind, s.ContainerName, tt.name, i)
-					}
-				}
-			})
-		})
-	}
+		}
+	})
 }
 
 // Make sure that analysis diagnostics are cleared for the whole package when
@@ -305,10 +290,6 @@ func Hello() {}
 module b.com
 
 go 1.12
--- b.com@v1.2.4/b/b.go --
-package b
-
-func Hello() {}
 `
 	const multiModule = `
 -- go.mod --
@@ -595,21 +576,16 @@ require (
 replace a.com => %s/moda/a
 replace b.com => %s/modb
 `, workdir, workdir))
-		env.Await(env.DoneWithChangeWatchedFiles())
-		// Check that go.mod diagnostics picked up the newly active mod file.
-		// The local version of modb has an extra dependency we need to download.
-		env.OpenFile("modb/go.mod")
-		env.Await(env.DoneWithOpen())
 
-		var d protocol.PublishDiagnosticsParams
+		// As of golang/go#54069, writing a gopls.mod to the workspace triggers a
+		// workspace reload.
 		env.Await(
 			OnceMet(
-				env.DiagnosticAtRegexpWithMessage("modb/go.mod", `require example.com v1.2.3`, "has not been downloaded"),
-				ReadDiagnostics("modb/go.mod", &d),
+				env.DoneWithChangeWatchedFiles(),
+				env.DiagnosticAtRegexp("modb/b/b.go", "x"),
 			),
 		)
-		env.ApplyQuickFixes("modb/go.mod", d.Diagnostics)
-		env.Await(env.DiagnosticAtRegexp("modb/b/b.go", "x"))
+
 		// Jumping to definition should now go to b.com in the workspace.
 		if err := checkHelloLocation("modb/b/b.go"); err != nil {
 			t.Fatal(err)
@@ -736,21 +712,15 @@ use (
 	./modb
 )
 `)
-		env.Await(env.DoneWithChangeWatchedFiles())
-		// Check that go.mod diagnostics picked up the newly active mod file.
-		// The local version of modb has an extra dependency we need to download.
-		env.OpenFile("modb/go.mod")
-		env.Await(env.DoneWithOpen())
 
-		var d protocol.PublishDiagnosticsParams
+		// As of golang/go#54069, writing go.work to the workspace triggers a
+		// workspace reload.
 		env.Await(
 			OnceMet(
-				env.DiagnosticAtRegexpWithMessage("modb/go.mod", `require example.com v1.2.3`, "has not been downloaded"),
-				ReadDiagnostics("modb/go.mod", &d),
+				env.DoneWithChangeWatchedFiles(),
+				env.DiagnosticAtRegexp("modb/b/b.go", "x"),
 			),
 		)
-		env.ApplyQuickFixes("modb/go.mod", d.Diagnostics)
-		env.Await(env.DiagnosticAtRegexp("modb/b/b.go", "x"))
 
 		// Jumping to definition should now go to b.com in the workspace.
 		if err := checkHelloLocation("modb/b/b.go"); err != nil {
@@ -1205,7 +1175,7 @@ package main
 `
 	WithOptions(
 		EnvVars{"GOPATH": filepath.FromSlash("$SANDBOX_WORKDIR/gopath")},
-		Modes(Singleton),
+		Modes(Default),
 	).Run(t, mod, func(t *testing.T, env *Env) {
 		env.Await(
 			// Confirm that the build configuration is seen as valid,
@@ -1236,7 +1206,7 @@ package main
 func main() {}
 `
 	WithOptions(
-		Modes(Singleton),
+		Modes(Default),
 	).Run(t, nomod, func(t *testing.T, env *Env) {
 		env.OpenFile("a/main.go")
 		env.OpenFile("b/main.go")

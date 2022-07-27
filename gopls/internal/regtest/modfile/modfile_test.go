@@ -576,7 +576,9 @@ func TestUnknownRevision(t *testing.T) {
 		t.Skipf("skipping test that fails for unknown reasons on plan9; see https://go.dev/issue/50477")
 	}
 
-	testenv.NeedsGo1Point(t, 14)
+	// This test fails at go1.14 and go1.15 due to differing Go command behavior.
+	// This was not significantly investigated.
+	testenv.NeedsGo1Point(t, 16)
 
 	const unknown = `
 -- a/go.mod --
@@ -742,7 +744,7 @@ func main() {
 	WithOptions(
 		EnvVars{"GOFLAGS": "-mod=readonly"},
 		ProxyFiles(proxy),
-		Modes(Singleton),
+		Modes(Default),
 	).Run(t, mod, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		original := env.ReadWorkspaceFile("go.mod")
@@ -922,7 +924,7 @@ func hello() {}
 		// TODO(rFindley) this doesn't work in multi-module workspace mode, because
 		// it keeps around the last parsing modfile. Update this test to also
 		// exercise the workspace module.
-		Modes(Singleton),
+		Modes(Default),
 	).Run(t, mod, func(t *testing.T, env *Env) {
 		env.OpenFile("go.mod")
 		env.Await(env.DoneWithOpen())
@@ -1090,7 +1092,7 @@ func main() {
 `
 	WithOptions(
 		ProxyFiles(workspaceProxy),
-		Modes(Singleton),
+		Modes(Default),
 	).Run(t, mod, func(t *testing.T, env *Env) {
 		env.OpenFile("go.mod")
 		params := &protocol.PublishDiagnosticsParams{}
@@ -1159,7 +1161,7 @@ func main() {
 `
 	WithOptions(
 		ProxyFiles(proxy),
-		Modes(Singleton),
+		Modes(Default),
 	).Run(t, mod, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		d := &protocol.PublishDiagnosticsParams{}

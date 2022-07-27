@@ -55,12 +55,11 @@ type snapshot struct {
 	refcount    sync.WaitGroup // number of references
 	destroyedBy *string        // atomically set to non-nil in Destroy once refcount = 0
 
-	// The snapshot's initialization state is controlled by the fields below.
-	//
-	// initializeOnce guards snapshot initialization. Each snapshot is
-	// initialized at most once: reinitialization is triggered on later snapshots
-	// by invalidating this field.
-	initializeOnce *sync.Once
+	// initialized reports whether the snapshot has been initialized. Concurrent
+	// initialization is guarded by the view.initializationSema. Each snapshot is
+	// initialized at most once: concurrent initialization is guarded by
+	// view.initializationSema.
+	initialized bool
 	// initializedErr holds the last error resulting from initialization. If
 	// initialization fails, we only retry when the the workspace modules change,
 	// to avoid too many go/packages calls.
@@ -1337,6 +1336,10 @@ func (s *snapshot) awaitLoaded(ctx context.Context) error {
 }
 
 func (s *snapshot) GetCriticalError(ctx context.Context) *source.CriticalError {
+	if wsErr := s.workspace.criticalError(ctx, s); wsErr != nil {
+		return wsErr
+	}
+
 	loadErr := s.awaitLoadedAllErrors(ctx)
 	if loadErr != nil && errors.Is(loadErr.MainError, context.Canceled) {
 		return nil
@@ -1396,32 +1399,45 @@ func (s *snapshot) awaitLoadedAllErrors(ctx context.Context) *source.CriticalErr
 	// Do not return results until the snapshot's view has been initialized.
 	s.AwaitInitialized(ctx)
 
-	// TODO(rstambler): Should we be more careful about returning the
+	// TODO(rfindley): Should we be more careful about returning the
 	// initialization error? Is it possible for the initialization error to be
 	// corrected without a successful reinitialization?
 	s.mu.Lock()
 	initializedErr := s.initializedErr
 	s.mu.Unlock()
+
 	if initializedErr != nil {
 		return initializedErr
 	}
 
+	// TODO(rfindley): revisit this handling. Calling reloadWorkspace with a
+	// cancelled context should have the same effect, so this preemptive handling
+	// should not be necessary.
+	//
+	// Also: GetCriticalError ignores context cancellation errors. Should we be
+	// returning nil here?
 	if ctx.Err() != nil {
 		return &source.CriticalError{MainError: ctx.Err()}
 	}
 
+	// TODO(rfindley): reloading is not idempotent: if we try to reload or load
+	// orphaned files below and fail, we won't try again. For that reason, we
+	// could get different results from subsequent calls to this function, which
+	// may cause critical errors to be suppressed.
+
 	if err := s.reloadWorkspace(ctx); err != nil {
 		diags := s.extractGoCommandErrors(ctx, err)
 		return &source.CriticalError{
-			MainError: err,
-			DiagList:  diags,
+			MainError:   err,
+			Diagnostics: diags,
 		}
 	}
+
 	if err := s.reloadOrphanedFiles(ctx); err != nil {
 		diags := s.extractGoCommandErrors(ctx, err)
 		return &source.CriticalError{
-			MainError: err,
-			DiagList:  diags,
+			MainError:   err,
+			Diagnostics: diags,
 		}
 	}
 	return nil
@@ -1576,6 +1592,13 @@ func contains(views []*View, view *View) bool {
 	return false
 }
 
+// TODO(golang/go#53756): this function needs to consider more than just the
+// absolute URI, for example:
+//   - the position of /vendor/ with respect to the relevant module root
+//   - whether or not go.work is in use (as vendoring isn't supported in workspace mode)
+//
+// Most likely, each call site of inVendor needs to be reconsidered to
+// understand and correctly implement the desired behavior.
 func inVendor(uri span.URI) bool {
 	if !strings.Contains(string(uri), "/vendor/") {
 		return false
@@ -1606,14 +1629,24 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	ctx, done := event.Start(ctx, "snapshot.clone")
 	defer done()
 
-	var vendorChanged bool
-	newWorkspace, workspaceChanged, workspaceReload := s.workspace.invalidate(ctx, changes, &unappliedChanges{
+	newWorkspace, reinit := s.workspace.Clone(ctx, changes, &unappliedChanges{
 		originalSnapshot: s,
 		changes:          changes,
 	})
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// If there is an initialization error and a vendor directory changed, try to
+	// reinit.
+	if s.initializedErr != nil {
+		for uri := range changes {
+			if inVendor(uri) {
+				reinit = true
+				break
+			}
+		}
+	}
 
 	bgCtx, cancel := context.WithCancel(bgCtx)
 	result := &snapshot{
@@ -1623,7 +1656,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		backgroundCtx:        bgCtx,
 		cancel:               cancel,
 		builtin:              s.builtin,
-		initializeOnce:       s.initializeOnce,
+		initialized:          s.initialized,
 		initializedErr:       s.initializedErr,
 		packages:             s.packages.Clone(),
 		isActivePackageCache: s.isActivePackageCache.Clone(),
@@ -1641,6 +1674,13 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		knownSubdirs:         s.knownSubdirs.Clone(),
 		workspace:            newWorkspace,
 	}
+
+	// The snapshot should be initialized if either s was uninitialized, or we've
+	// detected a change that triggers reinitialization.
+	if reinit {
+		result.initialized = false
+	}
+
 	// Create a lease on the new snapshot.
 	// (Best to do this early in case the code below hides an
 	// incref/decref operation that might destroy it prematurely.)
@@ -1687,7 +1727,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	directIDs := map[PackageID]bool{}
 
 	// Invalidate all package metadata if the workspace module has changed.
-	if workspaceReload {
+	if reinit {
 		for k := range s.meta.metadata {
 			directIDs[k] = true
 		}
@@ -1695,21 +1735,18 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 
 	// Compute invalidations based on file changes.
 	changedPkgFiles := map[PackageID]bool{} // packages whose file set may have changed
-	anyImportDeleted := false
-	anyFileOpenedOrClosed := false
-	for uri, change := range changes {
-		// Maybe reinitialize the view if we see a change in the vendor
-		// directory.
-		if inVendor(uri) {
-			vendorChanged = true
-		}
+	anyImportDeleted := false               // import deletions can resolve cycles
+	anyFileOpenedOrClosed := false          // opened files affect workspace packages
+	anyFileAdded := false                   // adding a file can resolve missing dependencies
 
+	for uri, change := range changes {
 		// The original FileHandle for this URI is cached on the snapshot.
 		originalFH, _ := s.files.Get(uri)
 		var originalOpen, newOpen bool
 		_, originalOpen = originalFH.(*overlay)
 		_, newOpen = change.fileHandle.(*overlay)
-		anyFileOpenedOrClosed = originalOpen != newOpen
+		anyFileOpenedOrClosed = anyFileOpenedOrClosed || (originalOpen != newOpen)
+		anyFileAdded = anyFileAdded || (originalFH == nil && change.fileHandle != nil)
 
 		// If uri is a Go file, check if it has changed in a way that would
 		// invalidate metadata. Note that we can't use s.view.FileKind here,
@@ -1720,7 +1757,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 			invalidateMetadata, pkgFileChanged, importDeleted = metadataChanges(ctx, s, originalFH, change.fileHandle)
 		}
 
-		invalidateMetadata = invalidateMetadata || forceReloadMetadata || workspaceReload
+		invalidateMetadata = invalidateMetadata || forceReloadMetadata || reinit
 		anyImportDeleted = anyImportDeleted || importDeleted
 
 		// Mark all of the package IDs containing the given file.
@@ -1774,6 +1811,19 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	if anyImportDeleted {
 		for id, metadata := range s.meta.metadata {
 			if len(metadata.Errors) > 0 {
+				directIDs[id] = true
+			}
+		}
+	}
+
+	// Adding a file can resolve missing dependencies from existing packages.
+	//
+	// We could be smart here and try to guess which packages may have been
+	// fixed, but until that proves necessary, just invalidate metadata for any
+	// package with missing dependencies.
+	if anyFileAdded {
+		for id, metadata := range s.meta.metadata {
+			if len(metadata.MissingDeps) > 0 {
 				directIDs[id] = true
 			}
 		}
@@ -1927,13 +1977,6 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	// the previous mode are no longer relevant, so clear them out.
 	if workspaceModeChanged {
 		result.workspacePackages = map[PackageID]PackagePath{}
-	}
-
-	// The snapshot may need to be reinitialized.
-	if workspaceReload || vendorChanged {
-		if workspaceChanged || result.initializedErr != nil {
-			result.initializeOnce = &sync.Once{}
-		}
 	}
 	result.dumpWorkspace("clone")
 	return result, release
@@ -2219,7 +2262,7 @@ func (s *snapshot) BuildGoplsMod(ctx context.Context) (*modfile.File, error) {
 	return buildWorkspaceModFile(ctx, allModules, s)
 }
 
-// TODO(rfindley): move this to workspacemodule.go
+// TODO(rfindley): move this to workspace.go
 func buildWorkspaceModFile(ctx context.Context, modFiles map[span.URI]struct{}, fs source.FileSource) (*modfile.File, error) {
 	file := &modfile.File{}
 	file.AddModuleStmt("gopls-workspace")
@@ -2257,8 +2300,8 @@ func buildWorkspaceModFile(ctx context.Context, modFiles map[span.URI]struct{}, 
 			goVersion = parsed.Go.Version
 		}
 		path := parsed.Module.Mod.Path
-		if _, ok := paths[path]; ok {
-			return nil, fmt.Errorf("found module %q twice in the workspace", path)
+		if seen, ok := paths[path]; ok {
+			return nil, fmt.Errorf("found module %q multiple times in the workspace, at:\n\t%q\n\t%q", path, seen, modURI)
 		}
 		paths[path] = modURI
 		// If the module's path includes a major version, we expect it to have

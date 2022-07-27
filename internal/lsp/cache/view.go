@@ -88,6 +88,10 @@ type View struct {
 	// initializationSema is used limit concurrent initialization of snapshots in
 	// the view. We use a channel instead of a mutex to avoid blocking when a
 	// context is canceled.
+	//
+	// This field (along with snapshot.initialized) guards against duplicate
+	// initialization of snapshots. Do not change it without adjusting snapshot
+	// accordingly.
 	initializationSema chan struct{}
 
 	// rootURI is the rootURI directory of this view. If we are in GOPATH mode, this
@@ -112,6 +116,9 @@ type workspaceInformation struct {
 	environmentVariables
 
 	// userGo111Module is the user's value of GO111MODULE.
+	//
+	// TODO(rfindley): is there really value in memoizing this variable? It seems
+	// simpler to make this a function/method.
 	userGo111Module go111module
 
 	// The value of GO111MODULE we want to run with.
@@ -627,18 +634,23 @@ func (s *snapshot) initialize(ctx context.Context, firstAttempt bool) {
 		<-s.view.initializationSema
 	}()
 
-	if s.initializeOnce == nil {
+	s.mu.Lock()
+	initialized := s.initialized
+	s.mu.Unlock()
+
+	if initialized {
 		return
 	}
-	s.initializeOnce.Do(func() {
-		s.loadWorkspace(ctx, firstAttempt)
-		s.collectAllKnownSubdirs(ctx)
-	})
+
+	s.loadWorkspace(ctx, firstAttempt)
+	s.collectAllKnownSubdirs(ctx)
 }
 
 func (s *snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) {
 	defer func() {
-		s.initializeOnce = nil
+		s.mu.Lock()
+		s.initialized = true
+		s.mu.Unlock()
 		if firstAttempt {
 			close(s.view.initialWorkspaceLoad)
 		}
@@ -655,7 +667,11 @@ func (s *snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) {
 			Message:  err.Error(),
 		})
 	}
+
+	// TODO(rFindley): we should only locate template files on the first attempt,
+	// or guard it via a different mechanism.
 	s.locateTemplateFiles(ctx)
+
 	if len(s.workspace.getActiveModFiles()) > 0 {
 		for modURI := range s.workspace.getActiveModFiles() {
 			fh, err := s.GetFile(ctx, modURI)
@@ -684,7 +700,7 @@ func (s *snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) {
 	if len(scopes) > 0 {
 		scopes = append(scopes, PackagePath("builtin"))
 	}
-	err := s.load(ctx, firstAttempt, scopes...)
+	err := s.load(ctx, true, scopes...)
 
 	// If the context is canceled on the first attempt, loading has failed
 	// because the go command has timed out--that should be a critical error.
@@ -703,18 +719,18 @@ func (s *snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) {
 		event.Error(ctx, "initial workspace load failed", err)
 		extractedDiags := s.extractGoCommandErrors(ctx, err)
 		criticalErr = &source.CriticalError{
-			MainError: err,
-			DiagList:  append(modDiagnostics, extractedDiags...),
+			MainError:   err,
+			Diagnostics: append(modDiagnostics, extractedDiags...),
 		}
 	case len(modDiagnostics) == 1:
 		criticalErr = &source.CriticalError{
-			MainError: fmt.Errorf(modDiagnostics[0].Message),
-			DiagList:  modDiagnostics,
+			MainError:   fmt.Errorf(modDiagnostics[0].Message),
+			Diagnostics: modDiagnostics,
 		}
 	case len(modDiagnostics) > 1:
 		criticalErr = &source.CriticalError{
-			MainError: fmt.Errorf("error loading module names"),
-			DiagList:  modDiagnostics,
+			MainError:   fmt.Errorf("error loading module names"),
+			Diagnostics: modDiagnostics,
 		}
 	}
 
@@ -941,6 +957,12 @@ func (s *Session) getGoEnv(ctx context.Context, folder string, goversion int, go
 	for k := range vars {
 		args = append(args, k)
 	}
+	// TODO(rfindley): GOWORK is not a property of the session. It may change
+	// when a workfile is added or removed.
+	//
+	// We need to distinguish between GOWORK values that are set by the GOWORK
+	// environment variable, and GOWORK values that are computed based on the
+	// location of a go.work file in the directory hierarchy.
 	args = append(args, "GOWORK")
 
 	inv := gocommand.Invocation{
