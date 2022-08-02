@@ -94,16 +94,19 @@ func DefaultModes() Mode {
 
 // Main sets up and tears down the shared regtest state.
 func Main(m *testing.M, hook func(*source.Options)) {
+	// If this magic environment variable is set, run gopls instead of the test
+	// suite. See the documentation for runTestAsGoplsEnvvar for more details.
+	if os.Getenv(runTestAsGoplsEnvvar) == "true" {
+		tool.Main(context.Background(), cmd.New("gopls", "", nil, hook), os.Args[1:])
+		os.Exit(0)
+	}
+
 	testenv.ExitIfSmallMachine()
 
 	// Disable GOPACKAGESDRIVER, as it can cause spurious test failures.
 	os.Setenv("GOPACKAGESDRIVER", "off")
 
 	flag.Parse()
-	if os.Getenv("_GOPLS_TEST_BINARY_RUN_AS_GOPLS") == "true" {
-		tool.Main(context.Background(), cmd.New("gopls", "", nil, nil), os.Args[1:])
-		os.Exit(0)
-	}
 
 	runner = &Runner{
 		DefaultModes:             DefaultModes(),
@@ -114,33 +117,35 @@ func Main(m *testing.M, hook func(*source.Options)) {
 		fset:                     token.NewFileSet(),
 		store:                    memoize.NewStore(memoize.NeverEvict),
 	}
-	if *runSubprocessTests {
-		goplsPath := *goplsBinaryPath
-		if goplsPath == "" {
-			var err error
-			goplsPath, err = os.Executable()
-			if err != nil {
-				panic(fmt.Sprintf("finding test binary path: %v", err))
-			}
+
+	runner.goplsPath = *goplsBinaryPath
+	if runner.goplsPath == "" {
+		var err error
+		runner.goplsPath, err = os.Executable()
+		if err != nil {
+			panic(fmt.Sprintf("finding test binary path: %v", err))
 		}
-		runner.goplsPath = goplsPath
 	}
+
 	dir, err := ioutil.TempDir("", "gopls-regtest-")
 	if err != nil {
 		panic(fmt.Errorf("creating regtest temp directory: %v", err))
 	}
 	runner.tempDir = dir
 
-	code := m.Run()
-	if err := runner.Close(); err != nil {
-		fmt.Fprintf(os.Stderr, "closing test runner: %v\n", err)
-		// Regtest cleanup is broken in go1.12 and earlier, and sometimes flakes on
-		// Windows due to file locking, but this is OK for our CI.
-		//
-		// Fail on go1.13+, except for windows and android which have shutdown problems.
-		if testenv.Go1Point() >= 13 && runtime.GOOS != "windows" && runtime.GOOS != "android" {
-			os.Exit(1)
+	var code int
+	defer func() {
+		if err := runner.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "closing test runner: %v\n", err)
+			// Regtest cleanup is broken in go1.12 and earlier, and sometimes flakes on
+			// Windows due to file locking, but this is OK for our CI.
+			//
+			// Fail on go1.13+, except for windows and android which have shutdown problems.
+			if testenv.Go1Point() >= 13 && runtime.GOOS != "windows" && runtime.GOOS != "android" {
+				os.Exit(1)
+			}
 		}
-	}
-	os.Exit(code)
+		os.Exit(code)
+	}()
+	code = m.Run()
 }
