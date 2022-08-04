@@ -379,6 +379,11 @@ var GeneratedAPIJSON = &APIJSON{
 							Default: "true",
 						},
 						{
+							Name:    "\"timeformat\"",
+							Doc:     "check for calls of (time.Time).Format or time.Parse with 2006-02-01\n\nThe timeformat checker looks for time formats with the 2006-02-01 (yyyy-dd-mm)\nformat. Internationally, \"yyyy-dd-mm\" does not occur in common calendar date\nstandards, and so it is more likely that 2006-01-02 (yyyy-mm-dd) was intended.\n",
+							Default: "true",
+						},
+						{
 							Name:    "\"unmarshal\"",
 							Doc:     "report passing non-pointer or non-interface values to unmarshal\n\nThe unmarshal analysis reports calls to functions such as json.Unmarshal\nin which the argument type is not a pointer or an interface.",
 							Default: "true",
@@ -611,6 +616,22 @@ var GeneratedAPIJSON = &APIJSON{
 				Hierarchy: "ui",
 			},
 			{
+				Name:      "noSemanticString",
+				Type:      "bool",
+				Doc:       "noSemanticString turns off the sending of the semantic token 'string'\n",
+				Default:   "false",
+				Status:    "experimental",
+				Hierarchy: "ui",
+			},
+			{
+				Name:      "noSemanticNumber",
+				Type:      "bool",
+				Doc:       "noSemanticNumber  turns off the sending of the semantic token 'number'\n",
+				Default:   "false",
+				Status:    "experimental",
+				Hierarchy: "ui",
+			},
+			{
 				Name:      "local",
 				Type:      "string",
 				Doc:       "local is the equivalent of the `goimports -local` flag, which puts\nimports beginning with this string after third-party packages. It should\nbe the prefix of the import path whose imports should be grouped\nseparately.\n",
@@ -721,11 +742,10 @@ var GeneratedAPIJSON = &APIJSON{
 			ArgDoc:  "{\n\t// The test file containing the tests to run.\n\t\"URI\": string,\n\t// Specific test names to run, e.g. TestFoo.\n\t\"Tests\": []string,\n\t// Specific benchmarks to run, e.g. BenchmarkFoo.\n\t\"Benchmarks\": []string,\n}",
 		},
 		{
-			Command:   "gopls.run_vulncheck_exp",
-			Title:     "Run vulncheck (experimental)",
-			Doc:       "Run vulnerability check (`govulncheck`).",
-			ArgDoc:    "{\n\t// Dir is the directory from which vulncheck will run from.\n\t\"Dir\": string,\n\t// Package pattern. E.g. \"\", \".\", \"./...\".\n\t\"Pattern\": string,\n}",
-			ResultDoc: "{\n\t\"Vuln\": []{\n\t\t\"ID\": string,\n\t\t\"Details\": string,\n\t\t\"Aliases\": []string,\n\t\t\"Symbol\": string,\n\t\t\"PkgPath\": string,\n\t\t\"ModPath\": string,\n\t\t\"URL\": string,\n\t\t\"CurrentVersion\": string,\n\t\t\"FixedVersion\": string,\n\t\t\"CallStacks\": [][]golang.org/x/tools/internal/lsp/command.StackEntry,\n\t\t\"CallStackSummaries\": []string,\n\t},\n}",
+			Command: "gopls.run_vulncheck_exp",
+			Title:   "Run vulncheck (experimental)",
+			Doc:     "Run vulnerability check (`govulncheck`).",
+			ArgDoc:  "{\n\t// Dir is the directory from which vulncheck will run from.\n\t\"Dir\": string,\n\t// Package pattern. E.g. \"\", \".\", \"./...\".\n\t\"Pattern\": string,\n}",
 		},
 		{
 			Command:   "gopls.start_debugging",
@@ -964,6 +984,11 @@ var GeneratedAPIJSON = &APIJSON{
 		{
 			Name:    "tests",
 			Doc:     "check for common mistaken usages of tests and examples\n\nThe tests checker walks Test, Benchmark and Example functions checking\nmalformed names, wrong signatures and examples documenting non-existent\nidentifiers.\n\nPlease see the documentation for package testing in golang.org/pkg/testing\nfor the conventions that are enforced for Tests, Benchmarks, and Examples.",
+			Default: true,
+		},
+		{
+			Name:    "timeformat",
+			Doc:     "check for calls of (time.Time).Format or time.Parse with 2006-02-01\n\nThe timeformat checker looks for time formats with the 2006-02-01 (yyyy-dd-mm)\nformat. Internationally, \"yyyy-dd-mm\" does not occur in common calendar date\nstandards, and so it is more likely that 2006-01-02 (yyyy-mm-dd) was intended.\n",
 			Default: true,
 		},
 		{

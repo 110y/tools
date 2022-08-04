@@ -43,6 +43,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/structtag"
 	"golang.org/x/tools/go/analysis/passes/testinggoroutine"
 	"golang.org/x/tools/go/analysis/passes/tests"
+	"golang.org/x/tools/go/analysis/passes/timeformat"
 	"golang.org/x/tools/go/analysis/passes/unmarshal"
 	"golang.org/x/tools/go/analysis/passes/unreachable"
 	"golang.org/x/tools/go/analysis/passes/unsafeptr"
@@ -316,6 +317,12 @@ type UIOptions struct {
 	// SemanticTokens controls whether the LSP server will send
 	// semantic tokens to the client.
 	SemanticTokens bool `status:"experimental"`
+
+	// NoSemanticString turns off the sending of the semantic token 'string'
+	NoSemanticString bool `status:"experimental"`
+
+	// NoSemanticNumber  turns off the sending of the semantic token 'number'
+	NoSemanticNumber bool `status:"experimental"`
 }
 
 type CompletionOptions struct {
@@ -839,7 +846,7 @@ func validateDirectoryFilter(ifilter string) (string, error) {
 	if filter == "" || (filter[0] != '+' && filter[0] != '-') {
 		return "", fmt.Errorf("invalid filter %v, must start with + or -", filter)
 	}
-	segs := strings.Split(filter, "/")
+	segs := strings.Split(filter[1:], "/")
 	unsupportedOps := [...]string{"?", "*"}
 	for _, seg := range segs {
 		if seg != "**" {
@@ -1031,6 +1038,12 @@ func (o *Options) set(name string, value interface{}, seen map[string]struct{}) 
 
 	case "semanticTokens":
 		result.setBool(&o.SemanticTokens)
+
+	case "noSemanticString":
+		result.setBool(&o.NoSemanticString)
+
+	case "noSemanticNumber":
+		result.setBool(&o.NoSemanticNumber)
 
 	case "expandWorkspaceToModule":
 		result.setBool(&o.ExpandWorkspaceToModule)
@@ -1393,6 +1406,7 @@ func defaultAnalyzers() map[string]*Analyzer {
 		useany.Analyzer.Name:           {Analyzer: useany.Analyzer, Enabled: false},
 		infertypeargs.Analyzer.Name:    {Analyzer: infertypeargs.Analyzer, Enabled: true},
 		embeddirective.Analyzer.Name:   {Analyzer: embeddirective.Analyzer, Enabled: true},
+		timeformat.Analyzer.Name:       {Analyzer: timeformat.Analyzer, Enabled: true},
 
 		// gofmt -s suite:
 		simplifycompositelit.Analyzer.Name: {
