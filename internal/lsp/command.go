@@ -797,24 +797,19 @@ type pkgLoadConfig struct {
 	// the build system's query tool.
 	BuildFlags []string
 
-	// Env is the environment to use when invoking the build system's query tool.
-	// If Env is nil, the current environment is used.
-	// TODO: This seems unnecessary. Delete.
-	Env []string
-
 	// If Tests is set, the loader includes related test packages.
 	Tests bool
 }
 
 func (c *commandHandler) RunVulncheckExp(ctx context.Context, args command.VulncheckArgs) error {
-	if args.Dir == "" {
-		return errors.New("VulncheckArgs is missing Dir field")
+	if args.URI == "" {
+		return errors.New("VulncheckArgs is missing URI field")
 	}
 	err := c.run(ctx, commandConfig{
 		async:       true, // need to be async to be cancellable
-		progress:    "Checking vulnerability",
+		progress:    "govulncheck",
 		requireSave: true,
-		forURI:      args.Dir, // Will dir work?
+		forURI:      args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
 		view := deps.snapshot.View()
 		opts := view.Options()
@@ -822,8 +817,8 @@ func (c *commandHandler) RunVulncheckExp(ctx context.Context, args command.Vulnc
 			return errors.New("vulncheck feature is not available")
 		}
 
-		cmd := exec.Command(os.Args[0], "vulncheck", "-config", args.Pattern)
-		cmd.Dir = args.Dir.SpanURI().Filename()
+		cmd := exec.CommandContext(ctx, os.Args[0], "vulncheck", "-config", args.Pattern)
+		cmd.Dir = filepath.Dir(args.URI.SpanURI().Filename())
 
 		var viewEnv []string
 		if e := opts.EnvSlice(); e != nil {
@@ -858,8 +853,32 @@ func (c *commandHandler) RunVulncheckExp(ctx context.Context, args command.Vulnc
 			return fmt.Errorf("failed to parse govulncheck output: %v", err)
 		}
 
-		// TODO(hyangah): convert the results to diagnostics & code actions.
-		return nil
+		// TODO(jamalc,suzmue): convert the results to diagnostics & code actions.
+		// Or should we just write to a file (*.vulncheck.json) or text format
+		// and send "Show Document" request? If *.vulncheck.json is open,
+		// VSCode Go extension will open its custom editor.
+		set := make(map[string]bool)
+		for _, v := range vulns.Vuln {
+			if len(v.CallStackSummaries) > 0 {
+				set[v.ID] = true
+			}
+		}
+		if len(set) == 0 {
+			return c.s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
+				Type:    protocol.Info,
+				Message: "No vulnerabilities found",
+			})
+		}
+
+		list := make([]string, 0, len(set))
+		for k := range set {
+			list = append(list, k)
+		}
+		sort.Strings(list)
+		return c.s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
+			Type:    protocol.Warning,
+			Message: fmt.Sprintf("Found %v", strings.Join(list, ", ")),
+		})
 	})
 	return err
 }

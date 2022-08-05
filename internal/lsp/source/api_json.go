@@ -583,6 +583,11 @@ var GeneratedAPIJSON = &APIJSON{
 							Default: "true",
 						},
 						{
+							Name:    "\"run_vulncheck_exp\"",
+							Doc:     "Run vulnerability check (`govulncheck`).",
+							Default: "false",
+						},
+						{
 							Name:    "\"test\"",
 							Doc:     "Runs `go test` for a specific set of test or benchmark functions.",
 							Default: "false",
@@ -745,7 +750,7 @@ var GeneratedAPIJSON = &APIJSON{
 			Command: "gopls.run_vulncheck_exp",
 			Title:   "Run vulncheck (experimental)",
 			Doc:     "Run vulnerability check (`govulncheck`).",
-			ArgDoc:  "{\n\t// Dir is the directory from which vulncheck will run from.\n\t\"Dir\": string,\n\t// Package pattern. E.g. \"\", \".\", \"./...\".\n\t\"Pattern\": string,\n}",
+			ArgDoc:  "{\n\t// Any document in the directory from which govulncheck will run.\n\t\"URI\": string,\n\t// Package pattern. E.g. \"\", \".\", \"./...\".\n\t\"Pattern\": string,\n}",
 		},
 		{
 			Command:   "gopls.start_debugging",
@@ -806,6 +811,11 @@ var GeneratedAPIJSON = &APIJSON{
 			Lens:  "regenerate_cgo",
 			Title: "Regenerate cgo",
 			Doc:   "Regenerates cgo definitions.",
+		},
+		{
+			Lens:  "run_vulncheck_exp",
+			Title: "Run vulncheck (experimental)",
+			Doc:   "Run vulnerability check (`govulncheck`).",
 		},
 		{
 			Lens:  "test",
