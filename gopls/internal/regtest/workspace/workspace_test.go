@@ -156,6 +156,31 @@ func TestClearAnalysisDiagnostics(t *testing.T) {
 	})
 }
 
+// TestReloadOnlyOnce checks that changes to the go.mod file do not result in
+// redundant package loads (golang/go#54473).
+//
+// Note that this test may be fragile, as it depends on specific structure to
+// log messages around reinitialization. Nevertheless, it is important for
+// guarding against accidentally duplicate reloading.
+func TestReloadOnlyOnce(t *testing.T) {
+	WithOptions(
+		ProxyFiles(workspaceProxy),
+		WorkspaceFolders("pkg"),
+	).Run(t, workspaceModule, func(t *testing.T, env *Env) {
+		dir := env.Sandbox.Workdir.URI("goodbye").SpanURI().Filename()
+		goModWithReplace := fmt.Sprintf(`%s
+replace random.org => %s
+`, env.ReadWorkspaceFile("pkg/go.mod"), dir)
+		env.WriteWorkspaceFile("pkg/go.mod", goModWithReplace)
+		env.Await(
+			OnceMet(
+				env.DoneWithChangeWatchedFiles(),
+				LogMatching(protocol.Info, `packages\.Load #\d+\n`, 2, false),
+			),
+		)
+	})
+}
+
 // This test checks that gopls updates the set of files it watches when a
 // replace target is added to the go.mod.
 func TestWatchReplaceTargets(t *testing.T) {
@@ -302,8 +327,6 @@ func main() {
 // This change tests that the version of the module used changes after it has
 // been deleted from the workspace.
 func TestDeleteModule_Interdependent(t *testing.T) {
-	t.Skip("Skipping due to golang/go#46375: race due to orphaned file reloading")
-
 	const multiModule = `
 -- moda/a/go.mod --
 module a.com
@@ -353,15 +376,6 @@ func Hello() int {
 			env.DoneWithChangeWatchedFiles(),
 		)
 
-		d := protocol.PublishDiagnosticsParams{}
-		env.Await(
-			OnceMet(
-				env.DiagnosticAtRegexpWithMessage("moda/a/go.mod", "require b.com v1.2.3", "b.com@v1.2.3 has not been downloaded"),
-				ReadDiagnostics("moda/a/go.mod", &d),
-			),
-		)
-		env.ApplyQuickFixes("moda/a/go.mod", d.Diagnostics)
-		env.Await(env.DoneWithChangeWatchedFiles())
 		got, _ := env.GoToDefinition("moda/a/a.go", env.RegexpSearch("moda/a/a.go", "Hello"))
 		if want := "b.com@v1.2.3/b/b.go"; !strings.HasSuffix(got, want) {
 			t.Errorf("expected %s, got %v", want, got)
