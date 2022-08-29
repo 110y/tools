@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,39 +54,41 @@ func init() {
 
 var UpdateGolden = flag.Bool("golden", false, "Update golden files")
 
-type CallHierarchy map[span.Span]*CallHierarchyResult
-type CodeLens map[span.URI][]protocol.CodeLens
-type Diagnostics map[span.URI][]*source.Diagnostic
-type CompletionItems map[token.Pos]*completion.CompletionItem
-type Completions map[span.Span][]Completion
-type CompletionSnippets map[span.Span][]CompletionSnippet
-type UnimportedCompletions map[span.Span][]Completion
-type DeepCompletions map[span.Span][]Completion
-type FuzzyCompletions map[span.Span][]Completion
-type CaseSensitiveCompletions map[span.Span][]Completion
-type RankCompletions map[span.Span][]Completion
-type FoldingRanges []span.Span
-type Formats []span.Span
-type Imports []span.Span
-type SemanticTokens []span.Span
-type SuggestedFixes map[span.Span][]SuggestedFix
-type FunctionExtractions map[span.Span]span.Span
-type MethodExtractions map[span.Span]span.Span
-type Definitions map[span.Span]Definition
-type Implementations map[span.Span][]span.Span
-type Highlights map[span.Span][]span.Span
-type References map[span.Span][]span.Span
-type Renames map[span.Span]string
-type PrepareRenames map[span.Span]*source.PrepareItem
-type Symbols map[span.URI][]protocol.DocumentSymbol
-type SymbolsChildren map[string][]protocol.DocumentSymbol
-type SymbolInformation map[span.Span]protocol.SymbolInformation
-type InlayHints []span.Span
-type WorkspaceSymbols map[WorkspaceSymbolsTestType]map[span.URI][]string
-type Signatures map[span.Span]*protocol.SignatureHelp
-type Links map[span.URI][]Link
-type AddImport map[span.URI]string
-type Hovers map[span.Span]string
+// These type names apparently avoid the need to repeat the
+// type in the field name and the make() expression.
+type CallHierarchy = map[span.Span]*CallHierarchyResult
+type CodeLens = map[span.URI][]protocol.CodeLens
+type Diagnostics = map[span.URI][]*source.Diagnostic
+type CompletionItems = map[token.Pos]*completion.CompletionItem
+type Completions = map[span.Span][]Completion
+type CompletionSnippets = map[span.Span][]CompletionSnippet
+type UnimportedCompletions = map[span.Span][]Completion
+type DeepCompletions = map[span.Span][]Completion
+type FuzzyCompletions = map[span.Span][]Completion
+type CaseSensitiveCompletions = map[span.Span][]Completion
+type RankCompletions = map[span.Span][]Completion
+type FoldingRanges = []span.Span
+type Formats = []span.Span
+type Imports = []span.Span
+type SemanticTokens = []span.Span
+type SuggestedFixes = map[span.Span][]SuggestedFix
+type FunctionExtractions = map[span.Span]span.Span
+type MethodExtractions = map[span.Span]span.Span
+type Definitions = map[span.Span]Definition
+type Implementations = map[span.Span][]span.Span
+type Highlights = map[span.Span][]span.Span
+type References = map[span.Span][]span.Span
+type Renames = map[span.Span]string
+type PrepareRenames = map[span.Span]*source.PrepareItem
+type Symbols = map[span.URI][]protocol.DocumentSymbol
+type SymbolsChildren = map[string][]protocol.DocumentSymbol
+type SymbolInformation = map[span.Span]protocol.SymbolInformation
+type InlayHints = []span.Span
+type WorkspaceSymbols = map[WorkspaceSymbolsTestType]map[span.URI][]string
+type Signatures = map[span.Span]*protocol.SignatureHelp
+type Links = map[span.URI][]Link
+type AddImport = map[span.URI]string
+type Hovers = map[span.Span]string
 
 type Data struct {
 	Config                   packages.Config
@@ -138,6 +139,12 @@ type Data struct {
 	mappers   map[span.URI]*protocol.ColumnMapper
 }
 
+// TODO(adonovan): there are multiple implementations of this (undocumented)
+// interface, each of which must implement similar semantics. For example:
+// - *runner in ../cmd/test/check.go
+// - *runner in ../source/source_test.go
+// - *runner in ../lsp_test.go
+// Can we avoid this duplication?
 type Tests interface {
 	CallHierarchy(*testing.T, span.Span, *CallHierarchyResult)
 	CodeLens(*testing.T, span.URI, []protocol.CodeLens)
@@ -711,13 +718,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 			if shouldSkip(data, spn.URI()) {
 				continue
 			}
-			// Temporarily suppress test failing on some ARM builders.
-			// https://github.com/golang/go/issues/54655.
-			// TODO(adonovan): reenable along with fix.
-			if name := SpanName(spn); runtime.GOARCH == "arm64" && (name == "a4_28_18" || name == "a4_35_20") {
-				t.Logf("skipping test %s on GOARCH=arm64", name)
-				continue
-			}
 			t.Run(SpanName(spn), func(t *testing.T) {
 				t.Helper()
 				tests.SuggestedFix(t, spn, actionKinds, 1)
@@ -1092,11 +1092,11 @@ func (data *Data) collectCodeLens(spn span.Span, title, cmd string) {
 	}
 	m, err := data.Mapper(spn.URI())
 	if err != nil {
-		return
+		data.t.Fatalf("Mapper: %v", err)
 	}
 	rng, err := m.Range(spn)
 	if err != nil {
-		return
+		data.t.Fatalf("Range: %v", err)
 	}
 	data.CodeLens[spn.URI()] = append(data.CodeLens[spn.URI()], protocol.CodeLens{
 		Range: rng,
@@ -1107,18 +1107,16 @@ func (data *Data) collectCodeLens(spn span.Span, title, cmd string) {
 	})
 }
 
-func (data *Data) collectDiagnostics(spn span.Span, msgSource, msg, msgSeverity string) {
-	if _, ok := data.Diagnostics[spn.URI()]; !ok {
-		data.Diagnostics[spn.URI()] = []*source.Diagnostic{}
-	}
+func (data *Data) collectDiagnostics(spn span.Span, msgSource, msgPattern, msgSeverity string) {
 	m, err := data.Mapper(spn.URI())
 	if err != nil {
-		return
+		data.t.Fatalf("Mapper: %v", err)
 	}
 	rng, err := m.Range(spn)
 	if err != nil {
-		return
+		data.t.Fatalf("Range: %v", err)
 	}
+
 	severity := protocol.SeverityError
 	switch msgSeverity {
 	case "error":
@@ -1130,14 +1128,13 @@ func (data *Data) collectDiagnostics(spn span.Span, msgSource, msg, msgSeverity 
 	case "information":
 		severity = protocol.SeverityInformation
 	}
-	// This is not the correct way to do this, but it seems excessive to do the full conversion here.
-	want := &source.Diagnostic{
+
+	data.Diagnostics[spn.URI()] = append(data.Diagnostics[spn.URI()], &source.Diagnostic{
 		Range:    rng,
 		Severity: severity,
 		Source:   source.DiagnosticSource(msgSource),
-		Message:  msg,
-	}
-	data.Diagnostics[spn.URI()] = append(data.Diagnostics[spn.URI()], want)
+		Message:  msgPattern,
+	})
 }
 
 func (data *Data) collectCompletions(typ CompletionTestType) func(span.Span, []token.Pos) {
