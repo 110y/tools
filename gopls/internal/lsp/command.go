@@ -20,13 +20,14 @@ import (
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/internal/event"
-	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/debug"
 	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/vulncheck"
+	"golang.org/x/tools/internal/event"
+	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/internal/xcontext"
 )
@@ -199,6 +200,22 @@ func (c *commandHandler) AddDependency(ctx context.Context, args command.Depende
 
 func (c *commandHandler) UpgradeDependency(ctx context.Context, args command.DependencyArgs) error {
 	return c.GoGetModule(ctx, args)
+}
+
+func (c *commandHandler) ResetGoModDiagnostics(ctx context.Context, uri command.URIArg) error {
+	return c.run(ctx, commandConfig{
+		forURI: uri.URI,
+	}, func(ctx context.Context, deps commandDeps) error {
+		deps.snapshot.View().ClearModuleUpgrades(uri.URI.SpanURI())
+		// Clear all diagnostics coming from the upgrade check source.
+		// This will clear the diagnostics in all go.mod files, but they
+		// will be re-calculated when the snapshot is diagnosed again.
+		c.s.clearDiagnosticSource(modCheckUpgradesSource)
+
+		// Re-diagnose the snapshot to remove the diagnostics.
+		c.s.diagnoseSnapshot(deps.snapshot, nil, false)
+		return nil
+	})
 }
 
 func (c *commandHandler) GoGetModule(ctx context.Context, args command.DependencyArgs) error {
@@ -829,7 +846,10 @@ func (c *commandHandler) RunVulncheckExp(ctx context.Context, args command.Vulnc
 	}, func(ctx context.Context, deps commandDeps) error {
 		view := deps.snapshot.View()
 		opts := view.Options()
-		if opts == nil || opts.Hooks.Govulncheck == nil {
+		// quickly test if gopls is compiled to support govulncheck
+		// by checking vulncheck.Govulncheck. Alternatively, we can continue and
+		// let the `gopls vulncheck` command fail. This is lighter-weight.
+		if vulncheck.Govulncheck == nil {
 			return errors.New("vulncheck feature is not available")
 		}
 

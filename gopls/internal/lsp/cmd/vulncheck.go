@@ -12,7 +12,7 @@ import (
 	"os"
 
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/gopls/internal/lsp/source"
+	vulnchecklib "golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/tool"
 )
 
@@ -54,6 +54,10 @@ func (v *vulncheck) DetailedHelp(f *flag.FlagSet) {
 }
 
 func (v *vulncheck) Run(ctx context.Context, args ...string) error {
+	if vulnchecklib.Govulncheck == nil {
+		return fmt.Errorf("vulncheck command is available only in gopls compiled with go1.18 or newer")
+	}
+
 	if len(args) > 1 {
 		return tool.CommandLineErrorf("vulncheck accepts at most one package pattern")
 	}
@@ -68,10 +72,8 @@ func (v *vulncheck) Run(ctx context.Context, args ...string) error {
 		}
 	}
 
-	opts := source.DefaultOptions().Clone()
-	v.app.options(opts) // register hook
-	if opts == nil || opts.Hooks.Govulncheck == nil {
-		return tool.CommandLineErrorf("vulncheck feature is not available")
+	if vulnchecklib.Govulncheck == nil {
+		return fmt.Errorf("vulncheck feature is not available")
 	}
 
 	loadCfg := &packages.Config{
@@ -81,13 +83,13 @@ func (v *vulncheck) Run(ctx context.Context, args ...string) error {
 		// inherit the current process's cwd and env.
 	}
 
-	res, err := opts.Hooks.Govulncheck(ctx, loadCfg, pattern)
+	res, err := vulnchecklib.Govulncheck(ctx, loadCfg, pattern)
 	if err != nil {
-		return tool.CommandLineErrorf("govulncheck failed: %v", err)
+		return fmt.Errorf("vulncheck failed: %v", err)
 	}
 	data, err := json.MarshalIndent(res, " ", " ")
 	if err != nil {
-		return tool.CommandLineErrorf("failed to decode results: %v", err)
+		return fmt.Errorf("vulncheck failed to encode result: %v", err)
 	}
 	fmt.Printf("%s", data)
 	return nil

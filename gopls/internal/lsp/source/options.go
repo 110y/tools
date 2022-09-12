@@ -49,7 +49,6 @@ import (
 	"golang.org/x/tools/go/analysis/passes/unsafeptr"
 	"golang.org/x/tools/go/analysis/passes/unusedresult"
 	"golang.org/x/tools/go/analysis/passes/unusedwrite"
-	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/embeddirective"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/fillreturns"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/fillstruct"
@@ -165,6 +164,7 @@ func DefaultOptions() *Options {
 				CompleteUnimported:      true,
 				CompletionDocumentation: true,
 				DeepCompletion:          true,
+				ChattyDiagnostics:       true,
 			},
 			Hooks: Hooks{
 				ComputeEdits:         myers.ComputeEdits,
@@ -519,9 +519,6 @@ type Hooks struct {
 	TypeErrorAnalyzers   map[string]*Analyzer
 	ConvenienceAnalyzers map[string]*Analyzer
 	StaticcheckAnalyzers map[string]*Analyzer
-
-	// Govulncheck is the implementation of the Govulncheck gopls command.
-	Govulncheck func(context.Context, *packages.Config, string) (command.VulncheckResult, error)
 }
 
 // InternalOptions contains settings that are not intended for use by the
@@ -591,11 +588,6 @@ type InternalOptions struct {
 	// ChattyDiagnostics controls whether to report file diagnostics for each
 	// file change. If unset, gopls only reports diagnostics when they change, or
 	// when a file is opened or closed.
-	//
-	// TODO(rfindley): is seems that for many clients this should be true by
-	// default. For example, coc.nvim seems to get confused if diagnostics are
-	// not re-published. Switch the default to true after some period of internal
-	// testing.
 	ChattyDiagnostics bool
 }
 
@@ -773,7 +765,6 @@ func (o *Options) Clone() *Options {
 			ComputeEdits:         o.ComputeEdits,
 			GofumptFormat:        o.GofumptFormat,
 			URLRegexp:            o.URLRegexp,
-			Govulncheck:          o.Govulncheck,
 		},
 		ServerOptions: o.ServerOptions,
 		UserOptions:   o.UserOptions,
@@ -829,7 +820,6 @@ func (o *Options) EnableAllExperiments() {
 	o.ExperimentalUseInvalidMetadata = true
 	o.ExperimentalWatchedFileDelay = 50 * time.Millisecond
 	o.NewDiff = "checked"
-	o.ChattyDiagnostics = true
 }
 
 func (o *Options) enableAllExperimentMaps() {
