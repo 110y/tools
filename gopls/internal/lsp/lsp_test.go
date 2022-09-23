@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"golang.org/x/tools/gopls/internal/lsp/cache"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
@@ -1072,7 +1074,12 @@ func (r *runner) PrepareRename(t *testing.T, src span.Span, want *source.Prepare
 		t.Errorf("prepare rename failed for %v: got error: %v", src, err)
 		return
 	}
-	// we all love typed nils
+
+	// TODO(rfindley): can we consolidate on a single representation for
+	// PrepareRename results, and use cmp.Diff here?
+
+	// PrepareRename may fail with no error if there was no object found at the
+	// position.
 	if got == nil {
 		if want.Text != "" { // expected an ident.
 			t.Errorf("prepare rename failed for %v: got nil", src)
@@ -1086,7 +1093,7 @@ func (r *runner) PrepareRename(t *testing.T, src span.Span, want *source.Prepare
 			t.Errorf("prepare rename failed: incorrect point, got %v want %v", got.Range.Start, want.Range.Start)
 		}
 	} else {
-		if protocol.CompareRange(got.Range, want.Range) != 0 {
+		if got.Range != want.Range {
 			t.Errorf("prepare rename failed: incorrect range got %v want %v", got.Range, want.Range)
 		}
 	}
@@ -1147,10 +1154,7 @@ func (r *runner) Symbols(t *testing.T, uri span.URI, expectedSymbols []protocol.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != len(expectedSymbols) {
-		t.Errorf("want %d top-level symbols in %v, got %d", len(expectedSymbols), uri, len(got))
-		return
-	}
+
 	symbols := make([]protocol.DocumentSymbol, len(got))
 	for i, s := range got {
 		s, ok := s.(protocol.DocumentSymbol)
@@ -1159,18 +1163,25 @@ func (r *runner) Symbols(t *testing.T, uri span.URI, expectedSymbols []protocol.
 		}
 		symbols[i] = s
 	}
-	if diff := tests.DiffSymbols(t, uri, expectedSymbols, symbols); diff != "" {
-		t.Error(diff)
+
+	// Sort by position to make it easier to find errors.
+	sortSymbols := func(s []protocol.DocumentSymbol) {
+		sort.Slice(s, func(i, j int) bool {
+			return protocol.CompareRange(s[i].SelectionRange, s[j].SelectionRange) < 0
+		})
+	}
+	sortSymbols(expectedSymbols)
+	sortSymbols(symbols)
+
+	// Ignore 'Range' here as it is difficult (impossible?) to express
+	// multi-line ranges in the packagestest framework.
+	ignoreRange := cmpopts.IgnoreFields(protocol.DocumentSymbol{}, "Range")
+	if diff := cmp.Diff(expectedSymbols, symbols, ignoreRange); diff != "" {
+		t.Errorf("mismatching symbols (-want +got)\n%s", diff)
 	}
 }
 
 func (r *runner) WorkspaceSymbols(t *testing.T, uri span.URI, query string, typ tests.WorkspaceSymbolsTestType) {
-	r.callWorkspaceSymbols(t, uri, query, typ)
-}
-
-func (r *runner) callWorkspaceSymbols(t *testing.T, uri span.URI, query string, typ tests.WorkspaceSymbolsTestType) {
-	t.Helper()
-
 	matcher := tests.WorkspaceSymbolsTestTypeToMatcher(typ)
 
 	original := r.server.session.Options()

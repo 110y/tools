@@ -86,8 +86,7 @@ type Highlights = map[span.Span][]span.Span
 type References = map[span.Span][]span.Span
 type Renames = map[span.Span]string
 type PrepareRenames = map[span.Span]*source.PrepareItem
-type Symbols = map[span.URI][]protocol.DocumentSymbol
-type SymbolsChildren = map[string][]protocol.DocumentSymbol
+type Symbols = map[span.URI][]*symbol
 type SymbolInformation = map[span.Span]protocol.SymbolInformation
 type InlayHints = []span.Span
 type WorkspaceSymbols = map[WorkspaceSymbolsTestType]map[span.URI][]string
@@ -125,15 +124,12 @@ type Data struct {
 	InlayHints               InlayHints
 	PrepareRenames           PrepareRenames
 	Symbols                  Symbols
-	symbolsChildren          SymbolsChildren
-	symbolInformation        SymbolInformation
 	WorkspaceSymbols         WorkspaceSymbols
 	Signatures               Signatures
 	Links                    Links
 	AddImport                AddImport
 	Hovers                   Hovers
 
-	t         testing.TB
 	fragments map[string]string
 	dir       string
 	golden    map[string]*Golden
@@ -250,6 +246,12 @@ type SuggestedFix struct {
 	ActionKind, Title string
 }
 
+// A symbol holds a DocumentSymbol along with its parent-child edge.
+type symbol struct {
+	pSymbol      protocol.DocumentSymbol
+	id, parentID string
+}
+
 type Golden struct {
 	Filename string
 	Archive  *txtar.Archive
@@ -328,15 +330,12 @@ func load(t testing.TB, mode string, dir string) *Data {
 		FunctionExtractions:      make(FunctionExtractions),
 		MethodExtractions:        make(MethodExtractions),
 		Symbols:                  make(Symbols),
-		symbolsChildren:          make(SymbolsChildren),
-		symbolInformation:        make(SymbolInformation),
 		WorkspaceSymbols:         make(WorkspaceSymbols),
 		Signatures:               make(Signatures),
 		Links:                    make(Links),
 		AddImport:                make(AddImport),
 		Hovers:                   make(Hovers),
 
-		t:         t,
 		dir:       dir,
 		fragments: map[string]string{},
 		golden:    map[string]*Golden{},
@@ -504,12 +503,7 @@ func load(t testing.TB, mode string, dir string) *Data {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, symbols := range datum.Symbols {
-		for i := range symbols {
-			children := datum.symbolsChildren[symbols[i].Name]
-			symbols[i].Children = children
-		}
-	}
+
 	// Collect names for the entries that require golden files.
 	if err := datum.Exported.Expect(map[string]interface{}{
 		"godef":                        datum.collectDefinitionNames,
@@ -847,10 +841,44 @@ func Run(t *testing.T, tests Tests, data *Data) {
 
 	t.Run("Symbols", func(t *testing.T) {
 		t.Helper()
-		for uri, expectedSymbols := range data.Symbols {
+		for uri, allSymbols := range data.Symbols {
+			byParent := make(map[string][]*symbol)
+			for _, sym := range allSymbols {
+				if sym.parentID != "" {
+					byParent[sym.parentID] = append(byParent[sym.parentID], sym)
+				}
+			}
+
+			// collectChildren does a depth-first traversal of the symbol tree,
+			// computing children of child nodes before returning to their parent.
+			// This is necessary as the Children field is slice of non-pointer types,
+			// and therefore we need to be careful to mutate children first before
+			// assigning them to their parent.
+			var collectChildren func(id string) []protocol.DocumentSymbol
+			collectChildren = func(id string) []protocol.DocumentSymbol {
+				children := byParent[id]
+				// delete from byParent before recursing, to ensure that
+				// collectChildren terminates even in the presence of cycles.
+				delete(byParent, id)
+				var result []protocol.DocumentSymbol
+				for _, child := range children {
+					child.pSymbol.Children = collectChildren(child.id)
+					result = append(result, child.pSymbol)
+				}
+				return result
+			}
+
+			var topLevel []protocol.DocumentSymbol
+			for _, sym := range allSymbols {
+				if sym.parentID == "" {
+					sym.pSymbol.Children = collectChildren(sym.id)
+					topLevel = append(topLevel, sym.pSymbol)
+				}
+			}
+
 			t.Run(uriName(uri), func(t *testing.T) {
 				t.Helper()
-				tests.Symbols(t, uri, expectedSymbols)
+				tests.Symbols(t, uri, topLevel)
 			})
 		}
 	})
@@ -1093,19 +1121,8 @@ func (data *Data) Golden(t *testing.T, tag, target string, update func() ([]byte
 }
 
 func (data *Data) collectCodeLens(spn span.Span, title, cmd string) {
-	if _, ok := data.CodeLens[spn.URI()]; !ok {
-		data.CodeLens[spn.URI()] = []protocol.CodeLens{}
-	}
-	m, err := data.Mapper(spn.URI())
-	if err != nil {
-		data.t.Fatalf("Mapper: %v", err)
-	}
-	rng, err := m.Range(spn)
-	if err != nil {
-		data.t.Fatalf("Range: %v", err)
-	}
 	data.CodeLens[spn.URI()] = append(data.CodeLens[spn.URI()], protocol.CodeLens{
-		Range: rng,
+		Range: data.mustRange(spn),
 		Command: protocol.Command{
 			Title:   title,
 			Command: cmd,
@@ -1114,15 +1131,6 @@ func (data *Data) collectCodeLens(spn span.Span, title, cmd string) {
 }
 
 func (data *Data) collectDiagnostics(spn span.Span, msgSource, msgPattern, msgSeverity string) {
-	m, err := data.Mapper(spn.URI())
-	if err != nil {
-		data.t.Fatalf("Mapper: %v", err)
-	}
-	rng, err := m.Range(spn)
-	if err != nil {
-		data.t.Fatalf("Range: %v", err)
-	}
-
 	severity := protocol.SeverityError
 	switch msgSeverity {
 	case "error":
@@ -1136,7 +1144,7 @@ func (data *Data) collectDiagnostics(spn span.Span, msgSource, msgPattern, msgSe
 	}
 
 	data.Diagnostics[spn.URI()] = append(data.Diagnostics[spn.URI()], &source.Diagnostic{
-		Range:    rng,
+		Range:    data.mustRange(spn),
 		Severity: severity,
 		Source:   source.DiagnosticSource(msgSource),
 		Message:  msgPattern,
@@ -1177,15 +1185,9 @@ func (data *Data) collectCompletions(typ CompletionTestType) func(span.Span, []t
 	}
 }
 
-func (data *Data) collectCompletionItems(pos token.Pos, args []string) {
-	if len(args) < 3 {
-		loc := data.Exported.ExpectFileSet.Position(pos)
-		data.t.Fatalf("%s:%d: @item expects at least 3 args, got %d",
-			loc.Filename, loc.Line, len(args))
-	}
-	label, detail, kind := args[0], args[1], args[2]
+func (data *Data) collectCompletionItems(pos token.Pos, label, detail, kind string, args []string) {
 	var documentation string
-	if len(args) == 4 {
+	if len(args) > 3 {
 		documentation = args[3]
 	}
 	data.CompletionItems[pos] = &completion.CompletionItem{
@@ -1245,14 +1247,7 @@ func (data *Data) collectImplementations(src span.Span, targets []span.Span) {
 
 func (data *Data) collectIncomingCalls(src span.Span, calls []span.Span) {
 	for _, call := range calls {
-		m, err := data.Mapper(call.URI())
-		if err != nil {
-			data.t.Fatal(err)
-		}
-		rng, err := m.Range(call)
-		if err != nil {
-			data.t.Fatal(err)
-		}
+		rng := data.mustRange(call)
 		// we're only comparing protocol.range
 		if data.CallHierarchy[src] != nil {
 			data.CallHierarchy[src].IncomingCalls = append(data.CallHierarchy[src].IncomingCalls,
@@ -1275,19 +1270,11 @@ func (data *Data) collectOutgoingCalls(src span.Span, calls []span.Span) {
 		data.CallHierarchy[src] = &CallHierarchyResult{}
 	}
 	for _, call := range calls {
-		m, err := data.Mapper(call.URI())
-		if err != nil {
-			data.t.Fatal(err)
-		}
-		rng, err := m.Range(call)
-		if err != nil {
-			data.t.Fatal(err)
-		}
 		// we're only comparing protocol.range
 		data.CallHierarchy[src].OutgoingCalls = append(data.CallHierarchy[src].OutgoingCalls,
 			protocol.CallHierarchyItem{
 				URI:   protocol.DocumentURI(call.URI()),
-				Range: rng,
+				Range: data.mustRange(call),
 			})
 	}
 }
@@ -1335,57 +1322,38 @@ func (data *Data) collectRenames(src span.Span, newText string) {
 	data.Renames[src] = newText
 }
 
-func (data *Data) collectPrepareRenames(src span.Span, rng span.Range, placeholder string) {
-	m, err := data.Mapper(src.URI())
-	if err != nil {
-		data.t.Fatal(err)
-	}
-	// Convert range to span and then to protocol.Range.
-	spn, err := rng.Span()
-	if err != nil {
-		data.t.Fatal(err)
-	}
-	prng, err := m.Range(spn)
-	if err != nil {
-		data.t.Fatal(err)
-	}
+func (data *Data) collectPrepareRenames(src, spn span.Span, placeholder string) {
 	data.PrepareRenames[src] = &source.PrepareItem{
-		Range: prng,
+		Range: data.mustRange(spn),
 		Text:  placeholder,
 	}
 }
 
 // collectSymbols is responsible for collecting @symbol annotations.
-func (data *Data) collectSymbols(name string, spn span.Span, kind string, parentName string, siName string) {
+func (data *Data) collectSymbols(name string, selectionRng span.Span, kind, detail, id, parentID string) {
+	// We don't set 'Range' here as it is difficult (impossible?) to express
+	// multi-line ranges in the packagestest framework.
+	uri := selectionRng.URI()
+	data.Symbols[uri] = append(data.Symbols[uri], &symbol{
+		pSymbol: protocol.DocumentSymbol{
+			Name:           name,
+			Kind:           protocol.ParseSymbolKind(kind),
+			SelectionRange: data.mustRange(selectionRng),
+			Detail:         detail,
+		},
+		id:       id,
+		parentID: parentID,
+	})
+}
+
+// mustRange converts spn into a protocol.Range, panicking on any error.
+func (data *Data) mustRange(spn span.Span) protocol.Range {
 	m, err := data.Mapper(spn.URI())
-	if err != nil {
-		data.t.Fatal(err)
-	}
 	rng, err := m.Range(spn)
 	if err != nil {
-		data.t.Fatal(err)
+		panic(fmt.Sprintf("converting span %s to range: %v", spn, err))
 	}
-	sym := protocol.DocumentSymbol{
-		Name:           name,
-		Kind:           protocol.ParseSymbolKind(kind),
-		SelectionRange: rng,
-	}
-	if parentName == "" {
-		data.Symbols[spn.URI()] = append(data.Symbols[spn.URI()], sym)
-	} else {
-		data.symbolsChildren[parentName] = append(data.symbolsChildren[parentName], sym)
-	}
-
-	// Reuse @symbol in the workspace symbols tests.
-	si := protocol.SymbolInformation{
-		Name: siName,
-		Kind: sym.Kind,
-		Location: protocol.Location{
-			URI:   protocol.URIFromSpanURI(spn.URI()),
-			Range: sym.SelectionRange,
-		},
-	}
-	data.symbolInformation[spn] = si
+	return rng
 }
 
 func (data *Data) collectWorkspaceSymbols(typ WorkspaceSymbolsTestType) func(*expect.Note, string) {
