@@ -167,6 +167,7 @@ func DefaultOptions() *Options {
 				ChattyDiagnostics:       true,
 			},
 			Hooks: Hooks{
+				// TODO(adonovan): switch to new diff.Strings implementation.
 				ComputeEdits:         myers.ComputeEdits,
 				URLRegexp:            urlRegexp(),
 				DefaultAnalyzers:     defaultAnalyzers(),
@@ -497,6 +498,10 @@ func (u *UserOptions) SetEnvSlice(env []string) {
 	}
 }
 
+// DiffFunction is the type for a function that produces a set of edits that
+// convert from the before content to the after content.
+type DiffFunction func(before, after string) []diff.Edit
+
 // Hooks contains configuration that is provided to the Gopls command by the
 // main package.
 type Hooks struct {
@@ -510,7 +515,7 @@ type Hooks struct {
 	StaticcheckSupported bool
 
 	// ComputeEdits is used to compute edits between file versions.
-	ComputeEdits diff.ComputeEdits
+	ComputeEdits DiffFunction
 
 	// URLRegexp is used to find potential URLs in comments/strings.
 	//

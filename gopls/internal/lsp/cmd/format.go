@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"io/ioutil"
 
-	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/span"
 )
 
@@ -80,7 +80,7 @@ func (c *format) Run(ctx context.Context, args ...string) error {
 		if err != nil {
 			return fmt.Errorf("%v: %v", spn, err)
 		}
-		formatted := diff.ApplyEdits(string(file.mapper.Content), sedits)
+		formatted := diff.Apply(string(file.mapper.Content), sedits)
 		printIt := true
 		if c.List {
 			printIt = false
@@ -96,7 +96,7 @@ func (c *format) Run(ctx context.Context, args ...string) error {
 		}
 		if c.Diff {
 			printIt = false
-			u := diff.ToUnified(filename+".orig", filename, string(file.mapper.Content), sedits)
+			u := diff.Unified(filename+".orig", filename, string(file.mapper.Content), sedits)
 			fmt.Print(u)
 		}
 		if printIt {

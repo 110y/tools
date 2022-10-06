@@ -100,7 +100,7 @@ func (r *rename) Run(ctx context.Context, args ...string) error {
 		if err != nil {
 			return fmt.Errorf("%v: %v", edits, err)
 		}
-		newContent := diff.ApplyEdits(string(cmdFile.mapper.Content), renameEdits)
+		newContent := diff.Apply(string(cmdFile.mapper.Content), renameEdits)
 
 		switch {
 		case r.Write:
@@ -112,7 +112,7 @@ func (r *rename) Run(ctx context.Context, args ...string) error {
 			}
 			ioutil.WriteFile(filename, []byte(newContent), 0644)
 		case r.Diff:
-			diffs := diff.ToUnified(filename+".orig", filename, string(cmdFile.mapper.Content), renameEdits)
+			diffs := diff.Unified(filename+".orig", filename, string(cmdFile.mapper.Content), renameEdits)
 			fmt.Print(diffs)
 		default:
 			if len(orderedURIs) > 1 {
