@@ -20,9 +20,9 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
+	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/event"
-	"golang.org/x/tools/internal/span"
 	"golang.org/x/tools/refactor/satisfy"
 )
 
@@ -446,7 +446,6 @@ func renameObj(ctx context.Context, s Snapshot, newName string, qos []qualifiedO
 			return nil, err
 		}
 		m := protocol.NewColumnMapper(uri, data)
-		diff.SortEdits(edits)
 		protocolEdits, err := ToProtocolEdits(m, edits)
 		if err != nil {
 			return nil, err
