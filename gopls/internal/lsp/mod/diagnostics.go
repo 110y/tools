@@ -10,13 +10,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
+	"golang.org/x/tools/gopls/internal/govulncheck"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
+	"golang.org/x/vuln/osv"
 )
 
 // Diagnostics returns diagnostics for the modules in the workspace.
@@ -136,7 +141,7 @@ func ModUpgradeDiagnostics(ctx context.Context, snapshot source.Snapshot, fh sou
 			return nil, err
 		}
 		// Upgrade to the exact version we offer the user, not the most recent.
-		title := fmt.Sprintf("Upgrade to %v", ver)
+		title := fmt.Sprintf("%s%v", upgradeCodeActionPrefix, ver)
 		cmd, err := command.NewUpgradeDependencyCommand(title, command.DependencyArgs{
 			URI:        protocol.URIFromSpanURI(fh.URI()),
 			AddRequire: false,
@@ -158,6 +163,23 @@ func ModUpgradeDiagnostics(ctx context.Context, snapshot source.Snapshot, fh sou
 	return upgradeDiagnostics, nil
 }
 
+func pkgVersion(pkgVersion string) (pkg, ver string) {
+	if pkgVersion == "" {
+		return "", ""
+	}
+	at := strings.Index(pkgVersion, "@")
+	switch {
+	case at < 0:
+		return pkgVersion, ""
+	case at == 0:
+		return "", pkgVersion[1:]
+	default:
+		return pkgVersion[:at], pkgVersion[at+1:]
+	}
+}
+
+const upgradeCodeActionPrefix = "Upgrade to "
+
 // ModVulnerabilityDiagnostics adds diagnostics for vulnerabilities in individual modules
 // if the vulnerability is recorded in the view.
 func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle) (vulnDiagnostics []*source.Diagnostic, err error) {
@@ -173,7 +195,7 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 
 	vs := snapshot.View().Vulnerabilities(fh.URI())
 	// TODO(suzmue): should we just store the vulnerabilities like this?
-	vulns := make(map[string][]command.Vuln)
+	vulns := make(map[string][]govulncheck.Vuln)
 	for _, v := range vs {
 		vulns[v.ModPath] = append(vulns[v.ModPath], v)
 	}
@@ -190,28 +212,32 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		for _, v := range vulnList {
 			// Only show the diagnostic if the vulnerability was calculated
 			// for the module at the current version.
-			if semver.IsValid(v.CurrentVersion) && semver.Compare(req.Mod.Version, v.CurrentVersion) != 0 {
+			if semver.IsValid(v.FoundIn) && semver.Compare(req.Mod.Version, v.FoundIn) != 0 {
 				continue
 			}
-
 			// Upgrade to the exact version we offer the user, not the most recent.
-			// TODO(suzmue): Add an upgrade for module@latest.
+			// TODO(hakim): Produce fixes only for affecting vulnerabilities (if len(v.Trace) > 0)
 			var fixes []source.SuggestedFix
-			if fixedVersion := v.FixedVersion; semver.IsValid(fixedVersion) && semver.Compare(req.Mod.Version, fixedVersion) < 0 {
-				title := fmt.Sprintf("Upgrade to %v", fixedVersion)
-				cmd, err := command.NewUpgradeDependencyCommand(title, command.DependencyArgs{
-					URI:        protocol.URIFromSpanURI(fh.URI()),
-					AddRequire: false,
-					GoCmdArgs:  []string{req.Mod.Path + "@" + fixedVersion},
-				})
+			if fixedVersion := v.FixedIn; semver.IsValid(fixedVersion) && semver.Compare(req.Mod.Version, fixedVersion) < 0 {
+				cmd, err := getUpgradeCodeAction(fh, req, fixedVersion)
 				if err != nil {
 					return nil, err
 				}
-				fixes = append(fixes, source.SuggestedFixFromCommand(cmd, protocol.QuickFix))
+				// Add an upgrade for module@latest.
+				// TODO(suzmue): verify if latest is the same as fixedVersion.
+				latest, err := getUpgradeCodeAction(fh, req, "latest")
+				if err != nil {
+					return nil, err
+				}
+
+				fixes = []source.SuggestedFix{
+					source.SuggestedFixFromCommand(cmd, protocol.QuickFix),
+					source.SuggestedFixFromCommand(latest, protocol.QuickFix),
+				}
 			}
 
 			severity := protocol.SeverityInformation
-			if len(v.CallStacks) > 0 {
+			if len(v.Trace) > 0 {
 				severity = protocol.SeverityWarning
 			}
 
@@ -220,9 +246,9 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 				Range:          rng,
 				Severity:       severity,
 				Source:         source.Vulncheck,
-				Code:           v.ID,
-				CodeHref:       v.URL,
-				Message:        formatMessage(&v),
+				Code:           v.OSV.ID,
+				CodeHref:       href(v.OSV),
+				Message:        formatMessage(v),
 				SuggestedFixes: fixes,
 			})
 		}
@@ -232,8 +258,8 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 	return vulnDiagnostics, nil
 }
 
-func formatMessage(v *command.Vuln) string {
-	details := []byte(v.Details)
+func formatMessage(v govulncheck.Vuln) string {
+	details := []byte(v.OSV.Details)
 	// Remove any new lines that are not preceded or followed by a new line.
 	for i, r := range details {
 		if r == '\n' && i > 0 && details[i-1] != '\n' && i+1 < len(details) && details[i+1] != '\n' {
@@ -241,4 +267,66 @@ func formatMessage(v *command.Vuln) string {
 		}
 	}
 	return fmt.Sprintf("%s has a known vulnerability: %s", v.ModPath, string(bytes.TrimSpace(details)))
+}
+
+// href returns a URL embedded in the entry if any.
+// If no suitable URL is found, it returns a default entry in
+// pkg.go.dev/vuln.
+func href(vuln *osv.Entry) string {
+	for _, affected := range vuln.Affected {
+		if url := affected.DatabaseSpecific.URL; url != "" {
+			return url
+		}
+	}
+	for _, r := range vuln.References {
+		if r.Type == "WEB" {
+			return r.URL
+		}
+	}
+	return fmt.Sprintf("https://pkg.go.dev/vuln/%s", vuln.ID)
+}
+
+func getUpgradeCodeAction(fh source.FileHandle, req *modfile.Require, version string) (protocol.Command, error) {
+	cmd, err := command.NewUpgradeDependencyCommand(upgradeTitle(version), command.DependencyArgs{
+		URI:        protocol.URIFromSpanURI(fh.URI()),
+		AddRequire: false,
+		GoCmdArgs:  []string{req.Mod.Path + "@" + version},
+	})
+	if err != nil {
+		return protocol.Command{}, err
+	}
+	return cmd, nil
+}
+
+func upgradeTitle(fixedVersion string) string {
+	title := fmt.Sprintf("%s%v", upgradeCodeActionPrefix, fixedVersion)
+	return title
+}
+
+// SelectUpgradeCodeActions takes a list of upgrade code actions for a
+// required module and returns a more selective list of upgrade code actions,
+// where the code actions have been deduped.
+func SelectUpgradeCodeActions(actions []protocol.CodeAction) []protocol.CodeAction {
+	// TODO(suzmue): we can further limit the code actions to only return the most
+	// recent version that will fix all the vulnerabilities.
+
+	set := make(map[string]protocol.CodeAction)
+	for _, action := range actions {
+		set[action.Command.Title] = action
+	}
+	var result []protocol.CodeAction
+	for _, action := range set {
+		result = append(result, action)
+	}
+	// Sort results by version number, latest first.
+	// There should be no duplicates at this point.
+	sort.Slice(result, func(i, j int) bool {
+		vi, vj := getUpgradeVersion(result[i]), getUpgradeVersion(result[j])
+		return vi == "latest" || (vj != "latest" && semver.Compare(vi, vj) > 0)
+	})
+	return result
+}
+
+func getUpgradeVersion(p protocol.CodeAction) string {
+	return strings.TrimPrefix(p.Title, upgradeCodeActionPrefix)
 }
