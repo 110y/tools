@@ -535,7 +535,7 @@ func (s *Server) checkForOrphanedFile(ctx context.Context, snapshot source.Snaps
 		return nil
 	}
 	pkgs, err := snapshot.PackagesForFile(ctx, fh.URI(), source.TypecheckWorkspace, false)
-	if len(pkgs) > 0 || err == nil {
+	if len(pkgs) > 0 {
 		return nil
 	}
 	pgf, err := snapshot.ParseGo(ctx, fh, source.ParseHeader)
@@ -545,11 +545,7 @@ func (s *Server) checkForOrphanedFile(ctx context.Context, snapshot source.Snaps
 	if !pgf.File.Name.Pos().IsValid() {
 		return nil
 	}
-	spn, err := span.NewRange(pgf.Tok, pgf.File.Name.Pos(), pgf.File.Name.End()).Span()
-	if err != nil {
-		return nil
-	}
-	rng, err := pgf.Mapper.Range(spn)
+	rng, err := pgf.Mapper.PosRange(pgf.File.Name.Pos(), pgf.File.Name.End())
 	if err != nil {
 		return nil
 	}
