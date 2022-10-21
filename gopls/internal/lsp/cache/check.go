@@ -100,11 +100,7 @@ func (s *snapshot) buildPackageHandle(ctx context.Context, id PackageID, mode so
 	// the recursive key building of dependencies in parallel.
 	deps := make(map[PackageID]*packageHandle)
 	var depKey source.Hash // XOR of all unique deps
-	for _, depID := range m.Imports {
-		depHandle, ok := deps[depID]
-		if ok {
-			continue // e.g. duplicate import
-		}
+	for _, depID := range m.DepsByPkgPath {
 		depHandle, err := s.buildPackageHandle(ctx, depID, s.workspaceParseMode(depID))
 		// Don't use invalid metadata for dependencies if the top-level
 		// metadata is valid. We only load top-level packages, so if the
@@ -452,10 +448,10 @@ func doTypeCheck(ctx context.Context, snapshot *snapshot, goFiles, compiledGoFil
 	defer done()
 
 	pkg := &pkg{
-		m:             m,
-		mode:          mode,
-		depsByPkgPath: make(map[PackagePath]*pkg),
-		types:         types.NewPackage(string(m.PkgPath), string(m.Name)),
+		m:     m,
+		mode:  mode,
+		deps:  make(map[PackageID]*pkg),
+		types: types.NewPackage(string(m.PkgPath), string(m.Name)),
 		typesInfo: &types.Info{
 			Types:      make(map[ast.Expr]types.TypeAndValue),
 			Defs:       make(map[*ast.Ident]types.Object),
@@ -528,16 +524,16 @@ func doTypeCheck(ctx context.Context, snapshot *snapshot, goFiles, compiledGoFil
 			// based on the metadata before we start type checking,
 			// reporting them via types.Importer places the errors
 			// at the correct source location.
-			id, ok := pkg.m.Imports[ImportPath(path)]
+			id, ok := pkg.m.DepsByImpPath[ImportPath(path)]
 			if !ok {
 				// If the import declaration is broken,
 				// go list may fail to report metadata about it.
 				// See TestFixImportDecl for an example.
 				return nil, fmt.Errorf("missing metadata for import of %q", path)
 			}
-			dep, ok := deps[id]
+			dep, ok := deps[id] // id may be ""
 			if !ok {
-				return nil, snapshot.missingPkgError(ctx, path)
+				return nil, snapshot.missingPkgError(path)
 			}
 			if !source.IsValidImport(string(m.PkgPath), string(dep.m.PkgPath)) {
 				return nil, fmt.Errorf("invalid use of internal package %s", path)
@@ -546,7 +542,7 @@ func doTypeCheck(ctx context.Context, snapshot *snapshot, goFiles, compiledGoFil
 			if err != nil {
 				return nil, err
 			}
-			pkg.depsByPkgPath[depPkg.m.PkgPath] = depPkg
+			pkg.deps[depPkg.m.ID] = depPkg
 			return depPkg.types, nil
 		}),
 	}
@@ -761,21 +757,19 @@ func (s *snapshot) depsErrors(ctx context.Context, pkg *pkg) ([]*source.Diagnost
 
 // missingPkgError returns an error message for a missing package that varies
 // based on the user's workspace mode.
-func (s *snapshot) missingPkgError(ctx context.Context, pkgPath string) error {
+func (s *snapshot) missingPkgError(pkgPath string) error {
 	var b strings.Builder
 	if s.workspaceMode()&moduleMode == 0 {
 		gorootSrcPkg := filepath.FromSlash(filepath.Join(s.view.goroot, "src", pkgPath))
-
-		b.WriteString(fmt.Sprintf("cannot find package %q in any of \n\t%s (from $GOROOT)", pkgPath, gorootSrcPkg))
-
+		fmt.Fprintf(&b, "cannot find package %q in any of \n\t%s (from $GOROOT)", pkgPath, gorootSrcPkg)
 		for _, gopath := range filepath.SplitList(s.view.gopath) {
 			gopathSrcPkg := filepath.FromSlash(filepath.Join(gopath, "src", pkgPath))
-			b.WriteString(fmt.Sprintf("\n\t%s (from $GOPATH)", gopathSrcPkg))
+			fmt.Fprintf(&b, "\n\t%s (from $GOPATH)", gopathSrcPkg)
 		}
 	} else {
-		b.WriteString(fmt.Sprintf("no required module provides package %q", pkgPath))
-		if err := s.getInitializationError(ctx); err != nil {
-			b.WriteString(fmt.Sprintf("(workspace configuration error: %s)", err.MainError))
+		fmt.Fprintf(&b, "no required module provides package %q", pkgPath)
+		if err := s.getInitializationError(); err != nil {
+			fmt.Fprintf(&b, "\n(workspace configuration error: %s)", err.MainError)
 		}
 	}
 	return errors.New(b.String())
