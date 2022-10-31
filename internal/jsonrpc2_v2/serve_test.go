@@ -41,10 +41,7 @@ func TestIdleTimeout(t *testing.T) {
 		listener = jsonrpc2.NewIdleListener(d, listener)
 		defer listener.Close()
 
-		server, err := jsonrpc2.Serve(ctx, listener, jsonrpc2.ConnectionOptions{})
-		if err != nil {
-			t.Fatal(err)
-		}
+		server := jsonrpc2.NewServer(ctx, listener, jsonrpc2.ConnectionOptions{})
 
 		// Exercise some connection/disconnection patterns, and then assert that when
 		// our timer fires, the server exits.
@@ -187,12 +184,9 @@ func TestServe(t *testing.T) {
 }
 
 func newFake(t *testing.T, ctx context.Context, l jsonrpc2.Listener) (*jsonrpc2.Connection, func(), error) {
-	server, err := jsonrpc2.Serve(ctx, l, jsonrpc2.ConnectionOptions{
+	server := jsonrpc2.NewServer(ctx, l, jsonrpc2.ConnectionOptions{
 		Handler: fakeHandler{},
 	})
-	if err != nil {
-		return nil, nil, err
-	}
 
 	client, err := jsonrpc2.Dial(ctx,
 		l.Dialer(),
@@ -230,7 +224,7 @@ func TestIdleListenerAcceptCloseRace(t *testing.T) {
 	watchdog := time.Duration(n) * 1000 * time.Millisecond
 	timer := time.AfterFunc(watchdog, func() {
 		debug.SetTraceback("all")
-		panic(fmt.Sprintf("TestAcceptCloseRace deadlocked after %v", watchdog))
+		panic(fmt.Sprintf("%s deadlocked after %v", t.Name(), watchdog))
 	})
 	defer timer.Stop()
 
@@ -259,5 +253,82 @@ func TestIdleListenerAcceptCloseRace(t *testing.T) {
 			c.Close()
 		}
 		<-done
+	}
+}
+
+// TestCloseCallRace checks for a race resulting in a deadlock when a Call on
+// one side of the connection races with a Close (or otherwise broken
+// connection) initiated from the other side.
+//
+// (The Call method was waiting for a result from the Read goroutine to
+// determine which error value to return, but the Read goroutine was waiting for
+// in-flight calls to complete before reporting that result.)
+func TestCloseCallRace(t *testing.T) {
+	ctx := context.Background()
+	n := 10
+
+	watchdog := time.Duration(n) * 1000 * time.Millisecond
+	timer := time.AfterFunc(watchdog, func() {
+		debug.SetTraceback("all")
+		panic(fmt.Sprintf("%s deadlocked after %v", t.Name(), watchdog))
+	})
+	defer timer.Stop()
+
+	for ; n > 0; n-- {
+		listener, err := jsonrpc2.NetPipeListener(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		pokec := make(chan *jsonrpc2.AsyncCall, 1)
+
+		s := jsonrpc2.NewServer(ctx, listener, jsonrpc2.BinderFunc(func(_ context.Context, srvConn *jsonrpc2.Connection) jsonrpc2.ConnectionOptions {
+			h := jsonrpc2.HandlerFunc(func(ctx context.Context, _ *jsonrpc2.Request) (interface{}, error) {
+				// Start a concurrent call from the server to the client.
+				// The point of this test is to ensure this doesn't deadlock
+				// if the client shuts down the connection concurrently.
+				//
+				// The racing Call may or may not receive a response: it should get a
+				// response if it is sent before the client closes the connection, and
+				// it should fail with some kind of "connection closed" error otherwise.
+				go func() {
+					pokec <- srvConn.Call(ctx, "poke", nil)
+				}()
+
+				return &msg{"pong"}, nil
+			})
+			return jsonrpc2.ConnectionOptions{Handler: h}
+		}))
+
+		dialConn, err := jsonrpc2.Dial(ctx, listener.Dialer(), jsonrpc2.ConnectionOptions{})
+		if err != nil {
+			listener.Close()
+			s.Wait()
+			t.Fatal(err)
+		}
+
+		// Calling any method on the server should provoke it to asynchronously call
+		// us back. While it is starting that call, we will close the connection.
+		if err := dialConn.Call(ctx, "ping", nil).Await(ctx, nil); err != nil {
+			t.Error(err)
+		}
+		if err := dialConn.Close(); err != nil {
+			t.Error(err)
+		}
+
+		// Ensure that the Call on the server side did not block forever when the
+		// connection closed.
+		pokeCall := <-pokec
+		if err := pokeCall.Await(ctx, nil); err == nil {
+			t.Errorf("unexpected nil error from server-initited call")
+		} else if errors.Is(err, jsonrpc2.ErrMethodNotFound) {
+			// The call completed before the Close reached the handler.
+		} else {
+			// The error was something else.
+			t.Logf("server-initiated call completed with expected error: %v", err)
+		}
+
+		listener.Close()
+		s.Wait()
 	}
 }

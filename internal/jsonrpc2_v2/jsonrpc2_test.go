@@ -136,10 +136,7 @@ func testConnection(t *testing.T, framer jsonrpc2.Framer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := jsonrpc2.Serve(ctx, listener, binder{framer, nil})
-	if err != nil {
-		t.Fatal(err)
-	}
+	server := jsonrpc2.NewServer(ctx, listener, binder{framer, nil})
 	defer func() {
 		listener.Close()
 		server.Wait()
@@ -253,7 +250,7 @@ func verifyResults(t *testing.T, method string, results interface{}, expect inte
 	}
 }
 
-func (b binder) Bind(ctx context.Context, conn *jsonrpc2.Connection) (jsonrpc2.ConnectionOptions, error) {
+func (b binder) Bind(ctx context.Context, conn *jsonrpc2.Connection) jsonrpc2.ConnectionOptions {
 	h := &handler{
 		conn:    conn,
 		waiters: make(chan map[string]chan struct{}, 1),
@@ -267,7 +264,7 @@ func (b binder) Bind(ctx context.Context, conn *jsonrpc2.Connection) (jsonrpc2.C
 		Framer:    b.framer,
 		Preempter: h,
 		Handler:   h,
-	}, nil
+	}
 }
 
 func (h *handler) waiter(name string) chan struct{} {

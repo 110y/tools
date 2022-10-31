@@ -6,13 +6,11 @@ package jsonrpc2
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"runtime"
-	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,35 +41,43 @@ type Server struct {
 	listener Listener
 	binder   Binder
 	async    *async
+
+	shutdownOnce sync.Once
+	closing      int32 // atomic: set to nonzero when Shutdown is called
 }
 
 // Dial uses the dialer to make a new connection, wraps the returned
 // reader and writer using the framer to make a stream, and then builds
 // a connection on top of that stream using the binder.
+//
+// The returned Connection will operate independently using the Preempter and/or
+// Handler provided by the Binder, and will release its own resources when the
+// connection is broken, but the caller may Close it earlier to stop accepting
+// (or sending) new requests.
 func Dial(ctx context.Context, dialer Dialer, binder Binder) (*Connection, error) {
 	// dial a server
 	rwc, err := dialer.Dial(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return newConnection(ctx, rwc, binder)
+	return newConnection(ctx, rwc, binder, nil), nil
 }
 
-// Serve starts a new server listening for incoming connections and returns
+// NewServer starts a new server listening for incoming connections and returns
 // it.
 // This returns a fully running and connected server, it does not block on
 // the listener.
 // You can call Wait to block on the server, or Shutdown to get the sever to
 // terminate gracefully.
 // To notice incoming connections, use an intercepting Binder.
-func Serve(ctx context.Context, listener Listener, binder Binder) (*Server, error) {
+func NewServer(ctx context.Context, listener Listener, binder Binder) *Server {
 	server := &Server{
 		listener: listener,
 		binder:   binder,
 		async:    newAsync(),
 	}
 	go server.run(ctx)
-	return server, nil
+	return server
 }
 
 // Wait returns only when the server has shut down.
@@ -79,96 +85,39 @@ func (s *Server) Wait() error {
 	return s.async.wait()
 }
 
+// Shutdown informs the server to stop accepting new connections.
+func (s *Server) Shutdown() {
+	s.shutdownOnce.Do(func() {
+		atomic.StoreInt32(&s.closing, 1)
+		s.listener.Close()
+	})
+}
+
 // run accepts incoming connections from the listener,
 // If IdleTimeout is non-zero, run exits after there are no clients for this
 // duration, otherwise it exits only on error.
 func (s *Server) run(ctx context.Context) {
 	defer s.async.done()
-	var activeConns []*Connection
+
+	var activeConns sync.WaitGroup
 	for {
-		// we never close the accepted connection, we rely on the other end
-		// closing or the socket closing itself naturally
 		rwc, err := s.listener.Accept(ctx)
 		if err != nil {
-			if !isClosingError(err) {
+			// Only Shutdown closes the listener. If we get an error after Shutdown is
+			// called, assume that that was the cause and don't report the error;
+			// otherwise, report the error in case it is unexpected.
+			if atomic.LoadInt32(&s.closing) == 0 {
 				s.async.setError(err)
 			}
-			// we are done generating new connections for good
+			// We are done generating new connections for good.
 			break
 		}
 
-		// see if any connections were closed while we were waiting
-		activeConns = onlyActive(activeConns)
-
-		// a new inbound connection,
-		conn, err := newConnection(ctx, rwc, s.binder)
-		if err != nil {
-			if !isClosingError(err) {
-				s.async.setError(err)
-			}
-			continue
-		}
-		activeConns = append(activeConns, conn)
+		// A new inbound connection.
+		activeConns.Add(1)
+		_ = newConnection(ctx, rwc, s.binder, activeConns.Done) // unregisters itself when done
 	}
-
-	// wait for all active conns to finish
-	for _, c := range activeConns {
-		c.Wait()
-	}
-}
-
-func onlyActive(conns []*Connection) []*Connection {
-	i := 0
-	for _, c := range conns {
-		if !c.async.isDone() {
-			conns[i] = c
-			i++
-		}
-	}
-	// trim the slice down
-	return conns[:i]
-}
-
-// isClosingError reports if the error occurs normally during the process of
-// closing a network connection. It uses imperfect heuristics that err on the
-// side of false negatives, and should not be used for anything critical.
-func isClosingError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// Fully unwrap the error, so the following tests work.
-	for wrapped := err; wrapped != nil; wrapped = errors.Unwrap(err) {
-		err = wrapped
-	}
-
-	// Was it based on an EOF error?
-	if err == io.EOF {
-		return true
-	}
-
-	// Was it based on a closed pipe?
-	if err == io.ErrClosedPipe {
-		return true
-	}
-
-	// Per https://github.com/golang/go/issues/4373, this error string should not
-	// change. This is not ideal, but since the worst that could happen here is
-	// some superfluous logging, it is acceptable.
-	if err.Error() == "use of closed network connection" {
-		return true
-	}
-
-	if runtime.GOOS == "plan9" {
-		// Error reading from a closed connection.
-		if err == syscall.EINVAL {
-			return true
-		}
-		// Error trying to accept a new connection from a closed listener.
-		if strings.HasSuffix(err.Error(), " listen hungup") {
-			return true
-		}
-	}
-	return false
+	activeConns.Wait()
 }
 
 // NewIdleListener wraps a listener with an idle timeout.
@@ -206,10 +155,6 @@ type idleListener struct {
 func (l *idleListener) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 	rwc, err := l.wrapped.Accept(ctx)
 
-	if err != nil && !isClosingError(err) {
-		return nil, err
-	}
-
 	select {
 	case n, ok := <-l.active:
 		if err != nil {
@@ -234,13 +179,20 @@ func (l *idleListener) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 			// active and closed due to idleness, which would be contradictory and
 			// confusing. Close the connection and pretend that it never happened.
 			rwc.Close()
+		} else {
+			// In theory the timeout could have raced with an unrelated error return
+			// from Accept. However, ErrIdleTimeout is arguably still valid (since we
+			// would have closed due to the timeout independent of the error), and the
+			// harm from returning a spurious ErrIdleTimeout is negliglible anyway.
 		}
 		return nil, ErrIdleTimeout
 
 	case timer := <-l.idleTimer:
 		if err != nil {
-			// The idle timer hasn't run yet, so err can't be ErrIdleTimeout.
-			// Leave the idle timer as it was and return whatever error we got.
+			// The idle timer doesn't run until it receives itself from the idleTimer
+			// channel, so it can't have called l.wrapped.Close yet and thus err can't
+			// be ErrIdleTimeout. Leave the idle timer as it was and return whatever
+			// error we got.
 			l.idleTimer <- timer
 			return nil, err
 		}
