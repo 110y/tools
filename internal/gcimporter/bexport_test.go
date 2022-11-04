@@ -21,8 +21,8 @@ import (
 
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/buildutil"
-	"golang.org/x/tools/go/internal/gcimporter"
 	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/internal/gcimporter"
 	"golang.org/x/tools/internal/typeparams"
 	"golang.org/x/tools/internal/typeparams/genericfeatures"
 )
@@ -109,7 +109,7 @@ type UnknownType undefined
 
 		// Compare the packages' corresponding members.
 		for _, name := range pkg.Scope().Names() {
-			if !ast.IsExported(name) {
+			if !token.IsExported(name) {
 				continue
 			}
 			obj1 := pkg.Scope().Lookup(name)

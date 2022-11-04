@@ -31,8 +31,8 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/buildutil"
 	"golang.org/x/tools/go/gcexportdata"
-	"golang.org/x/tools/go/internal/gcimporter"
 	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/internal/gcimporter"
 	"golang.org/x/tools/internal/typeparams/genericfeatures"
 )
 
@@ -59,7 +59,8 @@ func readExportFile(filename string) ([]byte, error) {
 
 func iexport(fset *token.FileSet, version int, pkg *types.Package) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := gcimporter.IExportCommon(&buf, fset, false, version, []*types.Package{pkg}); err != nil {
+	const bundle, shallow = false, false
+	if err := gcimporter.IExportCommon(&buf, fset, bundle, shallow, version, []*types.Package{pkg}); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -197,7 +198,7 @@ func testPkg(t *testing.T, fset *token.FileSet, version int, pkg *types.Package,
 
 	// Compare the packages' corresponding members.
 	for _, name := range pkg.Scope().Names() {
-		if !ast.IsExported(name) {
+		if !token.IsExported(name) {
 			continue
 		}
 		obj1 := pkg.Scope().Lookup(name)
