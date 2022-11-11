@@ -735,8 +735,10 @@ func (c *commandHandler) ListKnownPackages(ctx context.Context, args command.URI
 		progress: "Listing packages",
 		forURI:   args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		var err error
-		result.Packages, err = source.KnownPackages(ctx, deps.snapshot, deps.fh)
+		pkgs, err := source.KnownPackages(ctx, deps.snapshot, deps.fh)
+		for _, pkg := range pkgs {
+			result.Packages = append(result.Packages, string(pkg))
+		}
 		return err
 	})
 	return result, err
@@ -755,7 +757,7 @@ func (c *commandHandler) ListImports(ctx context.Context, args command.URIArg) (
 		if err != nil {
 			return err
 		}
-		for _, group := range astutil.Imports(deps.snapshot.FileSet(), pgf.File) {
+		for _, group := range astutil.Imports(pkg.FileSet(), pgf.File) {
 			for _, imp := range group {
 				if imp.Path == nil {
 					continue
@@ -765,14 +767,14 @@ func (c *commandHandler) ListImports(ctx context.Context, args command.URIArg) (
 					name = imp.Name.Name
 				}
 				result.Imports = append(result.Imports, command.FileImport{
-					Path: source.ImportPath(imp),
+					Path: string(source.UnquoteImportPath(imp)),
 					Name: name,
 				})
 			}
 		}
 		for _, imp := range pkg.Imports() {
 			result.PackageImports = append(result.PackageImports, command.PackageImport{
-				Path: imp.PkgPath(), // This might be the vendored path under GOPATH vendoring, in which case it's a bug.
+				Path: string(imp.PkgPath()), // This might be the vendored path under GOPATH vendoring, in which case it's a bug.
 			})
 		}
 		sort.Slice(result.PackageImports, func(i, j int) bool {
@@ -880,34 +882,31 @@ func (c *commandHandler) RunVulncheckExp(ctx context.Context, args command.Vulnc
 			return fmt.Errorf("failed to run govulncheck: %v", err)
 		}
 
-		var summary govulncheck.Summary
-		if err := json.Unmarshal(stdout, &summary); err != nil {
+		var result govulncheck.Result
+		if err := json.Unmarshal(stdout, &result); err != nil {
 			// TODO: for easy debugging, log the failed stdout somewhere?
 			return fmt.Errorf("failed to parse govulncheck output: %v", err)
 		}
-
-		vulns := append(summary.Affecting, summary.NonAffecting...)
+		vulns := result.Vulns
 		deps.snapshot.View().SetVulnerabilities(args.URI.SpanURI(), vulns)
 		c.s.diagnoseSnapshot(deps.snapshot, nil, false)
 
-		if len(summary.Affecting) == 0 {
+		affecting := make([]string, 0, len(vulns))
+		for _, v := range vulns {
+			if v.IsCalled() {
+				affecting = append(affecting, v.OSV.ID)
+			}
+		}
+		if len(affecting) == 0 {
 			return c.s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
 				Type:    protocol.Info,
 				Message: "No vulnerabilities found",
 			})
 		}
-		set := make(map[string]bool)
-		for _, v := range summary.Affecting {
-			set[v.OSV.ID] = true
-		}
-		list := make([]string, 0, len(set))
-		for k := range set {
-			list = append(list, k)
-		}
-		sort.Strings(list)
+		sort.Strings(affecting)
 		return c.s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
 			Type:    protocol.Warning,
-			Message: fmt.Sprintf("Found %v", strings.Join(list, ", ")),
+			Message: fmt.Sprintf("Found %v", strings.Join(affecting, ", ")),
 		})
 	})
 	return err

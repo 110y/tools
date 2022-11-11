@@ -28,7 +28,6 @@ import (
 
 type renamer struct {
 	ctx                context.Context
-	fset               *token.FileSet
 	refs               []*ReferenceInfo
 	objsToUpdate       map[types.Object]bool
 	hadConflicts       bool
@@ -93,7 +92,7 @@ func PrepareRename(ctx context.Context, snapshot Snapshot, f FileHandle, pp prot
 			return nil, err, err
 		}
 
-		if strings.HasSuffix(meta.PackageName(), "_test") {
+		if strings.HasSuffix(string(meta.PackageName()), "_test") {
 			err := errors.New("can't rename x_test packages")
 			return nil, err, err
 		}
@@ -103,7 +102,7 @@ func PrepareRename(ctx context.Context, snapshot Snapshot, f FileHandle, pp prot
 			return nil, err, err
 		}
 
-		if meta.ModuleInfo().Path == meta.PackagePath() {
+		if meta.ModuleInfo().Path == string(meta.PackagePath()) {
 			err := fmt.Errorf("can't rename package: package path %q is the same as module path %q", meta.PackagePath(), meta.ModuleInfo().Path)
 			return nil, err, err
 		}
@@ -113,7 +112,7 @@ func PrepareRename(ctx context.Context, snapshot Snapshot, f FileHandle, pp prot
 			err = fmt.Errorf("error building package to rename: %v", err)
 			return nil, err, err
 		}
-		result, err := computePrepareRenameResp(snapshot, pkg, pgf.File.Name, pkg.Name())
+		result, err := computePrepareRenameResp(snapshot, pkg, pgf.File.Name, string(pkg.Name()))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -136,7 +135,7 @@ func PrepareRename(ctx context.Context, snapshot Snapshot, f FileHandle, pp prot
 }
 
 func computePrepareRenameResp(snapshot Snapshot, pkg Package, node ast.Node, text string) (*PrepareItem, error) {
-	mr, err := posToMappedRange(snapshot.FileSet(), pkg, node.Pos(), node.End())
+	mr, err := posToMappedRange(pkg, node.Pos(), node.End())
 	if err != nil {
 		return nil, err
 	}
@@ -202,11 +201,11 @@ func Rename(ctx context.Context, s Snapshot, f FileHandle, pp protocol.Position,
 		// Fix this.
 		meta := fileMeta[0]
 		oldPath := meta.PackagePath()
-		var modulePath string
+		var modulePath PackagePath
 		if mi := meta.ModuleInfo(); mi == nil {
 			return nil, true, fmt.Errorf("cannot rename package: missing module information for package %q", meta.PackagePath())
 		} else {
-			modulePath = mi.Path
+			modulePath = PackagePath(mi.Path)
 		}
 
 		if strings.HasSuffix(newName, "_test") {
@@ -218,7 +217,7 @@ func Rename(ctx context.Context, s Snapshot, f FileHandle, pp protocol.Position,
 			return nil, true, err
 		}
 
-		renamingEdits, err := renamePackage(ctx, s, modulePath, oldPath, newName, metadata)
+		renamingEdits, err := renamePackage(ctx, s, modulePath, oldPath, PackageName(newName), metadata)
 		if err != nil {
 			return nil, true, err
 		}
@@ -245,12 +244,12 @@ func Rename(ctx context.Context, s Snapshot, f FileHandle, pp protocol.Position,
 // It updates package clauses and import paths for the renamed package as well
 // as any other packages affected by the directory renaming among packages
 // described by allMetadata.
-func renamePackage(ctx context.Context, s Snapshot, modulePath, oldPath, newName string, allMetadata []Metadata) (map[span.URI][]protocol.TextEdit, error) {
+func renamePackage(ctx context.Context, s Snapshot, modulePath, oldPath PackagePath, newName PackageName, allMetadata []Metadata) (map[span.URI][]protocol.TextEdit, error) {
 	if modulePath == oldPath {
 		return nil, fmt.Errorf("cannot rename package: module path %q is the same as the package path, so renaming the package directory would have no effect", modulePath)
 	}
 
-	newPathPrefix := path.Join(path.Dir(oldPath), newName)
+	newPathPrefix := path.Join(path.Dir(string(oldPath)), string(newName))
 
 	edits := make(map[span.URI][]protocol.TextEdit)
 	seen := make(seenPackageRename) // track per-file import renaming we've already processed
@@ -272,7 +271,7 @@ func renamePackage(ctx context.Context, s Snapshot, modulePath, oldPath, newName
 		// Subtle: check this condition before checking for valid module info
 		// below, because we should not fail this operation if unrelated packages
 		// lack module info.
-		if !strings.HasPrefix(m.PackagePath()+"/", oldPath+"/") {
+		if !strings.HasPrefix(string(m.PackagePath())+"/", string(oldPath)+"/") {
 			continue // not affected by the package renaming
 		}
 
@@ -280,16 +279,16 @@ func renamePackage(ctx context.Context, s Snapshot, modulePath, oldPath, newName
 			return nil, fmt.Errorf("cannot rename package: missing module information for package %q", m.PackagePath())
 		}
 
-		if modulePath != m.ModuleInfo().Path {
+		if modulePath != PackagePath(m.ModuleInfo().Path) {
 			continue // don't edit imports if nested package and renaming package have different module paths
 		}
 
 		// Renaming a package consists of changing its import path and package name.
-		suffix := strings.TrimPrefix(m.PackagePath(), oldPath)
+		suffix := strings.TrimPrefix(string(m.PackagePath()), string(oldPath))
 		newPath := newPathPrefix + suffix
 
 		pkgName := m.PackageName()
-		if m.PackagePath() == oldPath {
+		if m.PackagePath() == PackagePath(oldPath) {
 			pkgName = newName
 
 			if err := renamePackageClause(ctx, m, s, newName, seen, edits); err != nil {
@@ -297,7 +296,8 @@ func renamePackage(ctx context.Context, s Snapshot, modulePath, oldPath, newName
 			}
 		}
 
-		if err := renameImports(ctx, s, m, newPath, pkgName, seen, edits); err != nil {
+		imp := ImportPath(newPath) // TODO(adonovan): what if newPath has vendor/ prefix?
+		if err := renameImports(ctx, s, m, imp, pkgName, seen, edits); err != nil {
 			return nil, err
 		}
 	}
@@ -314,14 +314,14 @@ func renamePackage(ctx context.Context, s Snapshot, modulePath, oldPath, newName
 // However, in all cases the resulting edits will be the same.
 type seenPackageRename map[seenPackageKey]bool
 type seenPackageKey struct {
-	uri        span.URI
-	importPath string
+	uri  span.URI
+	path PackagePath
 }
 
 // add reports whether uri and importPath have been seen, and records them as
 // seen if not.
-func (s seenPackageRename) add(uri span.URI, importPath string) bool {
-	key := seenPackageKey{uri, importPath}
+func (s seenPackageRename) add(uri span.URI, path PackagePath) bool {
+	key := seenPackageKey{uri, path}
 	seen := s[key]
 	if !seen {
 		s[key] = true
@@ -336,7 +336,7 @@ func (s seenPackageRename) add(uri span.URI, importPath string) bool {
 // package clause has already been updated, to prevent duplicate edits.
 //
 // Edits are written into the edits map.
-func renamePackageClause(ctx context.Context, m Metadata, s Snapshot, newName string, seen seenPackageRename, edits map[span.URI][]protocol.TextEdit) error {
+func renamePackageClause(ctx context.Context, m Metadata, s Snapshot, newName PackageName, seen seenPackageRename, edits map[span.URI][]protocol.TextEdit) error {
 	pkg, err := s.WorkspacePackageByID(ctx, m.PackageID())
 	if err != nil {
 		return err
@@ -358,7 +358,7 @@ func renamePackageClause(ctx context.Context, m Metadata, s Snapshot, newName st
 		}
 		edits[f.URI] = append(edits[f.URI], protocol.TextEdit{
 			Range:   rng,
-			NewText: newName,
+			NewText: string(newName),
 		})
 	}
 
@@ -370,7 +370,7 @@ func renamePackageClause(ctx context.Context, m Metadata, s Snapshot, newName st
 // newPath and name newName.
 //
 // Edits are written into the edits map.
-func renameImports(ctx context.Context, s Snapshot, m Metadata, newPath, newName string, seen seenPackageRename, edits map[span.URI][]protocol.TextEdit) error {
+func renameImports(ctx context.Context, s Snapshot, m Metadata, newPath ImportPath, newName PackageName, seen seenPackageRename, edits map[span.URI][]protocol.TextEdit) error {
 	// TODO(rfindley): we should get reverse dependencies as metadata first,
 	// rather then building the package immediately. We don't need reverse
 	// dependencies if they are intermediate test variants.
@@ -399,7 +399,8 @@ func renameImports(ctx context.Context, s Snapshot, m Metadata, newPath, newName
 			}
 
 			for _, imp := range f.File.Imports {
-				if impPath, _ := strconv.Unquote(imp.Path.Value); impPath != m.PackagePath() {
+				// TODO(adonovan): what if RHS has "vendor/" prefix?
+				if UnquoteImportPath(imp) != ImportPath(m.PackagePath()) {
 					continue // not the import we're looking for
 				}
 
@@ -409,10 +410,9 @@ func renameImports(ctx context.Context, s Snapshot, m Metadata, newPath, newName
 				if err != nil {
 					return err
 				}
-				newText := strconv.Quote(newPath)
 				edits[f.URI] = append(edits[f.URI], protocol.TextEdit{
 					Range:   rng,
-					NewText: newText,
+					NewText: strconv.Quote(string(newPath)),
 				})
 
 				// If the package name of an import has not changed or if its import
@@ -430,7 +430,7 @@ func renameImports(ctx context.Context, s Snapshot, m Metadata, newPath, newName
 				fileScope := dep.GetTypesInfo().Scopes[f.File]
 
 				var changes map[span.URI][]protocol.TextEdit
-				localName := newName
+				localName := string(newName)
 				try := 0
 
 				// Keep trying with fresh names until one succeeds.
@@ -446,7 +446,7 @@ func renameImports(ctx context.Context, s Snapshot, m Metadata, newPath, newName
 				// If the chosen local package name matches the package's new name, delete the
 				// change that would have inserted an explicit local name, which is always
 				// the lexically first change.
-				if localName == newName {
+				if localName == string(newName) {
 					v := changes[f.URI]
 					sort.Slice(v, func(i, j int) bool {
 						return protocol.CompareRange(v[i].Range, v[j].Range) < 0
@@ -483,7 +483,6 @@ func renameObj(ctx context.Context, s Snapshot, newName string, qos []qualifiedO
 	}
 	r := renamer{
 		ctx:          ctx,
-		fset:         s.FileSet(),
 		refs:         refs,
 		objsToUpdate: make(map[types.Object]bool),
 		from:         obj.Name(),
@@ -603,7 +602,7 @@ func (r *renamer) update() (map[span.URI][]diff.Edit, error) {
 			// TODO(adonovan): why are we looping over lines?
 			// Just run the loop body once over the entire multiline comment.
 			lines := strings.Split(comment.Text, "\n")
-			tokFile := r.fset.File(comment.Pos())
+			tokFile := ref.pkg.FileSet().File(comment.Pos())
 			commentLine := tokFile.Line(comment.Pos())
 			uri := span.URIFromPath(tokFile.Name())
 			for i, line := range lines {
@@ -631,7 +630,7 @@ func (r *renamer) update() (map[span.URI][]diff.Edit, error) {
 
 // docComment returns the doc for an identifier.
 func (r *renamer) docComment(pkg Package, id *ast.Ident) *ast.CommentGroup {
-	_, tokFile, nodes, _ := pathEnclosingInterval(r.fset, pkg, id.Pos(), id.End())
+	_, tokFile, nodes, _ := pathEnclosingInterval(pkg, id.Pos(), id.End())
 	for _, node := range nodes {
 		switch decl := node.(type) {
 		case *ast.FuncDecl:
@@ -684,7 +683,7 @@ func (r *renamer) docComment(pkg Package, id *ast.Ident) *ast.CommentGroup {
 func (r *renamer) updatePkgName(pkgName *types.PkgName) (*diff.Edit, error) {
 	// Modify ImportSpec syntax to add or remove the Name as needed.
 	pkg := r.packages[pkgName.Pkg()]
-	_, tokFile, path, _ := pathEnclosingInterval(r.fset, pkg, pkgName.Pos(), pkgName.Pos())
+	_, tokFile, path, _ := pathEnclosingInterval(pkg, pkgName.Pos(), pkgName.Pos())
 	if len(path) < 2 {
 		return nil, fmt.Errorf("no path enclosing interval for %s", pkgName.Name())
 	}

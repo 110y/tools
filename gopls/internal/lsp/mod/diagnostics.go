@@ -165,21 +165,6 @@ func ModUpgradeDiagnostics(ctx context.Context, snapshot source.Snapshot, fh sou
 	return upgradeDiagnostics, nil
 }
 
-func pkgVersion(pkgVersion string) (pkg, ver string) {
-	if pkgVersion == "" {
-		return "", ""
-	}
-	at := strings.Index(pkgVersion, "@")
-	switch {
-	case at < 0:
-		return pkgVersion, ""
-	case at == 0:
-		return "", pkgVersion[1:]
-	default:
-		return pkgVersion[:at], pkgVersion[at+1:]
-	}
-}
-
 const upgradeCodeActionPrefix = "Upgrade to "
 
 // ModVulnerabilityDiagnostics adds diagnostics for vulnerabilities in individual modules
@@ -197,20 +182,20 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 
 	vs := snapshot.View().Vulnerabilities(fh.URI())
 	// TODO(suzmue): should we just store the vulnerabilities like this?
-	affecting := make(map[string][]govulncheck.Vuln)
-	nonaffecting := make(map[string][]govulncheck.Vuln)
-	for _, v := range vs {
-		if len(v.Trace) > 0 {
-			affecting[v.ModPath] = append(affecting[v.ModPath], v)
-		} else {
-			nonaffecting[v.ModPath] = append(nonaffecting[v.ModPath], v)
+	type modVuln struct {
+		mod  *govulncheck.Module
+		vuln *govulncheck.Vuln
+	}
+	vulnsByModule := make(map[string][]modVuln)
+	for _, vuln := range vs {
+		for _, mod := range vuln.Modules {
+			vulnsByModule[mod.Path] = append(vulnsByModule[mod.Path], modVuln{mod, vuln})
 		}
 	}
 
 	for _, req := range pm.File.Require {
-		affectingVulns, ok := affecting[req.Mod.Path]
-		nonaffectingVulns, ok2 := nonaffecting[req.Mod.Path]
-		if !ok && !ok2 {
+		vulns := vulnsByModule[req.Mod.Path]
+		if len(vulns) == 0 {
 			continue
 		}
 		rng, err := pm.Mapper.OffsetRange(req.Syntax.Start.Byte, req.Syntax.End.Byte)
@@ -222,25 +207,24 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		// Fixes will include only the upgrades for warning level diagnostics.
 		var fixes []source.SuggestedFix
 		var warning, info []string
-		for _, v := range nonaffectingVulns {
+		for _, mv := range vulns {
+			mod, vuln := mv.mod, mv.vuln
 			// Only show the diagnostic if the vulnerability was calculated
 			// for the module at the current version.
-			if semver.IsValid(v.FoundIn) && semver.Compare(req.Mod.Version, v.FoundIn) != 0 {
+			// TODO(hyangah): this prevents from surfacing vulnerable modules
+			// since module version selection is affected by dependency module
+			// requirements and replace/exclude/go.work use. Drop this check
+			// and annotate only the module path.
+			if semver.IsValid(mod.FoundVersion) && semver.Compare(req.Mod.Version, mod.FoundVersion) != 0 {
 				continue
 			}
-			info = append(info, v.OSV.ID)
-		}
-		for _, v := range affectingVulns {
-			// Only show the diagnostic if the vulnerability was calculated
-			// for the module at the current version.
-			if semver.IsValid(v.FoundIn) && semver.Compare(req.Mod.Version, v.FoundIn) != 0 {
-				continue
+			if !vuln.IsCalled() {
+				info = append(info, vuln.OSV.ID)
+			} else {
+				warning = append(warning, vuln.OSV.ID)
 			}
-			warning = append(warning, v.OSV.ID)
 			// Upgrade to the exact version we offer the user, not the most recent.
-			// TODO(hakim): Produce fixes only for affecting vulnerabilities (if len(v.Trace) > 0)
-
-			if fixedVersion := v.FixedIn; semver.IsValid(fixedVersion) && semver.Compare(req.Mod.Version, fixedVersion) < 0 {
+			if fixedVersion := mod.FixedVersion; semver.IsValid(fixedVersion) && semver.Compare(req.Mod.Version, fixedVersion) < 0 {
 				cmd, err := getUpgradeCodeAction(fh, req, fixedVersion)
 				if err != nil {
 					return nil, err
@@ -297,7 +281,7 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 	return vulnDiagnostics, nil
 }
 
-func formatMessage(v govulncheck.Vuln) string {
+func formatMessage(v *govulncheck.Vuln) string {
 	details := []byte(v.OSV.Details)
 	// Remove any new lines that are not preceded or followed by a new line.
 	for i, r := range details {

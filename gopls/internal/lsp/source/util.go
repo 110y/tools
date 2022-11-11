@@ -125,7 +125,7 @@ func IsGenerated(ctx context.Context, snapshot Snapshot, uri span.URI) bool {
 	return false
 }
 
-func objToMappedRange(fset *token.FileSet, pkg Package, obj types.Object) (MappedRange, error) {
+func objToMappedRange(pkg Package, obj types.Object) (MappedRange, error) {
 	nameLen := len(obj.Name())
 	if pkgName, ok := obj.(*types.PkgName); ok {
 		// An imported Go package has a package-local, unqualified name.
@@ -142,12 +142,12 @@ func objToMappedRange(fset *token.FileSet, pkg Package, obj types.Object) (Mappe
 			nameLen = len(pkgName.Imported().Path()) + len(`""`)
 		}
 	}
-	return posToMappedRange(fset, pkg, obj.Pos(), obj.Pos()+token.Pos(nameLen))
+	return posToMappedRange(pkg, obj.Pos(), obj.Pos()+token.Pos(nameLen))
 }
 
 // posToMappedRange returns the MappedRange for the given [start, end) span,
 // which must be among the transitive dependencies of pkg.
-func posToMappedRange(fset *token.FileSet, pkg Package, pos, end token.Pos) (MappedRange, error) {
+func posToMappedRange(pkg Package, pos, end token.Pos) (MappedRange, error) {
 	if !pos.IsValid() {
 		return MappedRange{}, fmt.Errorf("invalid start position")
 	}
@@ -155,6 +155,7 @@ func posToMappedRange(fset *token.FileSet, pkg Package, pos, end token.Pos) (Map
 		return MappedRange{}, fmt.Errorf("invalid end position")
 	}
 
+	fset := pkg.FileSet()
 	tokFile := fset.File(pos)
 	// Subtle: it is not safe to simplify this to tokFile.Name
 	// because, due to //line directives, a Position within a
@@ -183,11 +184,11 @@ func posToMappedRange(fset *token.FileSet, pkg Package, pos, end token.Pos) (Map
 // TODO(rfindley): is this the best factoring of this API? This function is
 // really a trivial wrapper around findFileInDeps, which may be a more useful
 // function to expose.
-func FindPackageFromPos(fset *token.FileSet, pkg Package, pos token.Pos) (Package, error) {
+func FindPackageFromPos(pkg Package, pos token.Pos) (Package, error) {
 	if !pos.IsValid() {
 		return nil, fmt.Errorf("invalid position")
 	}
-	fileName := fset.File(pos).Name()
+	fileName := pkg.FileSet().File(pos).Name()
 	uri := span.URIFromPath(fileName)
 	_, pkg, err := findFileInDeps(pkg, uri)
 	return pkg, err
@@ -314,7 +315,7 @@ func CompareDiagnostic(a, b *Diagnostic) int {
 // findFileInDeps finds uri in pkg or its dependencies.
 func findFileInDeps(pkg Package, uri span.URI) (*ParsedGoFile, Package, error) {
 	queue := []Package{pkg}
-	seen := make(map[string]bool)
+	seen := make(map[PackageID]bool)
 
 	for len(queue) > 0 {
 		pkg := queue[0]
@@ -333,14 +334,14 @@ func findFileInDeps(pkg Package, uri span.URI) (*ParsedGoFile, Package, error) {
 	return nil, nil, fmt.Errorf("no file for %s in package %s", uri, pkg.ID())
 }
 
-// ImportPath returns the unquoted import path of s,
+// UnquoteImportPath returns the unquoted import path of s,
 // or "" if the path is not properly quoted.
-func ImportPath(s *ast.ImportSpec) string {
-	t, err := strconv.Unquote(s.Path.Value)
+func UnquoteImportPath(s *ast.ImportSpec) ImportPath {
+	path, err := strconv.Unquote(s.Path.Value)
 	if err != nil {
 		return ""
 	}
-	return t
+	return ImportPath(path)
 }
 
 // NodeContains returns true if a node encloses a given position pos.
@@ -532,14 +533,14 @@ func InDirLex(dir, path string) bool {
 
 // IsValidImport returns whether importPkgPath is importable
 // by pkgPath
-func IsValidImport(pkgPath, importPkgPath string) bool {
+func IsValidImport(pkgPath, importPkgPath PackagePath) bool {
 	i := strings.LastIndex(string(importPkgPath), "/internal/")
 	if i == -1 {
 		return true
 	}
 	// TODO(rfindley): this looks wrong: IsCommandLineArguments is meant to
 	// operate on package IDs, not package paths.
-	if IsCommandLineArguments(string(pkgPath)) {
+	if IsCommandLineArguments(PackageID(pkgPath)) {
 		return true
 	}
 	// TODO(rfindley): this is wrong. mod.testx/p should not be able to
@@ -551,10 +552,8 @@ func IsValidImport(pkgPath, importPkgPath string) bool {
 // "command-line-arguments" package, which is a package with an unknown ID
 // created by the go command. It can have a test variant, which is why callers
 // should not check that a value equals "command-line-arguments" directly.
-//
-// TODO(rfindley): this should accept a PackageID.
-func IsCommandLineArguments(s string) bool {
-	return strings.Contains(s, "command-line-arguments")
+func IsCommandLineArguments(id PackageID) bool {
+	return strings.Contains(string(id), "command-line-arguments")
 }
 
 // RecvIdent returns the type identifier of a method receiver.
