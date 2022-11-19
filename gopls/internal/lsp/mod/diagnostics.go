@@ -18,6 +18,7 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/vuln/osv"
 )
@@ -179,14 +180,17 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		return nil, err
 	}
 
-	vs := snapshot.View().Vulnerabilities(fh.URI())
-	// TODO(suzmue): should we just store the vulnerabilities like this?
+	vs := snapshot.View().Vulnerabilities(fh.URI())[fh.URI()]
+	if vs == nil || len(vs.Vulns) == 0 {
+		return nil, nil
+	}
+
 	type modVuln struct {
 		mod  *govulncheck.Module
 		vuln *govulncheck.Vuln
 	}
 	vulnsByModule := make(map[string][]modVuln)
-	for _, vuln := range vs {
+	for _, vuln := range vs.Vulns {
 		for _, mod := range vuln.Modules {
 			vulnsByModule[mod.Path] = append(vulnsByModule[mod.Path], modVuln{mod, vuln})
 		}
@@ -213,35 +217,46 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		// Fixes will include only the upgrades for warning level diagnostics.
 		var fixes []source.SuggestedFix
 		var warning, info []string
+		var relatedInfo []source.RelatedInformation
 		for _, mv := range vulns {
 			mod, vuln := mv.mod, mv.vuln
-			// Only show the diagnostic if the vulnerability was calculated
-			// for the module at the current version.
-			// TODO(hyangah): this prevents from surfacing vulnerable modules
-			// since module version selection is affected by dependency module
-			// requirements and replace/exclude/go.work use. Drop this check
-			// and annotate only the module path.
-			if semver.IsValid(mod.FoundVersion) && semver.Compare(req.Mod.Version, mod.FoundVersion) != 0 {
+			// It is possible that the source code was changed since the last
+			// govulncheck run and information in the `vulns` info is stale.
+			// For example, imagine that a user is in the middle of updating
+			// problematic modules detected by the govulncheck run by applying
+			// quick fixes. Stale diagnostics can be confusing and prevent the
+			// user from quickly locating the next module to fix.
+			// Ideally we should rerun the analysis with the updated module
+			// dependencies or any other code changes, but we are not yet
+			// in the position of automatically triggerring the analysis
+			// (govulncheck can take a while). We also don't know exactly what
+			// part of source code was changed since `vulns` was computed.
+			// As a heuristic, we assume that a user upgrades the affecting
+			// module to the version with the fix or the latest one, and if the
+			// version in the require statement is equal to or higher than the
+			// fixed version, skip generating a diagnostic about the vulnerability.
+			// Eventually, the user has to rerun govulncheck.
+			if mod.FixedVersion != "" && semver.IsValid(req.Mod.Version) && semver.Compare(mod.FixedVersion, req.Mod.Version) <= 0 {
 				continue
 			}
 			if !vuln.IsCalled() {
 				info = append(info, vuln.OSV.ID)
 			} else {
 				warning = append(warning, vuln.OSV.ID)
+				relatedInfo = append(relatedInfo, listRelatedInfo(ctx, snapshot, vuln)...)
 			}
 			// Upgrade to the exact version we offer the user, not the most recent.
 			if fixedVersion := mod.FixedVersion; semver.IsValid(fixedVersion) && semver.Compare(req.Mod.Version, fixedVersion) < 0 {
 				cmd, err := getUpgradeCodeAction(fh, req, fixedVersion)
 				if err != nil {
-					return nil, err
+					return nil, err // TODO: bug report
 				}
 				// Add an upgrade for module@latest.
 				// TODO(suzmue): verify if latest is the same as fixedVersion.
 				latest, err := getUpgradeCodeAction(fh, req, "latest")
 				if err != nil {
-					return nil, err
+					return nil, err // TODO: bug report
 				}
-
 				fixes = []source.SuggestedFix{
 					source.SuggestedFixFromCommand(cmd, protocol.QuickFix),
 					source.SuggestedFixFromCommand(latest, protocol.QuickFix),
@@ -250,7 +265,7 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		}
 
 		if len(warning) == 0 && len(info) == 0 {
-			return nil, nil
+			continue
 		}
 		severity := protocol.SeverityInformation
 		if len(warning) > 0 {
@@ -273,7 +288,6 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		default:
 			fmt.Fprintf(&b, "%v has vulnerabilities used in the code: %v.", req.Mod.Path, strings.Join(warning, ", "))
 		}
-
 		vulnDiagnostics = append(vulnDiagnostics, &source.Diagnostic{
 			URI:            fh.URI(),
 			Range:          rng,
@@ -281,10 +295,52 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 			Source:         source.Vulncheck,
 			Message:        b.String(),
 			SuggestedFixes: fixes,
+			Related:        relatedInfo,
 		})
 	}
 
 	return vulnDiagnostics, nil
+}
+
+func listRelatedInfo(ctx context.Context, snapshot source.Snapshot, vuln *govulncheck.Vuln) []source.RelatedInformation {
+	var ri []source.RelatedInformation
+	for _, m := range vuln.Modules {
+		for _, p := range m.Packages {
+			for _, c := range p.CallStacks {
+				if len(c.Frames) == 0 {
+					continue
+				}
+				entry := c.Frames[0]
+				pos := entry.Position
+				if pos.Filename == "" {
+					continue // token.Position Filename is an optional field.
+				}
+				uri := span.URIFromPath(pos.Filename)
+				startPos := protocol.Position{
+					Line: uint32(pos.Line) - 1,
+					// We need to read the file contents to precisesly map
+					// token.Position (pos) to the UTF16-based column offset
+					// protocol.Position requires. That can be expensive.
+					// We need this related info to just help users to open
+					// the entry points of the callstack and once the file is
+					// open, we will compute the precise location based on the
+					// open file contents. So, use the beginning of the line
+					// as the position here instead of precise UTF16-based
+					// position computation.
+					Character: 0,
+				}
+				ri = append(ri, source.RelatedInformation{
+					URI: uri,
+					Range: protocol.Range{
+						Start: startPos,
+						End:   startPos,
+					},
+					Message: fmt.Sprintf("[%v] %v -> %v.%v", vuln.OSV.ID, entry.Name(), p.Path, c.Symbol),
+				})
+			}
+		}
+	}
+	return ri
 }
 
 func formatMessage(v *govulncheck.Vuln) string {
