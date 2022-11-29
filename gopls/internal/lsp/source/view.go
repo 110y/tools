@@ -210,7 +210,7 @@ type Snapshot interface {
 	// Symbols returns all symbols in the snapshot.
 	Symbols(ctx context.Context) map[span.URI][]Symbol
 
-	// Metadata returns package metadata associated with the given file URI.
+	// Metadata returns metadata for each package associated with the given file URI.
 	MetadataForFile(ctx context.Context, uri span.URI) ([]*Metadata, error)
 
 	// GetCriticalError returns any critical errors in the workspace.
@@ -283,17 +283,8 @@ type View interface {
 	// Folder returns the folder with which this view was created.
 	Folder() span.URI
 
-	// Shutdown closes this view, and detaches it from its session.
-	Shutdown(ctx context.Context)
-
 	// Options returns a copy of the Options for this view.
 	Options() *Options
-
-	// SetOptions sets the options of this view to new values.
-	// Calling this may cause the view to be invalidated and a replacement view
-	// added to the session. If so the new view will be returned, otherwise the
-	// original one will be.
-	SetOptions(context.Context, *Options) (View, error)
 
 	// Snapshot returns the current snapshot for the view, and a
 	// release function that must be called when the Snapshot is
@@ -329,6 +320,10 @@ type View interface {
 
 	// GoVersion returns the configured Go version for this view.
 	GoVersion() int
+
+	// GoVersionString returns the go version string configured for this view.
+	// Unlike [GoVersion], this encodes the minor version and commit hash information.
+	GoVersionString() string
 }
 
 // A FileSource maps uris to FileHandles. This abstraction exists both for
@@ -689,7 +684,7 @@ type Package interface {
 	PkgPath() PackagePath
 	GetTypesSizes() types.Sizes
 	ForTest() string
-	Version() *module.Version
+	Version() *module.Version // may differ from Metadata.Module.Version
 
 	// Results of parsing:
 	FileSet() *token.FileSet
