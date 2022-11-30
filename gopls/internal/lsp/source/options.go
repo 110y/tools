@@ -156,7 +156,7 @@ func DefaultOptions() *Options {
 						string(command.GCDetails):         false,
 						string(command.UpgradeDependency): true,
 						string(command.Vendor):            true,
-						// TODO(hyangah): enable command.RunVulncheckExp.
+						// TODO(hyangah): enable command.RunGovulncheck.
 					},
 				},
 			},
@@ -857,6 +857,9 @@ func (o *Options) EnableAllExperiments() {
 func (o *Options) enableAllExperimentMaps() {
 	if _, ok := o.Codelenses[string(command.GCDetails)]; !ok {
 		o.Codelenses[string(command.GCDetails)] = true
+	}
+	if _, ok := o.Codelenses[string(command.RunGovulncheck)]; !ok {
+		o.Codelenses[string(command.RunGovulncheck)] = true
 	}
 	if _, ok := o.Analyses[unusedparams.Analyzer.Name]; !ok {
 		o.Analyses[unusedparams.Analyzer.Name] = true

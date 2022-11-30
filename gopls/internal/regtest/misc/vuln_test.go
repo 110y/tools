@@ -26,7 +26,7 @@ import (
 	"golang.org/x/tools/internal/testenv"
 )
 
-func TestRunVulncheckExpError(t *testing.T) {
+func TestRunGovulncheckError(t *testing.T) {
 	const files = `
 -- go.mod --
 module mod.com
@@ -36,7 +36,7 @@ go 1.12
 package foo
 `
 	Run(t, files, func(t *testing.T, env *Env) {
-		cmd, err := command.NewRunVulncheckExpCommand("Run Vulncheck Exp", command.VulncheckArgs{
+		cmd, err := command.NewRunGovulncheckCommand("Run Vulncheck Exp", command.VulncheckArgs{
 			URI: "/invalid/file/url", // invalid arg
 		})
 		if err != nil {
@@ -44,7 +44,7 @@ package foo
 		}
 
 		params := &protocol.ExecuteCommandParams{
-			Command:   command.RunVulncheckExp.ID(),
+			Command:   command.RunGovulncheck.ID(),
 			Arguments: cmd.Arguments,
 		}
 
@@ -123,7 +123,7 @@ references:
   - href: pkg.go.dev/vuln/GOSTDLIB
 `
 
-func TestRunVulncheckExpStd(t *testing.T) {
+func TestRunGovulncheckStd(t *testing.T) {
 	testenv.NeedsGo1Point(t, 18)
 	const files = `
 -- go.mod --
@@ -161,7 +161,7 @@ func main() {
 		},
 		Settings{
 			"codelenses": map[string]bool{
-				"run_vulncheck_exp": true,
+				"run_govulncheck": true,
 			},
 		},
 	).Run(t, files, func(t *testing.T, env *Env) {
@@ -170,7 +170,7 @@ func main() {
 		// Test CodeLens is present.
 		lenses := env.CodeLens("go.mod")
 
-		const wantCommand = "gopls." + string(command.RunVulncheckExp)
+		const wantCommand = "gopls." + string(command.RunGovulncheck)
 		var gotCodelens = false
 		var lens protocol.CodeLens
 		for _, l := range lenses {
@@ -199,6 +199,81 @@ func main() {
 		)
 		testFetchVulncheckResult(t, env, map[string]fetchVulncheckResult{
 			"go.mod": {IDs: []string{"GOSTDLIB"}, Mode: govulncheck.ModeGovulncheck}})
+	})
+}
+
+func TestRunVulncheckDiagnosticsStd(t *testing.T) {
+	testenv.NeedsGo1Point(t, 18)
+	const files = `
+-- go.mod --
+module mod.com
+
+go 1.18
+-- main.go --
+package main
+
+import (
+        "archive/zip"
+        "fmt"
+)
+
+func main() {
+        _, err := zip.OpenReader("file.zip")  // vulnerability id: GOSTDLIB
+        fmt.Println(err)
+}
+`
+
+	db, err := vulntest.NewDatabase(context.Background(), []byte(vulnsData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Clean()
+	WithOptions(
+		EnvVars{
+			// Let the analyzer read vulnerabilities data from the testdata/vulndb.
+			"GOVULNDB": db.URI(),
+			// When fetchinging stdlib package vulnerability info,
+			// behave as if our go version is go1.18 for this testing.
+			vulncheck.GoVersionForVulnTest:    "go1.18",
+			"_GOPLS_TEST_BINARY_RUN_AS_GOPLS": "true", // needed to run `gopls vulncheck`.
+		},
+		Settings{"ui.diagnostic.vulncheck": "Imports"},
+	).Run(t, files, func(t *testing.T, env *Env) {
+		env.OpenFile("go.mod")
+		gotDiagnostics := &protocol.PublishDiagnosticsParams{}
+		env.AfterChange(
+			env.DiagnosticAtRegexp("go.mod", `module mod.com`),
+			ReadDiagnostics("go.mod", gotDiagnostics),
+		)
+		testFetchVulncheckResult(t, env, map[string]fetchVulncheckResult{
+			"go.mod": {
+				IDs:  []string{"GOSTDLIB"},
+				Mode: govulncheck.ModeImports,
+			},
+		})
+
+		wantVulncheckDiagnostics := map[string]vulnDiagExpectation{
+			"module mod.com": {
+				diagnostics: []vulnDiag{
+					{
+						msg:         "go1.18 has a vulnerability GOSTDLIB.",
+						severity:    protocol.SeverityInformation,
+						codeActions: []string{"Run govulncheck"},
+					},
+				},
+				hover:       []string{"GOSTDLIB", "No fix is available", "GOSTDLIB"},
+				codeActions: []string{"Run govulncheck"},
+			},
+		}
+
+		for pattern, want := range wantVulncheckDiagnostics {
+			modPathDiagnostics := testVulnDiagnostics(t, env, pattern, want, gotDiagnostics)
+			gotActions := env.CodeAction("go.mod", modPathDiagnostics)
+			if diff := diffCodeActions(gotActions, want.codeActions); diff != "" {
+				t.Errorf("code actions for %q do not match, got %v, want %v\n%v\n", pattern, gotActions, want.codeActions, diff)
+				continue
+			}
+		}
 	})
 }
 
@@ -371,7 +446,7 @@ func vulnTestEnv(vulnsDB, proxyData string) (*vulntest.DB, []RunOption, error) {
 	}
 	settings := Settings{
 		"codelenses": map[string]bool{
-			"run_vulncheck_exp": true,
+			"run_govulncheck": true,
 		},
 	}
 	ev := EnvVars{
@@ -421,12 +496,14 @@ func TestRunVulncheckPackageDiagnostics(t *testing.T) {
 						codeActions: []string{
 							"Upgrade to latest",
 							"Upgrade to v1.0.6",
+							"Run govulncheck",
 						},
 					},
 				},
 				codeActions: []string{
 					"Upgrade to latest",
 					"Upgrade to v1.0.6",
+					"Run govulncheck",
 				},
 				hover: []string{"GO-2022-01", "Fixed in v1.0.4.", "GO-2022-03"},
 			},
@@ -435,18 +512,24 @@ func TestRunVulncheckPackageDiagnostics(t *testing.T) {
 					{
 						msg:      "golang.org/bmod has a vulnerability GO-2022-02.",
 						severity: protocol.SeverityInformation,
+						codeActions: []string{
+							"Run govulncheck",
+						},
 					},
+				},
+				codeActions: []string{
+					"Run govulncheck",
 				},
 				hover: []string{"GO-2022-02", "This is a long description of this vulnerability.", "No fix is available."},
 			},
 		}
 
-		for mod, want := range wantVulncheckDiagnostics {
-			modPathDiagnostics := testVulnDiagnostics(t, env, mod, want, gotDiagnostics)
+		for pattern, want := range wantVulncheckDiagnostics {
+			modPathDiagnostics := testVulnDiagnostics(t, env, pattern, want, gotDiagnostics)
 
 			gotActions := env.CodeAction("go.mod", modPathDiagnostics)
 			if diff := diffCodeActions(gotActions, want.codeActions); diff != "" {
-				t.Errorf("code actions for %q do not match, got %v, want %v\n%v\n", mod, gotActions, want.codeActions, diff)
+				t.Errorf("code actions for %q do not match, got %v, want %v\n%v\n", pattern, gotActions, want.codeActions, diff)
 				continue
 			}
 		}
@@ -486,6 +569,38 @@ func TestRunVulncheckPackageDiagnostics(t *testing.T) {
 				} else {
 					wantNoVulncheckDiagnostics(env, t)
 				}
+
+				if tc.name == "imports" && tc.wantDiagnostics {
+					// test we get only govulncheck-based diagnostics after "run govulncheck".
+					var result command.RunVulncheckResult
+					env.ExecuteCodeLensCommand("go.mod", command.RunGovulncheck, &result)
+					gotDiagnostics := &protocol.PublishDiagnosticsParams{}
+					env.Await(
+						OnceMet(
+							CompletedProgress(result.Token),
+							ShownMessage("Found"),
+						),
+					)
+					env.Await(
+						OnceMet(
+							env.DiagnosticAtRegexp("go.mod", "golang.org/bmod"),
+							ReadDiagnostics("go.mod", gotDiagnostics),
+						),
+					)
+					// We expect only one diagnostic for GO-2022-02.
+					count := 0
+					for _, diag := range gotDiagnostics.Diagnostics {
+						if strings.Contains(diag.Message, "GO-2022-02") {
+							count++
+							if got, want := diag.Severity, protocol.SeverityWarning; got != want {
+								t.Errorf("Diagnostic for GO-2022-02 = %v, want %v", got, want)
+							}
+						}
+					}
+					if count != 1 {
+						t.Errorf("Unexpected number of diagnostics about GO-2022-02 = %v, want 1:\n%+v", count, stringify(gotDiagnostics))
+					}
+				}
 			})
 		})
 	}
@@ -508,7 +623,7 @@ func TestRunVulncheckWarning(t *testing.T) {
 		env.OpenFile("go.mod")
 
 		var result command.RunVulncheckResult
-		env.ExecuteCodeLensCommand("go.mod", command.RunVulncheckExp, &result)
+		env.ExecuteCodeLensCommand("go.mod", command.RunGovulncheck, &result)
 		gotDiagnostics := &protocol.PublishDiagnosticsParams{}
 		env.Await(
 			OnceMet(
@@ -658,7 +773,7 @@ func Vuln() {} // vulnerable.
 func OK() {} // ok.
 `
 
-func TestRunVulncheckInfo(t *testing.T) {
+func TestGovulncheckInfo(t *testing.T) {
 	testenv.NeedsGo1Point(t, 18)
 
 	db, opts, err := vulnTestEnv(vulnsData, proxy2)
@@ -669,7 +784,7 @@ func TestRunVulncheckInfo(t *testing.T) {
 	WithOptions(opts...).Run(t, workspace2, func(t *testing.T, env *Env) {
 		env.OpenFile("go.mod")
 		var result command.RunVulncheckResult
-		env.ExecuteCodeLensCommand("go.mod", command.RunVulncheckExp, &result)
+		env.ExecuteCodeLensCommand("go.mod", command.RunGovulncheck, &result)
 		gotDiagnostics := &protocol.PublishDiagnosticsParams{}
 		env.Await(
 			OnceMet(
@@ -714,11 +829,11 @@ func TestRunVulncheckInfo(t *testing.T) {
 	})
 }
 
-// testVulnDiagnostics finds the require statement line for the requireMod in go.mod file
+// testVulnDiagnostics finds the require or module statement line for the requireMod in go.mod file
 // and runs checks if diagnostics and code actions associated with the line match expectation.
-func testVulnDiagnostics(t *testing.T, env *Env, requireMod string, want vulnDiagExpectation, got *protocol.PublishDiagnosticsParams) []protocol.Diagnostic {
+func testVulnDiagnostics(t *testing.T, env *Env, pattern string, want vulnDiagExpectation, got *protocol.PublishDiagnosticsParams) []protocol.Diagnostic {
 	t.Helper()
-	pos := env.RegexpSearch("go.mod", requireMod)
+	pos := env.RegexpSearch("go.mod", pattern)
 	var modPathDiagnostics []protocol.Diagnostic
 	for _, w := range want.diagnostics {
 		// Find the diagnostics at pos.
@@ -732,7 +847,7 @@ func testVulnDiagnostics(t *testing.T, env *Env, requireMod string, want vulnDia
 			}
 		}
 		if diag == nil {
-			t.Errorf("no diagnostic at %q matching %q found\n", requireMod, w.msg)
+			t.Errorf("no diagnostic at %q matching %q found\n", pattern, w.msg)
 			continue
 		}
 		if diag.Severity != w.severity {
@@ -754,7 +869,7 @@ func testVulnDiagnostics(t *testing.T, env *Env, requireMod string, want vulnDia
 		hover, _ := env.Hover("go.mod", pos)
 		for _, part := range want.hover {
 			if !strings.Contains(hover.Value, part) {
-				t.Errorf("hover contents for %q do not match, want %v, got %v\n", requireMod, strings.Join(want.hover, ","), hover.Value)
+				t.Errorf("hover contents for %q do not match, want %v, got %v\n", pattern, strings.Join(want.hover, ","), hover.Value)
 				break
 			}
 		}
