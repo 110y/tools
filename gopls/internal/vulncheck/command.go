@@ -10,6 +10,7 @@ package vulncheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -91,7 +92,6 @@ func (c *Cmd) Run(ctx context.Context, cfg *packages.Config, patterns ...string)
 		logger.Printf("%v", err)
 		return nil, fmt.Errorf("package load failed")
 	}
-
 	logger.Printf("analyzing %d packages...\n", len(loadedPkgs))
 
 	r, err := vulncheck.Source(ctx, loadedPkgs, &vulncheck.Config{Client: c.Client, SourceGoVersion: goVersion()})
@@ -236,6 +236,11 @@ func init() {
 			logf("Failed to load packages: %v", err)
 			return err
 		}
+		if n := packages.PrintErrors(pkgs); n > 0 {
+			err := errors.New("failed to load packages due to errors")
+			logf("%v", err)
+			return err
+		}
 		logf("Loaded %d packages and their dependencies", len(pkgs))
 		cli, err := client.NewClient(findGOVULNDB(cfg.Env), client.Options{
 			HTTPCache: govulncheck.DefaultCache(),
@@ -250,7 +255,13 @@ func init() {
 		if err != nil {
 			return err
 		}
-		logf("Found %d vulnerabilities", len(res.Vulns))
+		affecting := 0
+		for _, v := range res.Vulns {
+			if v.IsCalled() {
+				affecting++
+			}
+		}
+		logf("Found %d affecting vulns and %d unaffecting vulns in imported packages", affecting, len(res.Vulns)-affecting)
 		if err := json.NewEncoder(os.Stdout).Encode(res); err != nil {
 			return err
 		}

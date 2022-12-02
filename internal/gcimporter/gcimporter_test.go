@@ -20,12 +20,14 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"golang.org/x/tools/internal/goroot"
 	"golang.org/x/tools/internal/testenv"
 )
 
@@ -64,8 +66,20 @@ func compilePkg(t *testing.T, dirname, filename, outdirname string, packagefiles
 	}
 	objname := basename + ".o"
 	outname := filepath.Join(outdirname, objname)
-	importcfgfile := filepath.Join(outdirname, basename) + ".importcfg"
-	testenv.WriteImportcfg(t, importcfgfile, packagefiles)
+
+	importcfgfile := os.DevNull
+	if len(packagefiles) > 0 {
+		importcfgfile = filepath.Join(outdirname, basename) + ".importcfg"
+		importcfg := new(bytes.Buffer)
+		fmt.Fprintf(importcfg, "# import config")
+		for k, v := range packagefiles {
+			fmt.Fprintf(importcfg, "\npackagefile %s=%s\n", k, v)
+		}
+		if err := os.WriteFile(importcfgfile, importcfg.Bytes(), 0655); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	importreldir := strings.ReplaceAll(outdirname, string(os.PathSeparator), "/")
 	cmd := exec.Command("go", "tool", "compile", "-p", pkg, "-D", importreldir, "-importcfg", importcfgfile, "-o", outname, filename)
 	cmd.Dir = dirname
@@ -88,37 +102,6 @@ func testPath(t *testing.T, path, srcDir string) *types.Package {
 	return pkg
 }
 
-const maxTime = 30 * time.Second
-
-func testDir(t *testing.T, dir string, endTime time.Time) (nimports int) {
-	dirname := filepath.Join(runtime.GOROOT(), "pkg", runtime.GOOS+"_"+runtime.GOARCH, dir)
-	list, err := ioutil.ReadDir(dirname)
-	if err != nil {
-		t.Fatalf("testDir(%s): %s", dirname, err)
-	}
-	for _, f := range list {
-		if time.Now().After(endTime) {
-			t.Log("testing time used up")
-			return
-		}
-		switch {
-		case !f.IsDir():
-			// try extensions
-			for _, ext := range pkgExts {
-				if strings.HasSuffix(f.Name(), ext) {
-					name := f.Name()[0 : len(f.Name())-len(ext)] // remove extension
-					if testPath(t, filepath.Join(dir, name), dir) != nil {
-						nimports++
-					}
-				}
-			}
-		case f.IsDir():
-			nimports += testDir(t, filepath.Join(dir, f.Name()), endTime)
-		}
-	}
-	return
-}
-
 func mktmpdir(t *testing.T) string {
 	tmpdir, err := ioutil.TempDir("", "gcimporter_test")
 	if err != nil {
@@ -139,7 +122,16 @@ func TestImportTestdata(t *testing.T) {
 	tmpdir := mktmpdir(t)
 	defer os.RemoveAll(tmpdir)
 
-	compile(t, "testdata", testfile, filepath.Join(tmpdir, "testdata"), nil)
+	packageFiles := map[string]string{}
+	for _, pkg := range []string{"go/ast", "go/token"} {
+		export, _ := FindPkg(pkg, "testdata")
+		if export == "" {
+			t.Fatalf("no export data found for %s", pkg)
+		}
+		packageFiles[pkg] = export
+	}
+
+	compile(t, "testdata", testfile, filepath.Join(tmpdir, "testdata"), packageFiles)
 
 	// filename should end with ".go"
 	filename := testfile[:len(testfile)-3]
@@ -167,6 +159,10 @@ func TestImportTestdata(t *testing.T) {
 }
 
 func TestImportTypeparamTests(t *testing.T) {
+	if testing.Short() {
+		t.Skipf("in short mode, skipping test that requires export data for all of std")
+	}
+
 	testenv.NeedsGo1Point(t, 18) // requires generics
 
 	// This package only handles gc export data.
@@ -221,7 +217,11 @@ func TestImportTypeparamTests(t *testing.T) {
 
 			// Compile and import, and compare the resulting package with the package
 			// that was type-checked directly.
-			compile(t, rootDir, entry.Name(), filepath.Join(tmpdir, "testdata"), nil)
+			pkgFiles, err := goroot.PkgfileMap()
+			if err != nil {
+				t.Fatal(err)
+			}
+			compile(t, rootDir, entry.Name(), filepath.Join(tmpdir, "testdata"), pkgFiles)
 			pkgName := strings.TrimSuffix(entry.Name(), ".go")
 			imported := importPkg(t, "./testdata/"+pkgName, tmpdir)
 			checked := checkFile(t, filename, src)
@@ -371,15 +371,36 @@ func TestVersionHandling(t *testing.T) {
 }
 
 func TestImportStdLib(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the imports can be expensive, and this test is especially slow when the build cache is empty")
+	}
 	// This package only handles gc export data.
 	needsCompiler(t, "gc")
 	testenv.NeedsGoBuild(t) // to find stdlib export data in the build cache
 
-	dt := maxTime
-	if testing.Short() && os.Getenv("GO_BUILDER_NAME") == "" {
-		dt = 10 * time.Millisecond
+	// Get list of packages in stdlib. Filter out test-only packages with {{if .GoFiles}} check.
+	var stderr bytes.Buffer
+	cmd := exec.Command("go", "list", "-f", "{{if .GoFiles}}{{.ImportPath}}{{end}}", "std")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("failed to run go list to determine stdlib packages: %v\nstderr:\n%v", err, stderr.String())
 	}
-	nimports := testDir(t, "", time.Now().Add(dt)) // installed packages
+	pkgs := strings.Fields(string(out))
+
+	var nimports int
+	for _, pkg := range pkgs {
+		t.Run(pkg, func(t *testing.T) {
+			if testPath(t, pkg, filepath.Join(testenv.GOROOT(t), "src", path.Dir(pkg))) != nil {
+				nimports++
+			}
+		})
+	}
+	const minPkgs = 225 // 'GOOS=plan9 go1.18 list std | wc -l' reports 228; most other platforms have more.
+	if len(pkgs) < minPkgs {
+		t.Fatalf("too few packages (%d) were imported", nimports)
+	}
+
 	t.Logf("tested %d imports", nimports)
 }
 
@@ -598,7 +619,13 @@ func TestIssue13566(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	compilePkg(t, "testdata", "a.go", testoutdir, nil, apkg(testoutdir))
+
+	jsonExport, _ := FindPkg("encoding/json", "testdata")
+	if jsonExport == "" {
+		t.Fatalf("no export data found for encoding/json")
+	}
+
+	compilePkg(t, "testdata", "a.go", testoutdir, map[string]string{"encoding/json": jsonExport}, apkg(testoutdir))
 	compile(t, testoutdir, bpath, testoutdir, map[string]string{apkg(testoutdir): filepath.Join(testoutdir, "a.o")})
 
 	// import must succeed (test for issue at hand)

@@ -325,55 +325,60 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		}
 	}
 
-	// Add standard library vulnerabilities.
-	stdlibVulns := vulnsByModule["stdlib"]
-	if len(stdlibVulns) == 0 {
-		return vulnDiagnostics, nil
-	}
-
-	// Put the standard library diagnostic on the module declaration.
-	rng, err := pm.Mapper.OffsetRange(pm.File.Module.Syntax.Start.Byte, pm.File.Module.Syntax.End.Byte)
-	if err != nil {
-		return vulnDiagnostics, nil // TODO: bug report
-	}
-
-	stdlib := stdlibVulns[0].mod.FoundVersion
-	var warning, info []string
-	var relatedInfo []source.RelatedInformation
-	for _, mv := range stdlibVulns {
-		vuln := mv.vuln
-		stdlib = mv.mod.FoundVersion
-		if !vuln.IsCalled() {
-			info = append(info, vuln.OSV.ID)
-		} else {
-			warning = append(warning, vuln.OSV.ID)
-			relatedInfo = append(relatedInfo, listRelatedInfo(ctx, snapshot, vuln)...)
+	// TODO(hyangah): place this diagnostic on the `go` directive or `toolchain` directive
+	// after https://go.dev/issue/57001.
+	const diagnoseStdLib = false
+	if diagnoseStdLib {
+		// Add standard library vulnerabilities.
+		stdlibVulns := vulnsByModule["stdlib"]
+		if len(stdlibVulns) == 0 {
+			return vulnDiagnostics, nil
 		}
-	}
-	if len(warning) > 0 {
-		vulnDiagnostics = append(vulnDiagnostics, &source.Diagnostic{
-			URI:      fh.URI(),
-			Range:    rng,
-			Severity: protocol.SeverityWarning,
-			Source:   source.Vulncheck,
-			Message:  getVulnMessage(stdlib, warning, true, fromGovulncheck),
-			Related:  relatedInfo,
-		})
-	}
-	if len(info) > 0 {
-		var fixes []source.SuggestedFix
-		if !fromGovulncheck {
-			fixes = append(fixes, suggestVulncheck)
+
+		// Put the standard library diagnostic on the module declaration.
+		rng, err := pm.Mapper.OffsetRange(pm.File.Module.Syntax.Start.Byte, pm.File.Module.Syntax.End.Byte)
+		if err != nil {
+			return vulnDiagnostics, nil // TODO: bug report
 		}
-		vulnDiagnostics = append(vulnDiagnostics, &source.Diagnostic{
-			URI:            fh.URI(),
-			Range:          rng,
-			Severity:       protocol.SeverityInformation,
-			Source:         source.Vulncheck,
-			Message:        getVulnMessage(stdlib, info, false, fromGovulncheck),
-			SuggestedFixes: fixes,
-			Related:        relatedInfo,
-		})
+
+		stdlib := stdlibVulns[0].mod.FoundVersion
+		var warning, info []string
+		var relatedInfo []source.RelatedInformation
+		for _, mv := range stdlibVulns {
+			vuln := mv.vuln
+			stdlib = mv.mod.FoundVersion
+			if !vuln.IsCalled() {
+				info = append(info, vuln.OSV.ID)
+			} else {
+				warning = append(warning, vuln.OSV.ID)
+				relatedInfo = append(relatedInfo, listRelatedInfo(ctx, snapshot, vuln)...)
+			}
+		}
+		if len(warning) > 0 {
+			vulnDiagnostics = append(vulnDiagnostics, &source.Diagnostic{
+				URI:      fh.URI(),
+				Range:    rng,
+				Severity: protocol.SeverityWarning,
+				Source:   source.Vulncheck,
+				Message:  getVulnMessage(stdlib, warning, true, fromGovulncheck),
+				Related:  relatedInfo,
+			})
+		}
+		if len(info) > 0 {
+			var fixes []source.SuggestedFix
+			if !fromGovulncheck {
+				fixes = append(fixes, suggestVulncheck)
+			}
+			vulnDiagnostics = append(vulnDiagnostics, &source.Diagnostic{
+				URI:            fh.URI(),
+				Range:          rng,
+				Severity:       protocol.SeverityInformation,
+				Source:         source.Vulncheck,
+				Message:        getVulnMessage(stdlib, info, false, fromGovulncheck),
+				SuggestedFixes: fixes,
+				Related:        relatedInfo,
+			})
+		}
 	}
 
 	return vulnDiagnostics, nil
@@ -460,20 +465,11 @@ func formatMessage(v *govulncheck.Vuln) string {
 	return strings.TrimSpace(strings.Replace(string(details), "\n\n", "\n\n  ", -1))
 }
 
-// href returns a URL embedded in the entry if any.
-// If no suitable URL is found, it returns a default entry in
-// pkg.go.dev/vuln.
+// href returns the url for the vulnerability information.
+// Eventually we should retrieve the url embedded in the osv.Entry.
+// While vuln.go.dev is under development, this always returns
+// the page in pkg.go.dev.
 func href(vuln *osv.Entry) string {
-	for _, affected := range vuln.Affected {
-		if url := affected.DatabaseSpecific.URL; url != "" {
-			return url
-		}
-	}
-	for _, r := range vuln.References {
-		if r.Type == "WEB" {
-			return r.URL
-		}
-	}
 	return fmt.Sprintf("https://pkg.go.dev/vuln/%s", vuln.ID)
 }
 
