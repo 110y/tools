@@ -643,17 +643,17 @@ func (s *snapshot) PackagesForFile(ctx context.Context, uri span.URI, mode sourc
 		return nil, err
 	}
 
-	var ids []PackageID
-	for _, m := range metas {
-		// Filter out any intermediate test variants.
-		// We typically aren't interested in these
-		// packages for file= style queries.
-		if m.IsIntermediateTestVariant() && !includeTestVariants {
-			continue
-		}
-		ids = append(ids, m.ID)
+	// Optionally filter out any intermediate test variants.
+	// We typically aren't interested in these
+	// packages for file= style queries.
+	if !includeTestVariants {
+		metas = source.RemoveIntermediateTestVariants(metas)
 	}
 
+	ids := make([]PackageID, len(metas))
+	for i, m := range metas {
+		ids[i] = m.ID
+	}
 	return s.TypeCheck(ctx, mode, ids...)
 }
 
@@ -818,35 +818,21 @@ func (s *snapshot) MetadataForFile(ctx context.Context, uri span.URI) ([]*source
 	return metas, nil
 }
 
-func (s *snapshot) GetReverseDependencies(ctx context.Context, id PackageID) ([]source.Package, error) {
+func (s *snapshot) ReverseDependencies(ctx context.Context, id PackageID) (map[PackageID]*source.Metadata, error) {
 	if err := s.awaitLoaded(ctx); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	meta := s.meta
 	s.mu.Unlock()
-	ids := meta.reverseTransitiveClosure(id)
+	rdeps := meta.reverseTransitiveClosure(id)
 
-	// Make sure to delete the original package ID from the map.
-	delete(ids, id)
+	// Remove the original package ID from the map.
+	// TODO(adonovan): we should make ReverseDependencies and
+	// reverseTransitiveClosure consistent wrt reflexiveness.
+	delete(rdeps, id)
 
-	var pkgs []source.Package
-	for id := range ids {
-		pkg, err := s.checkedPackage(ctx, id, s.workspaceParseMode(id))
-		if err != nil {
-			return nil, err
-		}
-		pkgs = append(pkgs, pkg)
-	}
-	return pkgs, nil
-}
-
-func (s *snapshot) checkedPackage(ctx context.Context, id PackageID, mode source.ParseMode) (*pkg, error) {
-	ph, err := s.buildPackageHandle(ctx, id, mode)
-	if err != nil {
-		return nil, err
-	}
-	return ph.await(ctx, s)
+	return rdeps, nil
 }
 
 func (s *snapshot) getImportedBy(id PackageID) []PackageID {
@@ -1136,27 +1122,7 @@ func (s *snapshot) Symbols(ctx context.Context) map[span.URI][]source.Symbol {
 	return result
 }
 
-func (s *snapshot) KnownPackages(ctx context.Context) ([]source.Package, error) {
-	if err := s.awaitLoaded(ctx); err != nil {
-		return nil, err
-	}
-
-	s.mu.Lock()
-	g := s.meta
-	s.mu.Unlock()
-
-	pkgs := make([]source.Package, 0, len(g.metadata))
-	for id := range g.metadata {
-		pkg, err := s.checkedPackage(ctx, id, s.workspaceParseMode(id))
-		if err != nil {
-			return nil, err
-		}
-		pkgs = append(pkgs, pkg)
-	}
-	return pkgs, nil
-}
-
-func (s *snapshot) AllValidMetadata(ctx context.Context) ([]*source.Metadata, error) {
+func (s *snapshot) AllMetadata(ctx context.Context) ([]*source.Metadata, error) {
 	if err := s.awaitLoaded(ctx); err != nil {
 		return nil, err
 	}
