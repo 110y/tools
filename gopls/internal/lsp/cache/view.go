@@ -6,10 +6,10 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -42,21 +42,32 @@ type View struct {
 	cache       *Cache            // shared cache
 	gocmdRunner *gocommand.Runner // limits go command concurrency
 
-	optionsMu sync.Mutex
-	options   *source.Options
-
-	// mu protects most mutable state of the view.
-	mu sync.Mutex
-
 	// baseCtx is the context handed to NewView. This is the parent of all
 	// background contexts created for this view.
 	baseCtx context.Context
 
-	// name is the user visible name of this view.
+	// name is the user-specified name of this view.
 	name string
 
-	// folder is the folder with which this view was constructed.
-	folder span.URI
+	optionsMu sync.Mutex
+	options   *source.Options
+
+	// Workspace information. The fields below are immutable, and together with
+	// options define the build list. Any change to these fields results in a new
+	// View.
+	//
+	// TODO(rfindley): consolidate and/or eliminate redundancy in these fields,
+	// which have evolved from different sources over time.
+	folder               span.URI // user-specified workspace folder
+	rootURI              span.URI // either folder or dir(rootSrc) (TODO: deprecate, in favor of folder+rootSrc)
+	rootSrc              span.URI // file providing module information (go.mod or go.work); may be empty
+	explicitGowork       span.URI // explicitGowork: if non-empty, a user-specified go.work location (TODO: deprecate)
+	workspaceInformation          // grab-bag of Go environment information (TODO: cleanup)
+
+	// mu protects most mutable state of the view.
+	//
+	// TODO(rfindley): specify exactly which mutable state is guarded.
+	mu sync.Mutex
 
 	importsState *importsState
 
@@ -64,11 +75,14 @@ type View struct {
 	// Each modfile has a map of module name to upgrade version.
 	moduleUpgrades map[span.URI]map[string]string
 
+	// vulns maps each go.mod file's URI to its known vulnerabilities.
 	vulns map[span.URI]*govulncheck.Result
 
 	// filesByURI maps URIs to the canonical URI for the file it denotes.
 	// We also keep a set of candidates for a given basename
 	// to reduce the set of pairs that need to be tested for sameness.
+	//
+	// TODO(rfindley): move this file tracking to the session.
 	filesByMu   sync.Mutex
 	filesByURI  map[span.URI]span.URI     // key is noncanonical URI (alias)
 	filesByBase map[string][]canonicalURI // key is basename
@@ -103,29 +117,16 @@ type View struct {
 	// initialization of snapshots. Do not change it without adjusting snapshot
 	// accordingly.
 	initializationSema chan struct{}
-
-	// rootURI is the rootURI directory of this view. If we are in GOPATH mode, this
-	// is just the folder. If we are in module mode, this is the module rootURI.
-	rootURI span.URI
-
-	// explicitGowork is, if non-empty, the URI for the explicit go.work file
-	// provided via the users environment.
-	//
-	// TODO(rfindley): this is duplicated in the workspace type. Refactor to
-	// eliminate this duplication.
-	explicitGowork span.URI
-
-	// workspaceInformation tracks various details about this view's
-	// environment variables, go version, and use of modules.
-	workspaceInformation
 }
 
 type workspaceInformation struct {
 	// The Go version in use: X in Go 1.X.
 	goversion int
 
-	// The Go version reported by go version command. (e.g. go1.19.1, go1.20-rc.1, go1.21-abcdef01)
-	goversionString string
+	// The complete output of the go version command.
+	// (Call gocommand.ParseGoVersionOutput to extract a version
+	// substring such as go1.19.1 or go1.20-rc.1, go1.21-abcdef01.)
+	goversionOutput string
 
 	// hasGopackagesDriver is true if the user has a value set for the
 	// GOPACKAGESDRIVER environment variable or a gopackagesdriver binary on
@@ -347,14 +348,28 @@ func (s *Session) SetViewOptions(ctx context.Context, v *View, options *source.O
 	return newView, err
 }
 
-func (s *snapshot) WriteEnv(ctx context.Context, w io.Writer) error {
-	s.view.optionsMu.Lock()
-	env := s.view.options.EnvSlice()
-	buildFlags := append([]string{}, s.view.options.BuildFlags...)
-	s.view.optionsMu.Unlock()
+// viewEnv returns a string describing the environment of a newly created view.
+func viewEnv(v *View) string {
+	v.optionsMu.Lock()
+	env := v.options.EnvSlice()
+	buildFlags := append([]string{}, v.options.BuildFlags...)
+	v.optionsMu.Unlock()
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, `go env for %v
+(root %s)
+(go version %s)
+(valid build configuration = %v)
+(build flags: %v)
+`,
+		v.folder.Filename(),
+		v.rootURI.Filename(),
+		strings.TrimRight(v.workspaceInformation.goversionOutput, "\n"),
+		v.snapshot.ValidBuildConfiguration(),
+		buildFlags)
 
 	fullEnv := make(map[string]string)
-	for k, v := range s.view.goEnv {
+	for k, v := range v.goEnv {
 		fullEnv[k] = v
 	}
 	for _, v := range env {
@@ -366,29 +381,11 @@ func (s *snapshot) WriteEnv(ctx context.Context, w io.Writer) error {
 			fullEnv[s[0]] = s[1]
 		}
 	}
-	goVersion, err := s.view.gocmdRunner.Run(ctx, gocommand.Invocation{
-		Verb:       "version",
-		Env:        env,
-		WorkingDir: s.view.rootURI.Filename(),
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(w, `go env for %v
-(root %s)
-(go version %s)
-(valid build configuration = %v)
-(build flags: %v)
-`,
-		s.view.folder.Filename(),
-		s.view.rootURI.Filename(),
-		strings.TrimRight(goVersion.String(), "\n"),
-		s.ValidBuildConfiguration(),
-		buildFlags)
 	for k, v := range fullEnv {
-		fmt.Fprintf(w, "%s=%s\n", k, v)
+		fmt.Fprintf(&buf, "%s=%s\n", k, v)
 	}
-	return nil
+
+	return buf.String()
 }
 
 func (s *snapshot) RunProcessEnvFunc(ctx context.Context, fn func(*imports.Options) error) error {
@@ -494,12 +491,13 @@ func (v *View) relevantChange(c source.FileModification) bool {
 			return true
 		}
 	}
-	// If the file is not known to the view, and the change is only on-disk,
-	// we should not invalidate the snapshot. This is necessary because Emacs
-	// sends didChangeWatchedFiles events for temp files.
-	if c.OnDisk && (c.Action == source.Change || c.Action == source.Delete) {
-		return false
-	}
+
+	// Note: CL 219202 filtered out on-disk changes here that were not known to
+	// the view, but this introduces a race when changes arrive before the view
+	// is initialized (and therefore, before it knows about files). Since that CL
+	// had neither test nor associated issue, and cited only emacs behavior, this
+	// logic was deleted.
+
 	return v.contains(c.URI)
 }
 
@@ -601,7 +599,7 @@ func (s *snapshot) IgnoredFile(uri span.URI) bool {
 	} else {
 		prefixes = append(prefixes, s.view.gomodcache)
 		for m := range s.workspace.ActiveModFiles() {
-			prefixes = append(prefixes, dirURI(m).Filename())
+			prefixes = append(prefixes, span.Dir(m).Filename())
 		}
 	}
 	for _, prefix := range prefixes {
@@ -816,7 +814,7 @@ func (s *Session) getWorkspaceInformation(ctx context.Context, folder span.URI, 
 	if err != nil {
 		return nil, err
 	}
-	goversionString, err := gocommand.GoVersionString(ctx, inv, s.gocmdRunner)
+	goversionOutput, err := gocommand.GoVersionOutput(ctx, inv, s.gocmdRunner)
 	if err != nil {
 		return nil, err
 	}
@@ -847,24 +845,21 @@ func (s *Session) getWorkspaceInformation(ctx context.Context, folder span.URI, 
 	return &workspaceInformation{
 		hasGopackagesDriver:  hasGopackagesDriver,
 		goversion:            goversion,
-		goversionString:      goversionString,
+		goversionOutput:      goversionOutput,
 		environmentVariables: envVars,
 		goEnv:                env,
 	}, nil
 }
 
-// findWorkspaceRoot searches for the best workspace root according to the
-// following heuristics:
-//   - First, look for a parent directory containing a gopls.mod file
-//     (experimental only).
-//   - Then, a parent directory containing a go.mod file.
-//   - Then, a child directory containing a go.mod file, if there is exactly
-//     one (non-experimental only).
+// findWorkspaceModuleSource searches for a "module source" relative to the
+// given folder URI. A module source is the go.work or go.mod file that
+// provides module information.
 //
-// Otherwise, it returns folder.
-// TODO (rFindley): move this to workspace.go
-// TODO (rFindley): simplify this once workspace modules are enabled by default.
-func findWorkspaceRoot(ctx context.Context, folderURI span.URI, fs source.FileSource, excludePath func(string) bool, experimental bool) (span.URI, error) {
+// As a special case, this function returns a module source in a nested
+// directory if it finds no other module source, and exactly one nested module.
+//
+// If no module source is found, it returns "".
+func findWorkspaceModuleSource(ctx context.Context, folderURI span.URI, fs source.FileSource, excludePath func(string) bool, experimental bool) (span.URI, error) {
 	patterns := []string{"go.work", "go.mod"}
 	if experimental {
 		patterns = []string{"go.work", "gopls.mod", "go.mod"}
@@ -879,14 +874,13 @@ func findWorkspaceRoot(ctx context.Context, folderURI span.URI, fs source.FileSo
 			return "", err
 		}
 		if match != "" {
-			dir := span.URIFromPath(filepath.Dir(match))
-			return dir, nil
+			return span.URIFromPath(match), nil
 		}
 	}
 
 	// The experimental workspace can handle nested modules at this point...
 	if experimental {
-		return folderURI, nil
+		return "", nil
 	}
 
 	// ...else we should check if there's exactly one nested module.
@@ -895,7 +889,7 @@ func findWorkspaceRoot(ctx context.Context, folderURI span.URI, fs source.FileSo
 		// Fall-back behavior: if we don't find any modules after searching 10000
 		// files, assume there are none.
 		event.Log(ctx, fmt.Sprintf("stopped searching for modules after %d files", fileLimit))
-		return folderURI, nil
+		return "", nil
 	}
 	if err != nil {
 		return "", err
@@ -903,10 +897,10 @@ func findWorkspaceRoot(ctx context.Context, folderURI span.URI, fs source.FileSo
 	if len(all) == 1 {
 		// range to access first element.
 		for uri := range all {
-			return dirURI(uri), nil
+			return uri, nil
 		}
 	}
-	return folderURI, nil
+	return "", nil
 }
 
 // findRootPattern looks for files with the given basename in dir or any parent
@@ -1076,7 +1070,7 @@ func (v *View) GoVersion() int {
 }
 
 func (v *View) GoVersionString() string {
-	return v.workspaceInformation.goversionString
+	return gocommand.ParseGoVersionOutput(v.workspaceInformation.goversionOutput)
 }
 
 // Copied from

@@ -533,6 +533,9 @@ module mod.com
 go 1.12
 
 require example.com v1.2.2
+-- go.sum --
+example.com v1.2.3 h1:OnPPkx+rW63kj9pgILsu12MORKhSlnFa3DVRJq1HZ7g=
+example.com v1.2.3/go.mod h1:Y2Rc5rVWjWur0h3pd9aEvK5Pof8YKDANh9gHA2Maujo=
 -- main.go --
 package main
 
@@ -561,24 +564,24 @@ func main() {
 }
 `,
 		})
-		env.Await(
+		env.AfterChange(
 			env.DoneWithChangeWatchedFiles(),
-			NoDiagnostics("main.go"),
+			EmptyOrNoDiagnostics("main.go"),
 		)
 	})
 }
 
 // Reproduces golang/go#40340.
-func TestSwitchFromGOPATHToModules(t *testing.T) {
+func TestSwitchFromGOPATHToModuleMode(t *testing.T) {
 	const files = `
 -- foo/blah/blah.go --
 package blah
 
 const Name = ""
--- foo/main.go --
+-- main.go --
 package main
 
-import "blah"
+import "foo/blah"
 
 func main() {
 	_ = blah.Name
@@ -587,16 +590,17 @@ func main() {
 	WithOptions(
 		InGOPATH(),
 		EnvVars{"GO111MODULE": "auto"},
-		Modes(Experimental), // module is in a subdirectory
 	).Run(t, files, func(t *testing.T, env *Env) {
-		env.OpenFile("foo/main.go")
-		env.Await(env.DiagnosticAtRegexp("foo/main.go", `"blah"`))
+		env.OpenFile("main.go")
+		env.AfterChange(
+			EmptyDiagnostics("main.go"),
+		)
 		if err := env.Sandbox.RunGoCommand(env.Ctx, "foo", "mod", []string{"init", "mod.com"}, true); err != nil {
 			t.Fatal(err)
 		}
-		env.RegexpReplace("foo/main.go", `"blah"`, `"mod.com/blah"`)
-		env.Await(
-			EmptyDiagnostics("foo/main.go"),
+		env.RegexpReplace("main.go", `"foo/blah"`, `"mod.com/foo/blah"`)
+		env.AfterChange(
+			EmptyDiagnostics("main.go"),
 		)
 	})
 }

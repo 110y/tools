@@ -195,8 +195,8 @@ func (s *Server) diagnoseChangedFiles(ctx context.Context, snapshot source.Snaps
 		if snapshot.FindFile(uri) == nil {
 			continue
 		}
-		// Don't call PackagesForFile for builtin.go, as it results in a
-		// command-line-arguments load.
+
+		// Don't request type-checking for builtin.go: it's not a real package.
 		if snapshot.IsBuiltin(ctx, uri) {
 			continue
 		}
@@ -204,7 +204,7 @@ func (s *Server) diagnoseChangedFiles(ctx context.Context, snapshot source.Snaps
 		// Find all packages that include this file and diagnose them in parallel.
 		metas, err := snapshot.MetadataForFile(ctx, uri)
 		if err != nil {
-			// TODO (findleyr): we should probably do something with the error here,
+			// TODO(findleyr): we should probably do something with the error here,
 			// but as of now this can fail repeatedly if load fails, so can be too
 			// noisy to log (and we'll handle things later in the slow pass).
 			continue
@@ -559,11 +559,17 @@ func (s *Server) checkForOrphanedFile(ctx context.Context, snapshot source.Snaps
 	if snapshot.IsBuiltin(ctx, fh.URI()) {
 		return nil
 	}
-	// TODO(rfindley): opt: request metadata, not type-checking.
-	pkgs, _ := snapshot.PackagesForFile(ctx, fh.URI(), source.TypecheckWorkspace, false)
-	if len(pkgs) > 0 {
-		return nil
+
+	// This call has the effect of inserting fh into snapshot.files,
+	// where for better or worse (actually: just worse) it influences
+	// the sets of open, known, and orphaned files.
+	snapshot.GetFile(ctx, fh.URI())
+
+	metas, _ := snapshot.MetadataForFile(ctx, fh.URI())
+	if len(metas) > 0 || ctx.Err() != nil {
+		return nil // no package, or cancelled
 	}
+	// Inv: file does not belong to a package we know about.
 	pgf, err := snapshot.ParseGo(ctx, fh, source.ParseHeader)
 	if err != nil {
 		return nil

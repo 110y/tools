@@ -74,9 +74,6 @@ type Snapshot interface {
 	// and their GOPATH.
 	ValidBuildConfiguration() bool
 
-	// WriteEnv writes the view-specific environment to the io.Writer.
-	WriteEnv(ctx context.Context, w io.Writer) error
-
 	// FindFile returns the FileHandle for the given URI, if it is already
 	// in the given snapshot.
 	FindFile(uri span.URI) VersionedFileHandle
@@ -164,17 +161,6 @@ type Snapshot interface {
 	// IsBuiltin reports whether uri is part of the builtin package.
 	IsBuiltin(ctx context.Context, uri span.URI) bool
 
-	// PackagesForFile returns an unordered list of packages that contain
-	// the file denoted by uri, type checked in the specified mode.
-	//
-	// If withIntermediateTestVariants is set, the resulting package set includes
-	// intermediate test variants.
-	PackagesForFile(ctx context.Context, uri span.URI, mode TypecheckMode, withIntermediateTestVariants bool) ([]Package, error)
-
-	// PackageForFile returns a single package that this file belongs to,
-	// checked in mode and filtered by the package policy.
-	PackageForFile(ctx context.Context, uri span.URI, mode TypecheckMode, selectPackage PackageFilter) (Package, error)
-
 	// ReverseDependencies returns a new mapping whose entries are
 	// the ID and Metadata of each package in the workspace that
 	// directly or transitively depend on the package denoted by id,
@@ -234,16 +220,49 @@ func SnapshotLabels(snapshot Snapshot) []label.Label {
 	return []label.Label{tag.Snapshot.Of(snapshot.SequenceID()), tag.Directory.Of(snapshot.View().Folder())}
 }
 
-// PackageFilter sets how a package is filtered out from a set of packages
+// PackageForFile is a convenience function that selects a package to
+// which this file belongs (narrowest or widest), type-checks it in
+// the requested mode (full or workspace), and returns it, along with
+// the parse tree of that file.
+//
+// Type-checking is expensive. Call snapshot.ParseGo if all you need
+// is a parse tree, or snapshot.MetadataForFile if you only need metadata.
+func PackageForFile(ctx context.Context, snapshot Snapshot, uri span.URI, mode TypecheckMode, pkgSel PackageSelector) (Package, *ParsedGoFile, error) {
+	metas, err := snapshot.MetadataForFile(ctx, uri)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(metas) == 0 {
+		return nil, nil, fmt.Errorf("no package metadata for file %s", uri)
+	}
+	switch pkgSel {
+	case NarrowestPackage:
+		metas = metas[:1]
+	case WidestPackage:
+		metas = metas[len(metas)-1:]
+	}
+	pkgs, err := snapshot.TypeCheck(ctx, mode, metas[0].ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	pkg := pkgs[0]
+	pgf, err := pkg.File(uri)
+	if err != nil {
+		return nil, nil, err // "can't happen"
+	}
+	return pkg, pgf, err
+}
+
+// PackageSelector sets how a package is selected out from a set of packages
 // containing a given file.
-type PackageFilter int
+type PackageSelector int
 
 const (
 	// NarrowestPackage picks the "narrowest" package for a given file.
 	// By "narrowest" package, we mean the package with the fewest number of
 	// files that includes the given file. This solves the problem of test
 	// variants, as the test will have more files than the non-test package.
-	NarrowestPackage PackageFilter = iota
+	NarrowestPackage PackageSelector = iota
 
 	// WidestPackage returns the Package containing the most files.
 	// This is useful for something like diagnostics, where we'd prefer to

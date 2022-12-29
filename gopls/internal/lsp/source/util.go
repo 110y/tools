@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
+	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/typeparams"
@@ -81,22 +82,6 @@ func (s MappedRange) URI() span.URI {
 	return s.m.URI
 }
 
-// GetTypedFile is a convenience function that reads, parses, and
-// type-checks the package containing a file in the given
-// Snapshot. pkgPolicy is one of NarrowestPackage or WidestPackage.
-//
-// Type-checking is expensive. Call snapshot.ParseGo if all you need
-// is a parse tree, or snapshot.MetadataForFile if all you only need
-// metadata.
-func GetTypedFile(ctx context.Context, snapshot Snapshot, fh FileHandle, pkgPolicy PackageFilter) (Package, *ParsedGoFile, error) {
-	pkg, err := snapshot.PackageForFile(ctx, fh.URI(), TypecheckWorkspace, pkgPolicy)
-	if err != nil {
-		return nil, nil, err
-	}
-	pgh, err := pkg.File(fh.URI())
-	return pkg, pgh, err
-}
-
 func IsGenerated(ctx context.Context, snapshot Snapshot, uri span.URI) bool {
 	fh, err := snapshot.GetFile(ctx, uri)
 	if err != nil {
@@ -110,7 +95,7 @@ func IsGenerated(ctx context.Context, snapshot Snapshot, uri span.URI) bool {
 		for _, comment := range commentGroup.List {
 			if matched := generatedRx.MatchString(comment.Text); matched {
 				// Check if comment is at the beginning of the line in source.
-				if pgf.Tok.PositionFor(comment.Slash, false).Column == 1 {
+				if safetoken.Position(pgf.Tok, comment.Slash).Column == 1 {
 					return true
 				}
 			}

@@ -636,85 +636,6 @@ func (s *snapshot) buildOverlay() map[string][]byte {
 	return overlays
 }
 
-func (s *snapshot) PackagesForFile(ctx context.Context, uri span.URI, mode source.TypecheckMode, includeTestVariants bool) ([]source.Package, error) {
-	ctx = event.Label(ctx, tag.URI.Of(uri))
-
-	metas, err := s.containingPackages(ctx, uri)
-	if err != nil {
-		return nil, err
-	}
-
-	// Optionally filter out any intermediate test variants.
-	// We typically aren't interested in these
-	// packages for file= style queries.
-	if !includeTestVariants {
-		metas = source.RemoveIntermediateTestVariants(metas)
-	}
-
-	ids := make([]PackageID, len(metas))
-	for i, m := range metas {
-		ids[i] = m.ID
-	}
-	return s.TypeCheck(ctx, mode, ids...)
-}
-
-func (s *snapshot) PackageForFile(ctx context.Context, uri span.URI, mode source.TypecheckMode, pkgPolicy source.PackageFilter) (source.Package, error) {
-	ctx = event.Label(ctx, tag.URI.Of(uri))
-	metas, err := s.containingPackages(ctx, uri)
-	if err != nil {
-		return nil, err
-	}
-	if len(metas) == 0 {
-		return nil, fmt.Errorf("no package metadata for file %s", uri)
-	}
-	switch pkgPolicy {
-	case source.NarrowestPackage:
-		metas = metas[:1]
-	case source.WidestPackage:
-		metas = metas[len(metas)-1:]
-	}
-	pkgs, err := s.TypeCheck(ctx, mode, metas[0].ID)
-	if err != nil {
-		return nil, err
-	}
-	return pkgs[0], err
-}
-
-// containingPackages returns a new slice of metadata records for
-// packages that contain the Go file specified by uri. The results are
-// ordered "narrowest" to "widest".
-func (s *snapshot) containingPackages(ctx context.Context, uri span.URI) ([]*source.Metadata, error) {
-	// TODO(rfindley): why can't/shouldn't we awaitLoaded here? It seems that if
-	// the caller of this function is going to
-	// ask for package handles for a file, we should wait for pending loads.
-	// Else we will reload orphaned files before the initial load completes.
-
-	// Check if we should reload metadata for the file. We don't invalidate IDs
-	// (though we should), so the IDs will be a better source of truth than the
-	// metadata. If there are no IDs for the file, then we should also reload.
-	//
-	// TODO(adonovan): I can't relate the GetFile call to the
-	// previous comment, but tests rely on its effects.
-	// It does more than provide fh to the FileKind check. But what?
-	fh, err := s.GetFile(ctx, uri)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check that the file kind is Go (not, say, C or assembly).
-	// (This check is perhaps superfluous since the go/packages "file="
-	// metadata query in MetadataForFile requires .go files files.)
-	if kind := s.view.FileKind(fh); kind != source.Go {
-		return nil, fmt.Errorf("no packages for non-Go file %s (%v)", uri, kind)
-	}
-
-	metas, err := s.MetadataForFile(ctx, uri) // ordered narrowest to widest
-	if err != nil {
-		return nil, err
-	}
-	return metas, err
-}
-
 // TypeCheck type-checks the specified packages in the given mode.
 func (s *snapshot) TypeCheck(ctx context.Context, mode source.TypecheckMode, ids ...PackageID) ([]source.Package, error) {
 	// Build all the handles...
@@ -811,7 +732,7 @@ func (s *snapshot) MetadataForFile(ctx context.Context, uri span.URI) ([]*source
 		s.unloadableFiles[uri] = struct{}{}
 	}
 
-	// Sort packages "narrowed" to "widest" (in practice: non-tests before tests).
+	// Sort packages "narrowest" to "widest" (in practice: non-tests before tests).
 	sort.Slice(metas, func(i, j int) bool {
 		return len(metas[i].CompiledGoFiles) < len(metas[j].CompiledGoFiles)
 	})
@@ -1184,7 +1105,7 @@ func (s *snapshot) GoModForFile(uri span.URI) span.URI {
 func moduleForURI(modFiles map[span.URI]struct{}, uri span.URI) span.URI {
 	var match span.URI
 	for modURI := range modFiles {
-		if !source.InDir(dirURI(modURI).Filename(), uri.Filename()) {
+		if !source.InDir(span.Dir(modURI).Filename(), uri.Filename()) {
 			continue
 		}
 		if len(modURI) > len(match) {
@@ -2319,7 +2240,7 @@ func buildWorkspaceModFile(ctx context.Context, modFiles map[span.URI]struct{}, 
 		}
 		majorVersion = strings.TrimLeft(majorVersion, "/.") // handle gopkg.in versions
 		file.AddNewRequire(path, source.WorkspaceModuleVersion(majorVersion), false)
-		if err := file.AddReplace(path, "", dirURI(modURI).Filename(), ""); err != nil {
+		if err := file.AddReplace(path, "", span.Dir(modURI).Filename(), ""); err != nil {
 			return nil, err
 		}
 		for _, exclude := range parsed.Exclude {
@@ -2357,11 +2278,11 @@ func buildWorkspaceModFile(ctx context.Context, modFiles map[span.URI]struct{}, 
 			// If a replace points to a module in the workspace, make sure we
 			// direct it to version of the module in the workspace.
 			if m, ok := paths[rep.New.Path]; ok {
-				newPath = dirURI(m).Filename()
+				newPath = span.Dir(m).Filename()
 				newVersion = ""
 			} else if rep.New.Version == "" && !filepath.IsAbs(rep.New.Path) {
 				// Make any relative paths absolute.
-				newPath = filepath.Join(dirURI(modURI).Filename(), rep.New.Path)
+				newPath = filepath.Join(span.Dir(modURI).Filename(), rep.New.Path)
 			}
 			if err := file.AddReplace(rep.Old.Path, rep.Old.Version, newPath, newVersion); err != nil {
 				return nil, err

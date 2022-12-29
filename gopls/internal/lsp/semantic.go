@@ -92,11 +92,7 @@ func (s *Server) computeSemanticTokens(ctx context.Context, td protocol.TextDocu
 	if kind != source.Go {
 		return nil, nil
 	}
-	pkg, err := snapshot.PackageForFile(ctx, fh.URI(), source.TypecheckFull, source.WidestPackage)
-	if err != nil {
-		return nil, err
-	}
-	pgf, err := pkg.File(fh.URI())
+	pkg, pgf, err := source.PackageForFile(ctx, snapshot, fh.URI(), source.TypecheckFull, source.WidestPackage)
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +243,7 @@ func (e *encoded) strStack() string {
 		if _, err := safetoken.Offset(e.pgf.Tok, loc); err != nil {
 			msg = append(msg, fmt.Sprintf("invalid position %v for %s", loc, e.pgf.URI))
 		} else {
-			add := e.pgf.Tok.PositionFor(loc, false) // ignore line directives
+			add := safetoken.Position(e.pgf.Tok, loc)
 			nm := filepath.Base(add.Filename)
 			msg = append(msg, fmt.Sprintf("(%s:%d,col:%d)", nm, add.Line, add.Column))
 		}
@@ -417,7 +413,7 @@ func (e *encoded) inspector(n ast.Node) bool {
 		return true
 	// not going to see these
 	case *ast.File, *ast.Package:
-		e.unexpected(fmt.Sprintf("implement %T %s", x, e.pgf.Tok.PositionFor(x.Pos(), false)))
+		e.unexpected(fmt.Sprintf("implement %T %s", x, safetoken.Position(e.pgf.Tok, x.Pos())))
 	// other things we knowingly ignore
 	case *ast.Comment, *ast.CommentGroup:
 		pop()
@@ -777,7 +773,7 @@ func (e *encoded) definitionFor(x *ast.Ident, def types.Object) (tokenType, []st
 		}
 	}
 	// can't happen
-	msg := fmt.Sprintf("failed to find the decl for %s", e.pgf.Tok.PositionFor(x.Pos(), false))
+	msg := fmt.Sprintf("failed to find the decl for %s", safetoken.Position(e.pgf.Tok, x.Pos()))
 	e.unexpected(msg)
 	return "", []string{""}
 }
@@ -807,8 +803,8 @@ func (e *encoded) multiline(start, end token.Pos, val string, tok tokenType) {
 		}
 		return int(f.LineStart(line+1) - n)
 	}
-	spos := e.fset.PositionFor(start, false)
-	epos := e.fset.PositionFor(end, false)
+	spos := safetoken.StartPosition(e.fset, start)
+	epos := safetoken.EndPosition(e.fset, end)
 	sline := spos.Line
 	eline := epos.Line
 	// first line is from spos.Column to end
@@ -831,7 +827,7 @@ func (e *encoded) findKeyword(keyword string, start, end token.Pos) token.Pos {
 		return start + token.Pos(idx)
 	}
 	//(in unparsable programs: type _ <-<-chan int)
-	e.unexpected(fmt.Sprintf("not found:%s %v", keyword, e.fset.PositionFor(start, false)))
+	e.unexpected(fmt.Sprintf("not found:%s %v", keyword, safetoken.StartPosition(e.fset, start)))
 	return token.NoPos
 }
 

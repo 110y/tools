@@ -26,7 +26,7 @@ import (
 )
 
 func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh VersionedFileHandle, rng protocol.Range) (*token.FileSet, *analysis.SuggestedFix, error) {
-	pkg, pgf, err := GetTypedFile(ctx, snapshot, fh, NarrowestPackage)
+	pkg, pgf, err := PackageForFile(ctx, snapshot, fh.URI(), TypecheckWorkspace, NarrowestPackage)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetTypedFile: %w", err)
 	}
@@ -47,7 +47,7 @@ func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh VersionedFi
 	}
 
 	// Parse the file defining the concrete type.
-	concreteFilename := snapshot.FileSet().PositionFor(si.Concrete.Obj().Pos(), false).Filename
+	concreteFilename := safetoken.StartPosition(snapshot.FileSet(), si.Concrete.Obj().Pos()).Filename
 	concreteFH, err := snapshot.GetFile(ctx, span.URIFromPath(concreteFilename))
 	if err != nil {
 		return nil, nil, err
@@ -261,7 +261,7 @@ func missingMethods(ctx context.Context, snapshot Snapshot, concMS *types.Method
 		return nil, fmt.Errorf("expected %v to be an interface but got %T", iface, ifaceObj.Type().Underlying())
 	}
 	// Parse the imports from the file that declares the interface.
-	ifaceFilename := snapshot.FileSet().PositionFor(ifaceObj.Pos(), false).Filename
+	ifaceFilename := safetoken.StartPosition(snapshot.FileSet(), ifaceObj.Pos()).Filename
 	ifaceFH, err := snapshot.GetFile(ctx, span.URIFromPath(ifaceFilename))
 	if err != nil {
 		return nil, err

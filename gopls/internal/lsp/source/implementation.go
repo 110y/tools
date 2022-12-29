@@ -153,7 +153,7 @@ func implementations(ctx context.Context, s Snapshot, f FileHandle, pp protocol.
 				candObj = sel.Obj()
 			}
 
-			pos := s.FileSet().PositionFor(candObj.Pos(), false)
+			pos := safetoken.StartPosition(s.FileSet(), candObj.Pos())
 			if candObj == queryMethod || seen[pos] {
 				continue
 			}
@@ -166,7 +166,7 @@ func implementations(ctx context.Context, s Snapshot, f FileHandle, pp protocol.
 
 			var posn token.Position
 			if pkg != nil {
-				posn = pkg.FileSet().PositionFor(candObj.Pos(), false)
+				posn = safetoken.StartPosition(pkg.FileSet(), candObj.Pos())
 			}
 			if seen[posn] {
 				continue
@@ -283,8 +283,15 @@ func qualifiedObjsAtLocation(ctx context.Context, s Snapshot, key positionKey, s
 	// consider: the definition of the object referenced by the location. But we
 	// try to be comprehensive in case we ever support variations on build
 	// constraints.
-
-	pkgs, err := s.PackagesForFile(ctx, key.uri, TypecheckWorkspace, true)
+	metas, err := s.MetadataForFile(ctx, key.uri)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]PackageID, len(metas))
+	for i, m := range metas {
+		ids[i] = m.ID
+	}
+	pkgs, err := s.TypeCheck(ctx, TypecheckWorkspace, ids...)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +309,7 @@ func qualifiedObjsAtLocation(ctx context.Context, s Snapshot, key positionKey, s
 		}
 	}
 	if !hasFullPackage {
-		pkg, err := s.PackageForFile(ctx, key.uri, TypecheckFull, WidestPackage)
+		pkg, _, err := PackageForFile(ctx, s, key.uri, TypecheckFull, WidestPackage)
 		if err != nil {
 			return nil, err
 		}
