@@ -20,66 +20,34 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/span"
-	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/typeparams"
 )
 
-// MappedRange provides mapped protocol.Range for a span.Range, accounting for
-// UTF-16 code points.
+// A MappedRange represents a byte-offset interval within a file.
+// Through the ColumnMapper it can be converted into other forms such
+// as protocol.Range or span.Span.
 //
-// TOOD(adonovan): eliminate this type. Replace all uses by an
-// explicit pair (span.Range, protocol.ColumnMapper), and an operation
-// to map both to a protocol.Range.
+// Call ParsedGoFile.MappedPosRange to construct from the go/token domain.
 type MappedRange struct {
-	spanRange span.Range             // the range in the compiled source (package.CompiledGoFiles)
-	m         *protocol.ColumnMapper // a mapper of the edited source (package.GoFiles)
+	Mapper     *protocol.ColumnMapper
+	Start, End int // byte offsets
 }
 
-// NewMappedRange returns a MappedRange for the given file and
-// start/end positions, which must be valid within m.TokFile.
-func NewMappedRange(m *protocol.ColumnMapper, start, end token.Pos) MappedRange {
-	return MappedRange{
-		spanRange: span.NewRange(m.TokFile, start, end),
-		m:         m,
-	}
+// -- convenience functions --
+
+// Range returns the range in protocol form.
+func (mr MappedRange) Range() (protocol.Range, error) {
+	return mr.Mapper.OffsetRange(mr.Start, mr.End)
 }
 
-// Range returns the LSP range in the edited source.
-//
-// See the documentation of NewMappedRange for information on edited vs
-// compiled source.
-func (s MappedRange) Range() (protocol.Range, error) {
-	if s.m == nil {
-		return protocol.Range{}, bug.Errorf("invalid range")
-	}
-	spn, err := span.FileSpan(s.spanRange.TokFile, s.spanRange.Start, s.spanRange.End)
-	if err != nil {
-		return protocol.Range{}, err
-	}
-	return s.m.Range(spn)
+// Span returns the range in span form.
+func (mr MappedRange) Span() (span.Span, error) {
+	return mr.Mapper.OffsetSpan(mr.Start, mr.End)
 }
 
-// Span returns the span corresponding to the mapped range in the edited
-// source.
-//
-// See the documentation of NewMappedRange for information on edited vs
-// compiled source.
-func (s MappedRange) Span() (span.Span, error) {
-	// In the past, some code-paths have relied on Span returning an error if s
-	// is the zero value (i.e. s.m is nil). But this should be treated as a bug:
-	// observe that s.URI() would panic in this case.
-	if s.m == nil {
-		return span.Span{}, bug.Errorf("invalid range")
-	}
-	return span.FileSpan(s.spanRange.TokFile, s.spanRange.Start, s.spanRange.End)
-}
-
-// URI returns the URI of the edited file.
-//
-// See the documentation of NewMappedRange for information on edited vs
-// compiled source.
-func (s MappedRange) URI() span.URI {
-	return s.m.URI
+// URI returns the URI of the range's file.
+func (mr MappedRange) URI() span.URI {
+	return mr.Mapper.URI
 }
 
 func IsGenerated(ctx context.Context, snapshot Snapshot, uri span.URI) bool {
@@ -126,6 +94,10 @@ func objToMappedRange(pkg Package, obj types.Object) (MappedRange, error) {
 
 // posToMappedRange returns the MappedRange for the given [start, end) span,
 // which must be among the transitive dependencies of pkg.
+//
+// TODO(adonovan): many of the callers need only the ParsedGoFile so
+// that they can call pgf.PosRange(pos, end) to get a Range; they
+// don't actually need a MappedRange.
 func posToMappedRange(pkg Package, pos, end token.Pos) (MappedRange, error) {
 	if !pos.IsValid() {
 		return MappedRange{}, fmt.Errorf("invalid start position")
@@ -139,7 +111,7 @@ func posToMappedRange(pkg Package, pos, end token.Pos) (MappedRange, error) {
 	if err != nil {
 		return MappedRange{}, err
 	}
-	return NewMappedRange(pgf.Mapper, pos, end), nil
+	return pgf.PosMappedRange(pos, end)
 }
 
 // FindPackageFromPos returns the Package for the given position, which must be
