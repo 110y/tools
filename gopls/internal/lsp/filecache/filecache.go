@@ -52,8 +52,13 @@ func Get(kind string, key [32]byte) ([]byte, error) {
 	// (This turns every read into a write operation.
 	// If this is a performance problem, we should
 	// touch the files aynchronously.)
+	//
+	// (Traditionally the access time would be updated
+	// automatically, but for efficiency most POSIX systems have
+	// for many years set the noatime mount option to avoid every
+	// open or read operation entailing a metadata write.)
 	now := time.Now()
-	if err := setFileTime(name, now, now); err != nil {
+	if err := os.Chtimes(name, now, now); err != nil {
 		return nil, fmt.Errorf("failed to update access time: %w", err)
 	}
 
@@ -174,6 +179,20 @@ func getCacheDir() string {
 			}
 		}
 		goplsDir := filepath.Join(userDir, "gopls")
+
+		// UserCacheDir may return a nonexistent directory
+		// (in which case we must create it, which may fail),
+		// or it may return a non-writable directory, in
+		// which case we should ideally respect the user's express
+		// wishes (e.g. XDG_CACHE_HOME) and not write somewhere else.
+		// Sadly UserCacheDir doesn't currently let us distinguish
+		// such intent from accidental misconfiguraton such as HOME=/
+		// in a CI builder. So, we check whether the gopls subdirectory
+		// can be created (or already exists) and not fall back to /tmp.
+		// See also https://github.com/golang/go/issues/57638.
+		if os.MkdirAll(goplsDir, 0700) != nil {
+			goplsDir = filepath.Join(os.TempDir(), "gopls")
+		}
 
 		// Start the garbage collector.
 		go gc(goplsDir)
