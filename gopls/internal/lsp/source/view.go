@@ -21,6 +21,7 @@ import (
 	"golang.org/x/mod/module"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/types/objectpath"
 	"golang.org/x/tools/gopls/internal/govulncheck"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
@@ -381,6 +382,8 @@ type ParsedGoFile struct {
 	ParseErr scanner.ErrorList
 }
 
+// -- go/token domain convenience helpers --
+
 // Pos returns the token.Pos of protocol position p within the file.
 func (pgf *ParsedGoFile) Pos(p protocol.Position) (token.Pos, error) {
 	point, err := pgf.Mapper.Point(p)
@@ -392,11 +395,12 @@ func (pgf *ParsedGoFile) Pos(p protocol.Position) (token.Pos, error) {
 
 // PosRange returns a protocol Range for the token.Pos interval in this file.
 func (pgf *ParsedGoFile) PosRange(start, end token.Pos) (protocol.Range, error) {
-	startOffset, endOffset, err := safetoken.Offsets(pgf.Tok, start, end)
-	if err != nil {
-		return protocol.Range{}, err
-	}
-	return pgf.Mapper.OffsetRange(startOffset, endOffset)
+	return pgf.Mapper.PosRange(pgf.Tok, start, end)
+}
+
+// NodeRange returns a protocol Range for the ast.Node interval in this file.
+func (pgf *ParsedGoFile) NodeRange(node ast.Node) (protocol.Range, error) {
+	return pgf.Mapper.NodeRange(pgf.Tok, node)
 }
 
 // PosMappedRange returns a MappedRange for the token.Pos interval in this file.
@@ -787,7 +791,8 @@ type Package interface {
 	ResolveImportPath(path ImportPath) (Package, error)
 	Imports() []Package // new slice of all direct dependencies, unordered
 	HasTypeErrors() bool
-	DiagnosticsForFile(uri span.URI) []*Diagnostic // new array of list/parse/type errors
+	DiagnosticsForFile(uri span.URI) []*Diagnostic                 // new array of list/parse/type errors
+	ReferencesTo(PackagePath, objectpath.Path) []protocol.Location // new sorted array of xrefs
 }
 
 // A CriticalError is a workspace-wide error that generally prevents gopls from
