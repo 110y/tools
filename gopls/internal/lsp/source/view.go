@@ -378,24 +378,29 @@ type ParsedGoFile struct {
 	// actual content of the file if we have fixed the AST.
 	Src      []byte
 	Fixed    bool
-	Mapper   *protocol.ColumnMapper
+	Mapper   *protocol.Mapper
 	ParseErr scanner.ErrorList
 }
 
 // -- go/token domain convenience helpers --
 
-// Pos returns the token.Pos of protocol position p within the file.
-func (pgf *ParsedGoFile) Pos(p protocol.Position) (token.Pos, error) {
-	point, err := pgf.Mapper.Point(p)
+// PositionPos returns the token.Pos of protocol position p within the file.
+func (pgf *ParsedGoFile) PositionPos(p protocol.Position) (token.Pos, error) {
+	offset, err := pgf.Mapper.PositionOffset(p)
 	if err != nil {
 		return token.NoPos, err
 	}
-	return safetoken.Pos(pgf.Tok, point.Offset())
+	return safetoken.Pos(pgf.Tok, offset)
 }
 
 // PosRange returns a protocol Range for the token.Pos interval in this file.
 func (pgf *ParsedGoFile) PosRange(start, end token.Pos) (protocol.Range, error) {
 	return pgf.Mapper.PosRange(pgf.Tok, start, end)
+}
+
+// PosLocation returns a protocol Location for the token.Pos interval in this file.
+func (pgf *ParsedGoFile) PosLocation(start, end token.Pos) (protocol.Location, error) {
+	return pgf.Mapper.PosLocation(pgf.Tok, start, end)
 }
 
 // NodeRange returns a protocol Range for the ast.Node interval in this file.
@@ -414,19 +419,19 @@ func (pgf *ParsedGoFile) PosMappedRange(startPos, endPos token.Pos) (protocol.Ma
 }
 
 // RangeToSpanRange parses a protocol Range back into the go/token domain.
-func (pgf *ParsedGoFile) RangeToSpanRange(r protocol.Range) (span.Range, error) {
-	spn, err := pgf.Mapper.RangeSpan(r)
+func (pgf *ParsedGoFile) RangeToTokenRange(r protocol.Range) (safetoken.Range, error) {
+	start, end, err := pgf.Mapper.RangeOffsets(r)
 	if err != nil {
-		return span.Range{}, err
+		return safetoken.Range{}, err
 	}
-	return spn.Range(pgf.Tok)
+	return safetoken.NewRange(pgf.Tok, pgf.Tok.Pos(start), pgf.Tok.Pos(end)), nil
 }
 
 // A ParsedModule contains the results of parsing a go.mod file.
 type ParsedModule struct {
 	URI         span.URI
 	File        *modfile.File
-	Mapper      *protocol.ColumnMapper
+	Mapper      *protocol.Mapper
 	ParseErrors []*Diagnostic
 }
 
@@ -434,7 +439,7 @@ type ParsedModule struct {
 type ParsedWorkFile struct {
 	URI         span.URI
 	File        *modfile.WorkFile
-	Mapper      *protocol.ColumnMapper
+	Mapper      *protocol.Mapper
 	ParseErrors []*Diagnostic
 }
 

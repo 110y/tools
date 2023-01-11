@@ -102,7 +102,7 @@ func (r *runner) CallHierarchy(t *testing.T, spn span.Span, expectedCalls *tests
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := mapper.Location(spn)
+	loc, err := mapper.SpanLocation(spn)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", spn, err)
 	}
@@ -431,14 +431,8 @@ func nonOverlappingRanges(t *testing.T, ranges []*source.FoldingRangeInfo) (res 
 }
 
 func conflict(t *testing.T, a, b *source.FoldingRangeInfo) bool {
-	arng, err := a.MappedRange.Range()
-	if err != nil {
-		t.Fatal(err)
-	}
-	brng, err := b.MappedRange.Range()
-	if err != nil {
-		t.Fatal(err)
-	}
+	arng := a.MappedRange.Range()
+	brng := b.MappedRange.Range()
 	// a start position is <= b start positions
 	return protocol.ComparePosition(arng.Start, brng.Start) <= 0 && protocol.ComparePosition(arng.End, brng.Start) > 0
 }
@@ -450,10 +444,7 @@ func foldRanges(contents string, ranges []*source.FoldingRangeInfo) (string, err
 	// to preserve the offsets.
 	for i := len(ranges) - 1; i >= 0; i-- {
 		fRange := ranges[i]
-		spn, err := fRange.MappedRange.Span()
-		if err != nil {
-			return "", err
-		}
+		spn := fRange.MappedRange.Span()
 		start := spn.Start().Offset()
 		end := spn.End().Offset()
 
@@ -547,15 +538,9 @@ func (r *runner) Definition(t *testing.T, spn span.Span, d tests.Definition) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rng, err := ident.Declaration.MappedRange[0].Range()
-	if err != nil {
-		t.Fatal(err)
-	}
+	rng := ident.Declaration.MappedRange[0].Range()
 	if d.IsType {
-		rng, err = ident.Type.MappedRange.Range()
-		if err != nil {
-			t.Fatal(err)
-		}
+		rng = ident.Type.MappedRange.Range()
 		hover = ""
 	}
 	didSomething := false
@@ -590,7 +575,7 @@ func (r *runner) Implementation(t *testing.T, spn span.Span, impls []span.Span) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := sm.Location(spn)
+	loc, err := sm.SpanLocation(spn)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", spn, err)
 	}
@@ -612,7 +597,7 @@ func (r *runner) Implementation(t *testing.T, spn span.Span, impls []span.Span) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		imp, err := lm.Span(locs[i])
+		imp, err := lm.LocationSpan(locs[i])
 		if err != nil {
 			t.Fatalf("failed for %v: %v", locs[i], err)
 		}
@@ -817,12 +802,12 @@ func (r *runner) MethodExtraction(t *testing.T, start span.Span, end span.Span) 
 func (r *runner) CodeLens(t *testing.T, uri span.URI, want []protocol.CodeLens)                    {}
 func (r *runner) AddImport(t *testing.T, uri span.URI, expectedImport string)                      {}
 
-func spanToRange(data *tests.Data, spn span.Span) (*protocol.ColumnMapper, protocol.Range, error) {
+func spanToRange(data *tests.Data, spn span.Span) (*protocol.Mapper, protocol.Range, error) {
 	m, err := data.Mapper(spn.URI())
 	if err != nil {
 		return nil, protocol.Range{}, err
 	}
-	srcRng, err := m.Range(spn)
+	srcRng, err := m.SpanRange(spn)
 	if err != nil {
 		return nil, protocol.Range{}, err
 	}

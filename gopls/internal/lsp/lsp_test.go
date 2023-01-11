@@ -7,7 +7,6 @@ package lsp
 import (
 	"context"
 	"fmt"
-	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -145,7 +144,7 @@ func (r *runner) CallHierarchy(t *testing.T, spn span.Span, expectedCalls *tests
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := mapper.Location(spn)
+	loc, err := mapper.SpanLocation(spn)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", spn, err)
 	}
@@ -355,7 +354,7 @@ func conflict(a, b protocol.FoldingRange) bool {
 		(a.EndLine > b.StartLine || (a.EndLine == b.StartLine && a.EndCharacter > b.StartCharacter))
 }
 
-func foldRanges(m *protocol.ColumnMapper, contents string, ranges []protocol.FoldingRange) (string, error) {
+func foldRanges(m *protocol.Mapper, contents string, ranges []protocol.FoldingRange) (string, error) {
 	foldedText := "<>"
 	res := contents
 	// Apply the edits from the end of the file forward
@@ -363,11 +362,11 @@ func foldRanges(m *protocol.ColumnMapper, contents string, ranges []protocol.Fol
 	// TODO(adonovan): factor to use diff.ApplyEdits, which validates the input.
 	for i := len(ranges) - 1; i >= 0; i-- {
 		r := ranges[i]
-		start, err := m.Point(protocol.Position{Line: r.StartLine, Character: r.StartCharacter})
+		start, err := m.PositionPoint(protocol.Position{Line: r.StartLine, Character: r.StartCharacter})
 		if err != nil {
 			return "", err
 		}
-		end, err := m.Point(protocol.Position{Line: r.EndLine, Character: r.EndCharacter})
+		end, err := m.PositionPoint(protocol.Position{Line: r.EndLine, Character: r.EndCharacter})
 		if err != nil {
 			return "", err
 		}
@@ -485,7 +484,7 @@ func (r *runner) SuggestedFix(t *testing.T, spn span.Span, actionKinds []tests.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	rng, err := m.Range(spn)
+	rng, err := m.SpanRange(spn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +578,7 @@ func (r *runner) FunctionExtraction(t *testing.T, start span.Span, end span.Span
 		t.Fatal(err)
 	}
 	spn := span.New(start.URI(), start.Start(), end.End())
-	rng, err := m.Range(spn)
+	rng, err := m.SpanRange(spn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +630,7 @@ func (r *runner) MethodExtraction(t *testing.T, start span.Span, end span.Span) 
 		t.Fatal(err)
 	}
 	spn := span.New(start.URI(), start.Start(), end.End())
-	rng, err := m.Range(spn)
+	rng, err := m.SpanRange(spn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +680,7 @@ func (r *runner) Definition(t *testing.T, spn span.Span, d tests.Definition) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := sm.Location(d.Src)
+	loc, err := sm.SpanLocation(d.Src)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", d.Src, err)
 	}
@@ -735,7 +734,7 @@ func (r *runner) Definition(t *testing.T, spn span.Span, d tests.Definition) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if def, err := lm.Span(locs[0]); err != nil {
+		if def, err := lm.LocationSpan(locs[0]); err != nil {
 			t.Fatalf("failed for %v: %v", locs[0], err)
 		} else if def != d.Def {
 			t.Errorf("for %v got %v want %v", d.Src, def, d.Def)
@@ -751,7 +750,7 @@ func (r *runner) Implementation(t *testing.T, spn span.Span, impls []span.Span) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := sm.Location(spn)
+	loc, err := sm.SpanLocation(spn)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", spn, err)
 	}
@@ -778,7 +777,7 @@ func (r *runner) Implementation(t *testing.T, spn span.Span, impls []span.Span) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		imp, err := lm.Span(locs[i])
+		imp, err := lm.LocationSpan(locs[i])
 		if err != nil {
 			t.Fatalf("failed for %v: %v", locs[i], err)
 		}
@@ -799,7 +798,7 @@ func (r *runner) Highlight(t *testing.T, src span.Span, locations []span.Span) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := m.Location(src)
+	loc, err := m.SpanLocation(src)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", locations[0], err)
 	}
@@ -841,7 +840,7 @@ func (r *runner) Hover(t *testing.T, src span.Span, text string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := m.Location(src)
+	loc, err := m.SpanLocation(src)
 	if err != nil {
 		t.Fatalf("failed for %v", err)
 	}
@@ -881,7 +880,7 @@ func (r *runner) References(t *testing.T, src span.Span, itemList []span.Span) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := sm.Location(src)
+	loc, err := sm.SpanLocation(src)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", src, err)
 	}
@@ -897,7 +896,7 @@ func (r *runner) References(t *testing.T, src span.Span, itemList []span.Span) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				loc, err := m.Location(pos)
+				loc, err := m.SpanLocation(pos)
 				if err != nil {
 					t.Fatalf("failed for %v: %v", src, err)
 				}
@@ -1015,7 +1014,7 @@ func (r *runner) Rename(t *testing.T, spn span.Span, newText string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := sm.Location(spn)
+	loc, err := sm.SpanLocation(spn)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", spn, err)
 	}
@@ -1071,7 +1070,7 @@ func (r *runner) PrepareRename(t *testing.T, src span.Span, want *source.Prepare
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := m.Location(src)
+	loc, err := m.SpanLocation(src)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", src, err)
 	}
@@ -1120,11 +1119,11 @@ func applyTextDocumentEdits(r *runner, edits []protocol.DocumentChanges) (map[sp
 	for _, docEdits := range edits {
 		if docEdits.TextDocumentEdit != nil {
 			uri := docEdits.TextDocumentEdit.TextDocument.URI.SpanURI()
-			var m *protocol.ColumnMapper
+			var m *protocol.Mapper
 			// If we have already edited this file, we use the edited version (rather than the
 			// file in its original state) so that we preserve our initial changes.
 			if content, ok := res[uri]; ok {
-				m = protocol.NewColumnMapper(uri, []byte(content))
+				m = protocol.NewMapper(uri, []byte(content))
 			} else {
 				var err error
 				if m, err = r.data.Mapper(uri); err != nil {
@@ -1212,7 +1211,7 @@ func (r *runner) SignatureHelp(t *testing.T, spn span.Span, want *protocol.Signa
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := m.Location(spn)
+	loc, err := m.SpanLocation(spn)
 	if err != nil {
 		t.Fatalf("failed for %v: %v", loc, err)
 	}
@@ -1322,7 +1321,7 @@ func (r *runner) SelectionRanges(t *testing.T, spn span.Span) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc, err := sm.Location(spn)
+	loc, err := sm.SpanLocation(spn)
 	if err != nil {
 		t.Error(err)
 	}
@@ -1342,11 +1341,7 @@ func (r *runner) SelectionRanges(t *testing.T, spn span.Span) {
 		fmt.Fprintf(sb, "Ranges %d: ", i)
 		rng := path
 		for {
-			s, err := sm.Offset(rng.Range.Start)
-			if err != nil {
-				t.Error(err)
-			}
-			e, err := sm.Offset(rng.Range.End)
+			s, e, err := sm.RangeOffsets(rng.Range)
 			if err != nil {
 				t.Error(err)
 			}
@@ -1387,6 +1382,7 @@ func TestBytesOffset(t *testing.T) {
 		pos  protocol.Position
 		want int
 	}{
+		// U+10400 encodes as [F0 90 90 80] in UTF-8 and [D801 DC00] in UTF-16.
 		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 0}, want: 0},
 		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 1}, want: 1},
 		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 2}, want: 1},
@@ -1394,10 +1390,10 @@ func TestBytesOffset(t *testing.T) {
 		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 4}, want: 6},
 		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 5}, want: -1},
 		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 0, Character: 3}, want: 3},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 0, Character: 4}, want: 3},
+		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 0, Character: 4}, want: -1},
 		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 0}, want: 4},
 		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 3}, want: 7},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 4}, want: 7},
+		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 4}, want: -1},
 		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 2, Character: 0}, want: 8},
 		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 2, Character: 1}, want: -1},
 		{text: "aaa\nbbb\n\n", pos: protocol.Position{Line: 2, Character: 0}, want: 8},
@@ -1405,14 +1401,11 @@ func TestBytesOffset(t *testing.T) {
 
 	for i, test := range tests {
 		fname := fmt.Sprintf("test %d", i)
-		fset := token.NewFileSet()
-		f := fset.AddFile(fname, -1, len(test.text))
-		f.SetLinesForContent([]byte(test.text))
 		uri := span.URIFromPath(fname)
-		mapper := protocol.NewColumnMapper(uri, []byte(test.text))
-		got, err := mapper.Point(test.pos)
+		mapper := protocol.NewMapper(uri, []byte(test.text))
+		got, err := mapper.PositionPoint(test.pos)
 		if err != nil && test.want != -1 {
-			t.Errorf("unexpected error: %v", err)
+			t.Errorf("%d: unexpected error: %v", i, err)
 		}
 		if err == nil && got.Offset() != test.want {
 			t.Errorf("want %d for %q(Line:%d,Character:%d), but got %d", test.want, test.text, int(test.pos.Line), int(test.pos.Character), got.Offset())

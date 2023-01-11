@@ -24,9 +24,9 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
+	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/snippet"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/fuzzy"
 	"golang.org/x/tools/internal/imports"
@@ -218,7 +218,7 @@ type completer struct {
 	methodSetCache map[methodSetKey]*types.MethodSet
 
 	// mapper converts the positions in the file from which the completion originated.
-	mapper *protocol.ColumnMapper
+	mapper *protocol.Mapper
 
 	// startTime is when we started processing this completion request. It does
 	// not include any time the request spent in the queue.
@@ -290,8 +290,8 @@ type completionContext struct {
 type Selection struct {
 	content string
 	cursor  token.Pos // relative to rng.TokFile
-	rng     span.Range
-	mapper  *protocol.ColumnMapper
+	rng     safetoken.Range
+	mapper  *protocol.Mapper
 }
 
 func (p Selection) Content() string {
@@ -322,7 +322,7 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 		content: ident.Name,
 		cursor:  c.pos,
 		// Overwrite the prefix only.
-		rng:    span.NewRange(c.tokFile, ident.Pos(), ident.End()),
+		rng:    safetoken.NewRange(c.tokFile, ident.Pos(), ident.End()),
 		mapper: c.mapper,
 	}
 
@@ -345,7 +345,7 @@ func (c *completer) getSurrounding() *Selection {
 		c.surrounding = &Selection{
 			content: "",
 			cursor:  c.pos,
-			rng:     span.NewRange(c.tokFile, c.pos, c.pos),
+			rng:     safetoken.NewRange(c.tokFile, c.pos, c.pos),
 			mapper:  c.mapper,
 		}
 	}
@@ -444,7 +444,7 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.FileHan
 		}
 		return items, surrounding, nil
 	}
-	pos, err := pgf.Pos(protoPos)
+	pos, err := pgf.PositionPos(protoPos)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -798,7 +798,7 @@ func (c *completer) populateImportCompletions(ctx context.Context, searchImport 
 	c.surrounding = &Selection{
 		content: content,
 		cursor:  c.pos,
-		rng:     span.NewRange(c.tokFile, start, end),
+		rng:     safetoken.NewRange(c.tokFile, start, end),
 		mapper:  c.mapper,
 	}
 
@@ -1019,7 +1019,7 @@ func (c *completer) setSurroundingForComment(comments *ast.CommentGroup) {
 	c.surrounding = &Selection{
 		content: cursorComment.Text[start:end],
 		cursor:  c.pos,
-		rng:     span.NewRange(c.tokFile, token.Pos(int(cursorComment.Slash)+start), token.Pos(int(cursorComment.Slash)+end)),
+		rng:     safetoken.NewRange(c.tokFile, token.Pos(int(cursorComment.Slash)+start), token.Pos(int(cursorComment.Slash)+end)),
 		mapper:  c.mapper,
 	}
 	c.setMatcherFromPrefix(c.surrounding.Prefix())
