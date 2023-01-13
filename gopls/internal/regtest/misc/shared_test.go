@@ -54,8 +54,8 @@ func main() {
 		env2.RegexpReplace("main.go", "\\)\n(})", "")
 
 		// Now check that we got different diagnostics in each environment.
-		env1.Await(env1.DiagnosticAtRegexp("main.go", "Printl"))
-		env2.Await(env2.DiagnosticAtRegexp("main.go", "$"))
+		env1.Await(Diagnostics(env1.AtRegexp("main.go", "Printl")))
+		env2.Await(Diagnostics(env2.AtRegexp("main.go", "$")))
 
 		// Now close editor #2, and verify that operation in editor #1 is
 		// unaffected.
@@ -64,11 +64,8 @@ func main() {
 		}
 
 		env1.RegexpReplace("main.go", "Printl", "Println")
-		env1.Await(
-			OnceMet(
-				env1.DoneWithChange(),
-				EmptyDiagnostics("main.go"),
-			),
+		env1.AfterChange(
+			NoDiagnostics(ForFile("main.go")),
 		)
 	})
 }

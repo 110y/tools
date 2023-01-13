@@ -70,15 +70,15 @@ const a = 2
 	Run(t, badPackageDup, func(t *testing.T, env *Env) {
 		env.OpenFile("b.go")
 		env.Await(
-			env.DiagnosticAtRegexpWithMessage("b.go", `a = 2`, "a redeclared"),
-			env.DiagnosticAtRegexpWithMessage("a.go", `a = 1`, "other declaration"),
+			Diagnostics(env.AtRegexp("b.go", `a = 2`), WithMessage("a redeclared")),
+			Diagnostics(env.AtRegexp("a.go", `a = 1`), WithMessage("other declaration")),
 		)
 
 		// Fix the error by editing the const name in b.go to `b`.
 		env.RegexpReplace("b.go", "(a) = 2", "b")
 		env.Await(
-			EmptyOrNoDiagnostics("a.go"),
-			EmptyOrNoDiagnostics("b.go"),
+			NoDiagnostics(ForFile("a.go")),
+			NoDiagnostics(ForFile("b.go")),
 		)
 	})
 }

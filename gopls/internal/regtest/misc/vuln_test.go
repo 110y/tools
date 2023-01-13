@@ -225,12 +225,10 @@ func main() {
 			Arguments: lens.Command.Arguments,
 		}, &result)
 
-		env.Await(
-			OnceMet(
-				CompletedProgress(result.Token, nil),
-				ShownMessage("Found GOSTDLIB"),
-				EmptyOrNoDiagnostics("go.mod"),
-			),
+		env.OnceMet(
+			CompletedProgress(result.Token, nil),
+			ShownMessage("Found GOSTDLIB"),
+			NoDiagnostics(ForFile("go.mod")),
 		)
 		testFetchVulncheckResult(t, env, map[string]fetchVulncheckResult{
 			"go.mod": {IDs: []string{"GOSTDLIB"}, Mode: govulncheck.ModeGovulncheck}})
@@ -276,7 +274,7 @@ func main() {
 	).Run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("go.mod")
 		env.AfterChange(
-			EmptyOrNoDiagnostics("go.mod"),
+			NoDiagnostics(ForFile("go.mod")),
 			// we don't publish diagnostics for standard library vulnerability yet.
 		)
 		testFetchVulncheckResult(t, env, map[string]fetchVulncheckResult{
@@ -487,7 +485,7 @@ func TestRunVulncheckPackageDiagnostics(t *testing.T) {
 
 		gotDiagnostics := &protocol.PublishDiagnosticsParams{}
 		env.AfterChange(
-			env.DiagnosticAtRegexp("go.mod", `golang.org/amod`),
+			Diagnostics(env.AtRegexp("go.mod", `golang.org/amod`)),
 			ReadDiagnostics("go.mod", gotDiagnostics),
 		)
 
@@ -586,17 +584,13 @@ func TestRunVulncheckPackageDiagnostics(t *testing.T) {
 					var result command.RunVulncheckResult
 					env.ExecuteCodeLensCommand("go.mod", command.RunGovulncheck, &result)
 					gotDiagnostics := &protocol.PublishDiagnosticsParams{}
-					env.Await(
-						OnceMet(
-							CompletedProgress(result.Token, nil),
-							ShownMessage("Found"),
-						),
+					env.OnceMet(
+						CompletedProgress(result.Token, nil),
+						ShownMessage("Found"),
 					)
-					env.Await(
-						OnceMet(
-							env.DiagnosticAtRegexp("go.mod", "golang.org/bmod"),
-							ReadDiagnostics("go.mod", gotDiagnostics),
-						),
+					env.OnceMet(
+						Diagnostics(env.AtRegexp("go.mod", "golang.org/bmod")),
+						ReadDiagnostics("go.mod", gotDiagnostics),
 					)
 					// We expect only one diagnostic for GO-2022-02.
 					count := 0
@@ -636,18 +630,14 @@ func TestRunVulncheckWarning(t *testing.T) {
 		var result command.RunVulncheckResult
 		env.ExecuteCodeLensCommand("go.mod", command.RunGovulncheck, &result)
 		gotDiagnostics := &protocol.PublishDiagnosticsParams{}
-		env.Await(
-			OnceMet(
-				CompletedProgress(result.Token, nil),
-				ShownMessage("Found"),
-			),
+		env.OnceMet(
+			CompletedProgress(result.Token, nil),
+			ShownMessage("Found"),
 		)
 		// Vulncheck diagnostics asynchronous to the vulncheck command.
-		env.Await(
-			OnceMet(
-				env.DiagnosticAtRegexp("go.mod", `golang.org/amod`),
-				ReadDiagnostics("go.mod", gotDiagnostics),
-			),
+		env.OnceMet(
+			Diagnostics(env.AtRegexp("go.mod", `golang.org/amod`)),
+			ReadDiagnostics("go.mod", gotDiagnostics),
 		)
 
 		testFetchVulncheckResult(t, env, map[string]fetchVulncheckResult{
@@ -806,19 +796,15 @@ func TestGovulncheckInfo(t *testing.T) {
 		var result command.RunVulncheckResult
 		env.ExecuteCodeLensCommand("go.mod", command.RunGovulncheck, &result)
 		gotDiagnostics := &protocol.PublishDiagnosticsParams{}
-		env.Await(
-			OnceMet(
-				CompletedProgress(result.Token, nil),
-				ShownMessage("No vulnerabilities found"), // only count affecting vulnerabilities.
-			),
+		env.OnceMet(
+			CompletedProgress(result.Token, nil),
+			ShownMessage("No vulnerabilities found"), // only count affecting vulnerabilities.
 		)
 
 		// Vulncheck diagnostics asynchronous to the vulncheck command.
-		env.Await(
-			OnceMet(
-				env.DiagnosticAtRegexp("go.mod", "golang.org/bmod"),
-				ReadDiagnostics("go.mod", gotDiagnostics),
-			),
+		env.OnceMet(
+			Diagnostics(env.AtRegexp("go.mod", "golang.org/bmod")),
+			ReadDiagnostics("go.mod", gotDiagnostics),
 		)
 
 		testFetchVulncheckResult(t, env, map[string]fetchVulncheckResult{"go.mod": {IDs: []string{"GO-2022-02"}, Mode: govulncheck.ModeGovulncheck}})
@@ -868,7 +854,7 @@ func TestGovulncheckInfo(t *testing.T) {
 		}
 		env.ApplyCodeAction(reset)
 
-		env.Await(EmptyOrNoDiagnostics("go.mod"))
+		env.Await(NoDiagnostics(ForFile("go.mod")))
 	})
 }
 
@@ -883,7 +869,7 @@ func testVulnDiagnostics(t *testing.T, env *Env, pattern string, want vulnDiagEx
 		var diag *protocol.Diagnostic
 		for _, g := range got.Diagnostics {
 			g := g
-			if g.Range.Start == pos.ToProtocolPosition() && w.msg == g.Message {
+			if g.Range.Start == pos && w.msg == g.Message {
 				modPathDiagnostics = append(modPathDiagnostics, g)
 				diag = &g
 				break

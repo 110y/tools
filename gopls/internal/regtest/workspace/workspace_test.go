@@ -151,12 +151,12 @@ func TestClearAnalysisDiagnostics(t *testing.T) {
 		WorkspaceFolders("pkg/inner"),
 	).Run(t, workspaceModule, func(t *testing.T, env *Env) {
 		env.OpenFile("pkg/main.go")
-		env.Await(
-			env.DiagnosticAtRegexp("pkg/main2.go", "fmt.Print"),
+		env.AfterChange(
+			Diagnostics(env.AtRegexp("pkg/main2.go", "fmt.Print")),
 		)
 		env.CloseBuffer("pkg/main.go")
-		env.Await(
-			EmptyDiagnostics("pkg/main2.go"),
+		env.AfterChange(
+			NoDiagnostics(ForFile("pkg/main2.go")),
 		)
 	})
 }
@@ -177,11 +177,8 @@ func TestReloadOnlyOnce(t *testing.T) {
 replace random.org => %s
 `, env.ReadWorkspaceFile("pkg/go.mod"), dir)
 		env.WriteWorkspaceFile("pkg/go.mod", goModWithReplace)
-		env.Await(
-			OnceMet(
-				env.DoneWithChangeWatchedFiles(),
-				LogMatching(protocol.Info, `packages\.Load #\d+\n`, 2, false),
-			),
+		env.AfterChange(
+			LogMatching(protocol.Info, `packages\.Load #\d+\n`, 2, false),
 		)
 	})
 }
@@ -270,9 +267,9 @@ func Hello() int {
 		env.RunGoCommand("work", "init")
 		env.RunGoCommand("work", "use", "-r", ".")
 		env.AfterChange(
-			env.DiagnosticAtRegexp("moda/a/a.go", "x"),
-			env.DiagnosticAtRegexp("modb/b/b.go", "x"),
-			env.NoDiagnosticAtRegexp("moda/a/a.go", `"b.com/b"`),
+			Diagnostics(env.AtRegexp("moda/a/a.go", "x")),
+			Diagnostics(env.AtRegexp("modb/b/b.go", "x")),
+			NoDiagnostics(env.AtRegexp("moda/a/a.go", `"b.com/b"`)),
 		)
 	})
 }
@@ -327,7 +324,7 @@ func main() {
 		ProxyFiles(proxy),
 	).Run(t, multiModule, func(t *testing.T, env *Env) {
 		env.Await(
-			env.DiagnosticAtRegexp("main.go", "x"),
+			Diagnostics(env.AtRegexp("main.go", "x")),
 		)
 	})
 }
@@ -455,7 +452,7 @@ func Hello() int {
 }
 `,
 		})
-		env.AfterChange(env.DiagnosticAtRegexp("modb/b/b.go", "x"))
+		env.AfterChange(Diagnostics(env.AtRegexp("modb/b/b.go", "x")))
 		got, _ := env.GoToDefinition("moda/a/a.go", env.RegexpSearch("moda/a/a.go", "Hello"))
 		if want := "modb/b/b.go"; !strings.HasSuffix(got, want) {
 			t.Errorf("expected %s, got %v", want, original)
@@ -505,16 +502,13 @@ func Hello() int {
 		ProxyFiles(workspaceModuleProxy),
 	).Run(t, multiModule, func(t *testing.T, env *Env) {
 		env.OpenFile("modb/go.mod")
-		env.Await(
-			OnceMet(
-				env.DoneWithOpen(),
-				DiagnosticAt("modb/go.mod", 0, 0),
-			),
+		env.AfterChange(
+			Diagnostics(AtPosition("modb/go.mod", 0, 0)),
 		)
 		env.RegexpReplace("modb/go.mod", "modul", "module")
 		env.SaveBufferWithoutActions("modb/go.mod")
 		env.Await(
-			env.DiagnosticAtRegexp("modb/b/b.go", "x"),
+			Diagnostics(env.AtRegexp("modb/b/b.go", "x")),
 		)
 	})
 }
@@ -612,11 +606,8 @@ use (
 
 		// As of golang/go#54069, writing go.work to the workspace triggers a
 		// workspace reload.
-		env.Await(
-			OnceMet(
-				env.DoneWithChangeWatchedFiles(),
-				env.DiagnosticAtRegexp("modb/b/b.go", "x"),
-			),
+		env.AfterChange(
+			Diagnostics(env.AtRegexp("modb/b/b.go", "x")),
 		)
 
 		// Jumping to definition should now go to b.com in the workspace.
@@ -627,7 +618,7 @@ use (
 		// Now, let's modify the go.work *overlay* (not on disk), and verify that
 		// this change is only picked up once it is saved.
 		env.OpenFile("go.work")
-		env.Await(env.DoneWithOpen())
+		env.AfterChange()
 		env.SetBufferContent("go.work", `go 1.17
 
 use (
@@ -652,7 +643,7 @@ use (
 
 		// This fails if guarded with a OnceMet(DoneWithSave(), ...), because it is
 		// debounced (and therefore not synchronous with the change).
-		env.Await(EmptyOrNoDiagnostics("modb/go.mod"))
+		env.Await(NoDiagnostics(ForFile("modb/go.mod")))
 
 		// Test Formatting.
 		env.SetBufferContent("go.work", `go 1.18
@@ -692,7 +683,7 @@ module example.com/bar
 	Run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("go.work")
 		env.AfterChange(
-			env.DiagnosticAtRegexpWithMessage("go.work", "use", "directory ./foo does not contain a module"),
+			Diagnostics(env.AtRegexp("go.work", "use"), WithMessage("directory ./foo does not contain a module")),
 		)
 		// The following tests is a regression test against an issue where we weren't
 		// copying the workFile struct field on workspace when a new one was created in
@@ -702,11 +693,11 @@ module example.com/bar
 		// the diagnostic still shows up.
 		env.SetBufferContent("go.work", "go 1.18 \n\n use ./bar\n")
 		env.AfterChange(
-			env.NoDiagnosticAtRegexp("go.work", "use"),
+			NoDiagnostics(env.AtRegexp("go.work", "use")),
 		)
 		env.SetBufferContent("go.work", "go 1.18 \n\n use ./foo\n")
 		env.AfterChange(
-			env.DiagnosticAtRegexpWithMessage("go.work", "use", "directory ./foo does not contain a module"),
+			Diagnostics(env.AtRegexp("go.work", "use"), WithMessage("directory ./foo does not contain a module")),
 		)
 	})
 }
@@ -723,8 +714,8 @@ replace
 	Run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("go.work")
 		env.AfterChange(
-			env.DiagnosticAtRegexpWithMessage("go.work", "usa", "unknown directive: usa"),
-			env.DiagnosticAtRegexpWithMessage("go.work", "replace", "usage: replace"),
+			Diagnostics(env.AtRegexp("go.work", "usa"), WithMessage("unknown directive: usa")),
+			Diagnostics(env.AtRegexp("go.work", "replace"), WithMessage("usage: replace")),
 		)
 	})
 }
@@ -910,16 +901,14 @@ func main() {
 	WithOptions(
 		ProxyFiles(proxy),
 	).Run(t, multiModule, func(t *testing.T, env *Env) {
-		env.Await(
-			OnceMet(
-				InitialWorkspaceLoad,
-				// TODO(rfindley): assert on the full set of diagnostics here. We
-				// should ensure that we don't have a diagnostic at b.Hi in a.go.
-				env.DiagnosticAtRegexp("moda/a/a.go", "x"),
-				env.DiagnosticAtRegexp("modb/b/b.go", "x"),
-				env.DiagnosticAtRegexp("modb/v2/b/b.go", "x"),
-				env.DiagnosticAtRegexp("modc/main.go", "x"),
-			),
+		env.OnceMet(
+			InitialWorkspaceLoad,
+			// TODO(rfindley): assert on the full set of diagnostics here. We
+			// should ensure that we don't have a diagnostic at b.Hi in a.go.
+			Diagnostics(env.AtRegexp("moda/a/a.go", "x")),
+			Diagnostics(env.AtRegexp("modb/b/b.go", "x")),
+			Diagnostics(env.AtRegexp("modb/v2/b/b.go", "x")),
+			Diagnostics(env.AtRegexp("modc/main.go", "x")),
 		)
 	})
 }
@@ -971,11 +960,12 @@ func main() {
 	).Run(t, files, func(t *testing.T, env *Env) {
 		params := &protocol.PublishDiagnosticsParams{}
 		env.OpenFile("b/go.mod")
-		env.Await(
-			OnceMet(
-				env.GoSumDiagnostic("b/go.mod", `example.com v1.2.3`),
-				ReadDiagnostics("b/go.mod", params),
+		env.AfterChange(
+			Diagnostics(
+				env.AtRegexp("go.mod", `example.com v1.2.3`),
+				WithMessage("go.sum is out of sync"),
 			),
+			ReadDiagnostics("b/go.mod", params),
 		)
 		for _, d := range params.Diagnostics {
 			if !strings.Contains(d.Message, "go.sum is out of sync") {
@@ -987,8 +977,8 @@ func main() {
 			}
 			env.ApplyQuickFixes("b/go.mod", []protocol.Diagnostic{d})
 		}
-		env.Await(
-			EmptyDiagnostics("b/go.mod"),
+		env.AfterChange(
+			NoDiagnostics(ForFile("b/go.mod")),
 		)
 	})
 }
@@ -1061,8 +1051,8 @@ func main() {}
 		// Since b/main.go is not in the workspace, it should have a warning on its
 		// package declaration.
 		env.AfterChange(
-			EmptyDiagnostics("main.go"),
-			DiagnosticAt("b/main.go", 0, 0),
+			NoDiagnostics(ForFile("main.go")),
+			Diagnostics(AtPosition("b/main.go", 0, 0)),
 		)
 		env.WriteWorkspaceFile("go.work", `go 1.16
 
@@ -1071,7 +1061,7 @@ use (
 	b
 )
 `)
-		env.AfterChange(NoOutstandingDiagnostics())
+		env.AfterChange(NoDiagnostics())
 		// Removing the go.work file should put us back where we started.
 		env.RemoveWorkspaceFile("go.work")
 
@@ -1087,8 +1077,8 @@ use (
 		env.OpenFile("b/main.go")
 
 		env.AfterChange(
-			EmptyDiagnostics("main.go"),
-			DiagnosticAt("b/main.go", 0, 0),
+			NoDiagnostics(ForFile("main.go")),
+			Diagnostics(AtPosition("b/main.go", 0, 0)),
 		)
 	})
 }
@@ -1124,13 +1114,13 @@ func (Server) Foo() {}
 		// as invalid. So we need to wait for the metadata of main_test.go to be
 		// updated before moving other_test.go back to the main_test package.
 		env.Await(
-			env.DiagnosticAtRegexp("other_test.go", "Server"),
-			env.DiagnosticAtRegexp("main_test.go", "otherConst"),
+			Diagnostics(env.AtRegexp("other_test.go", "Server")),
+			Diagnostics(env.AtRegexp("main_test.go", "otherConst")),
 		)
 		env.RegexpReplace("other_test.go", "main", "main_test")
-		env.Await(
-			EmptyDiagnostics("other_test.go"),
-			EmptyDiagnostics("main_test.go"),
+		env.AfterChange(
+			NoDiagnostics(ForFile("other_test.go")),
+			NoDiagnostics(ForFile("main_test.go")),
 		)
 
 		// This will cause a test failure if other_test.go is not in any package.
@@ -1172,18 +1162,12 @@ import (
 `
 	Run(t, ws, func(t *testing.T, env *Env) {
 		env.OpenFile("b/main.go")
-		env.Await(
-			OnceMet(
-				env.DoneWithOpen(),
-				NoDiagnostics("a/main.go"),
-			),
+		env.AfterChange(
+			NoDiagnostics(ForFile("a/main.go")),
 		)
 		env.OpenFile("a/main.go")
-		env.Await(
-			OnceMet(
-				env.DoneWithOpen(),
-				env.DiagnosticAtRegexpWithMessage("a/main.go", "V", "not used"),
-			),
+		env.AfterChange(
+			Diagnostics(env.AtRegexp("a/main.go", "V"), WithMessage("not used")),
 		)
 		env.CloseBuffer("a/main.go")
 
@@ -1193,11 +1177,8 @@ import (
 		// TODO(rfindley): it should not be necessary to make another edit here.
 		// Gopls should be smart enough to avoid diagnosing a.
 		env.RegexpReplace("b/main.go", "package b", "package b // a package")
-		env.Await(
-			OnceMet(
-				env.DoneWithChange(),
-				EmptyDiagnostics("a/main.go"),
-			),
+		env.AfterChange(
+			NoDiagnostics(ForFile("a/main.go")),
 		)
 	})
 }
@@ -1211,11 +1192,9 @@ func TestOldGoNotification_SupportedVersion(t *testing.T) {
 	}
 
 	Run(t, "", func(t *testing.T, env *Env) {
-		env.Await(
-			OnceMet(
-				InitialWorkspaceLoad,
-				NoShownMessage("upgrade"),
-			),
+		env.OnceMet(
+			InitialWorkspaceLoad,
+			NoShownMessage("upgrade"),
 		)
 	})
 }

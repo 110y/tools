@@ -34,7 +34,7 @@ func Foo() {
 `
 	Run(t, basic, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
-		pos := env.RegexpSearch("main.go", "Info{}").ToProtocolPosition()
+		pos := env.RegexpSearch("main.go", "Info{}")
 		if err := env.Editor.RefactorRewrite(env.Ctx, "main.go", &protocol.Range{
 			Start: pos,
 			End:   pos,
@@ -77,11 +77,11 @@ func Foo() error {
 	Run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("main.go")
 		var d protocol.PublishDiagnosticsParams
-		env.Await(OnceMet(
+		env.AfterChange(
 			// The error message here changed in 1.18; "return values" covers both forms.
-			env.DiagnosticAtRegexpWithMessage("main.go", `return`, "return values"),
+			Diagnostics(env.AtRegexp("main.go", `return`), WithMessage("return values")),
 			ReadDiagnostics("main.go", &d),
-		))
+		)
 		codeActions := env.CodeAction("main.go", d.Diagnostics)
 		if len(codeActions) != 2 {
 			t.Fatalf("expected 2 code actions, got %v", len(codeActions))
@@ -102,6 +102,6 @@ func Foo() error {
 			t.Fatalf("expected fixall code action, got none")
 		}
 		env.ApplyQuickFixes("main.go", d.Diagnostics)
-		env.Await(EmptyDiagnostics("main.go"))
+		env.AfterChange(NoDiagnostics(ForFile("main.go")))
 	})
 }

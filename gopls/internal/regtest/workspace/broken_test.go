@@ -160,16 +160,13 @@ const F = named.D - 3
 
 	Run(t, files, func(t *testing.T, env *Env) {
 		env.OpenFile("p/internal/bar/bar.go")
-		env.Await(
-			OnceMet(
-				env.DoneWithOpen(),
-				env.DiagnosticAtRegexp("p/internal/bar/bar.go", "\"mod.test/p/internal/foo\""),
-			),
+		env.AfterChange(
+			Diagnostics(env.AtRegexp("p/internal/bar/bar.go", "\"mod.test/p/internal/foo\"")),
 		)
 		env.OpenFile("go.mod")
 		env.RegexpReplace("go.mod", "mod.testx", "mod.test")
 		env.SaveBuffer("go.mod") // saving triggers a reload
-		env.Await(NoOutstandingDiagnostics())
+		env.AfterChange(NoDiagnostics())
 	})
 }
 
@@ -210,8 +207,8 @@ package b
 				env.OpenFile("a/empty.go")
 				env.OpenFile("b/go.mod")
 				env.AfterChange(
-					env.DiagnosticAtRegexp("a/a.go", "package a"),
-					env.DiagnosticAtRegexp("b/go.mod", "module b.com"),
+					Diagnostics(env.AtRegexp("a/a.go", "package a")),
+					Diagnostics(env.AtRegexp("b/go.mod", "module b.com")),
 					OutstandingWork(lsp.WorkspaceLoadFailure, msg),
 				)
 
@@ -222,8 +219,8 @@ package b
 				// workspace folder, therefore we can't invoke AfterChange here.
 				env.ChangeWorkspaceFolders("a", "b")
 				env.Await(
-					EmptyDiagnostics("a/a.go"),
-					EmptyDiagnostics("b/go.mod"),
+					NoDiagnostics(ForFile("a/a.go")),
+					NoDiagnostics(ForFile("b/go.mod")),
 					NoOutstandingWork(),
 				)
 
@@ -239,11 +236,11 @@ package b
 				// (better) trying to get workspace packages for each open file. See
 				// also golang/go#54261.
 				env.OpenFile("b/b.go")
-				env.Await(
+				env.AfterChange(
 					// TODO(rfindley): fix these missing diagnostics.
-					// env.DiagnosticAtRegexp("a/a.go", "package a"),
-					// env.DiagnosticAtRegexp("b/go.mod", "module b.com"),
-					env.DiagnosticAtRegexp("b/b.go", "package b"),
+					// Diagnostics(env.AtRegexp("a/a.go", "package a")),
+					// Diagnostics(env.AtRegexp("b/go.mod", "module b.com")),
+					Diagnostics(env.AtRegexp("b/b.go", "package b")),
 					OutstandingWork(lsp.WorkspaceLoadFailure, msg),
 				)
 			})
@@ -258,11 +255,8 @@ package b
 			InGOPATH(),
 		).Run(t, modules, func(t *testing.T, env *Env) {
 			env.OpenFile("a/a.go")
-			env.Await(
-				OnceMet(
-					env.DoneWithOpen(),
-					EmptyDiagnostics("a/a.go"),
-				),
+			env.AfterChange(
+				NoDiagnostics(ForFile("a/a.go")),
 				NoOutstandingWork(),
 			)
 		})

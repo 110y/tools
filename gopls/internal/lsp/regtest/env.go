@@ -297,28 +297,29 @@ func checkExpectations(s State, expectations []Expectation) (Verdict, string) {
 		if v > finalVerdict {
 			finalVerdict = v
 		}
-		summary.WriteString(fmt.Sprintf("%v: %s\n", v, e.Description()))
+		fmt.Fprintf(&summary, "%v: %s\n", v, e.Description)
 	}
 	return finalVerdict, summary.String()
 }
 
-// DiagnosticsFor returns the current diagnostics for the file. It is useful
-// after waiting on AnyDiagnosticAtCurrentVersion, when the desired diagnostic
-// is not simply described by DiagnosticAt.
+// Await blocks until the given expectations are all simultaneously met.
 //
-// TODO(rfindley): this method is inherently racy. Replace usages of this
-// method with the atomic OnceMet(..., ReadDiagnostics) pattern.
-func (a *Awaiter) DiagnosticsFor(name string) *protocol.PublishDiagnosticsParams {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.state.diagnostics[name]
-}
-
+// Generally speaking Await should be avoided because it blocks indefinitely if
+// gopls ends up in a state where the expectations are never going to be met.
+// Use AfterChange or OnceMet instead, so that the runner knows when to stop
+// waiting.
 func (e *Env) Await(expectations ...Expectation) {
 	e.T.Helper()
 	if err := e.Awaiter.Await(e.Ctx, expectations...); err != nil {
 		e.T.Fatal(err)
 	}
+}
+
+// OnceMet blocks until the precondition is met by the state or becomes
+// unmeetable. If it was met, OnceMet checks that the state meets all
+// expectations in mustMeets.
+func (e *Env) OnceMet(precondition Expectation, mustMeets ...Expectation) {
+	e.Await(OnceMet(precondition, mustMeets...))
 }
 
 // Await waits for all expectations to simultaneously be met. It should only be

@@ -51,16 +51,15 @@ func _() {
 	).Run(t, pkgThatUsesVendoring, func(t *testing.T, env *Env) {
 		env.OpenFile("a/a1.go")
 		d := &protocol.PublishDiagnosticsParams{}
-		env.Await(
-			OnceMet(
-				env.DiagnosticAtRegexpWithMessage("go.mod", "module mod.com", "Inconsistent vendoring"),
-				ReadDiagnostics("go.mod", d),
-			),
+		env.OnceMet(
+			InitialWorkspaceLoad,
+			Diagnostics(env.AtRegexp("go.mod", "module mod.com"), WithMessage("Inconsistent vendoring")),
+			ReadDiagnostics("go.mod", d),
 		)
 		env.ApplyQuickFixes("go.mod", d.Diagnostics)
 
-		env.Await(
-			env.DiagnosticAtRegexpWithMessage("a/a1.go", `q int`, "not used"),
+		env.AfterChange(
+			Diagnostics(env.AtRegexp("a/a1.go", `q int`), WithMessage("not used")),
 		)
 	})
 }

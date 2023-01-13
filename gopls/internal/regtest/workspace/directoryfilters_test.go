@@ -27,7 +27,7 @@ func TestDirectoryFilters(t *testing.T) {
 			"directoryFilters": []string{"-inner"},
 		},
 	).Run(t, workspaceModule, func(t *testing.T, env *Env) {
-		syms := env.WorkspaceSymbol("Hi")
+		syms := env.Symbol("Hi")
 		sort.Slice(syms, func(i, j int) bool { return syms[i].ContainerName < syms[j].ContainerName })
 		for _, s := range syms {
 			if strings.Contains(s.ContainerName, "inner") {
@@ -53,7 +53,10 @@ const _ = Nonexistant
 	WithOptions(
 		Settings{"directoryFilters": []string{"-exclude"}},
 	).Run(t, files, func(t *testing.T, env *Env) {
-		env.Await(NoDiagnostics("exclude/x.go"))
+		env.OnceMet(
+			InitialWorkspaceLoad,
+			NoDiagnostics(ForFile("exclude/x.go")),
+		)
 	})
 }
 
@@ -80,9 +83,10 @@ const X = 1
 	WithOptions(
 		Settings{"directoryFilters": []string{"-exclude"}},
 	).Run(t, files, func(t *testing.T, env *Env) {
-		env.Await(
-			NoDiagnostics("exclude/exclude.go"), // filtered out
-			NoDiagnostics("include/include.go"), // successfully builds
+		env.OnceMet(
+			InitialWorkspaceLoad,
+			NoDiagnostics(ForFile("exclude/exclude.go")), // filtered out
+			NoDiagnostics(ForFile("include/include.go")), // successfully builds
 		)
 	})
 }
@@ -131,7 +135,7 @@ package exclude
 		ProxyFiles(proxy),
 		Settings{"directoryFilters": []string{"-exclude"}},
 	).Run(t, files, func(t *testing.T, env *Env) {
-		env.Await(env.DiagnosticAtRegexp("include/include.go", `exclude.(X)`))
+		env.Await(Diagnostics(env.AtRegexp("include/include.go", `exclude.(X)`)))
 	})
 }
 
@@ -145,7 +149,7 @@ func TestDirectoryFilters_Wildcard(t *testing.T) {
 			"directoryFilters": filters,
 		},
 	).Run(t, workspaceModule, func(t *testing.T, env *Env) {
-		syms := env.WorkspaceSymbol("Bye")
+		syms := env.Symbol("Bye")
 		sort.Slice(syms, func(i, j int) bool { return syms[i].ContainerName < syms[j].ContainerName })
 		for _, s := range syms {
 			if strings.Contains(s.ContainerName, "bye") {

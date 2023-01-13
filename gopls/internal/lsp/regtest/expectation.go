@@ -11,21 +11,8 @@ import (
 	"strings"
 
 	"golang.org/x/tools/gopls/internal/lsp"
-	"golang.org/x/tools/gopls/internal/lsp/fake"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/internal/testenv"
 )
-
-// An Expectation asserts that the state of the editor at a point in time
-// matches an expected condition. This is used for signaling in tests when
-// certain conditions in the editor are met.
-type Expectation interface {
-	// Check determines whether the state of the editor satisfies the
-	// expectation, returning the results that met the condition.
-	Check(State) Verdict
-	// Description is a human-readable description of the expectation.
-	Description() string
-}
 
 var (
 	// InitialWorkspaceLoad is an expectation that the workspace initial load has
@@ -62,25 +49,31 @@ func (v Verdict) String() string {
 	return fmt.Sprintf("unrecognized verdict %d", v)
 }
 
-// SimpleExpectation holds an arbitrary check func, and implements the Expectation interface.
-type SimpleExpectation struct {
-	check       func(State) Verdict
-	description string
-}
+// An Expectation is an expected property of the state of the LSP client.
+// The Check function reports whether the property is met.
+//
+// Expectations are combinators. By composing them, tests may express
+// complex expectations in terms of simpler ones.
+//
+// TODO(rfindley): as expectations are combined, it becomes harder to identify
+// why they failed. A better signature for Check would be
+//
+//	func(State) (Verdict, string)
+//
+// returning a reason for the verdict that can be composed similarly to
+// descriptions.
+type Expectation struct {
+	Check func(State) Verdict
 
-// Check invokes e.check.
-func (e SimpleExpectation) Check(s State) Verdict {
-	return e.check(s)
-}
-
-// Description returns e.description.
-func (e SimpleExpectation) Description() string {
-	return e.description
+	// Description holds a noun-phrase identifying what the expectation checks.
+	//
+	// TODO(rfindley): revisit existing descriptions to ensure they compose nicely.
+	Description string
 }
 
 // OnceMet returns an Expectation that, once the precondition is met, asserts
 // that mustMeet is met.
-func OnceMet(precondition Expectation, mustMeets ...Expectation) *SimpleExpectation {
+func OnceMet(precondition Expectation, mustMeets ...Expectation) Expectation {
 	check := func(s State) Verdict {
 		switch pre := precondition.Check(s); pre {
 		case Unmeetable:
@@ -98,23 +91,23 @@ func OnceMet(precondition Expectation, mustMeets ...Expectation) *SimpleExpectat
 		}
 	}
 	description := describeExpectations(mustMeets...)
-	return &SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("once %q is met, must have:\n%s", precondition.Description(), description),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("once %q is met, must have:\n%s", precondition.Description, description),
 	}
 }
 
 func describeExpectations(expectations ...Expectation) string {
 	var descriptions []string
 	for _, e := range expectations {
-		descriptions = append(descriptions, e.Description())
+		descriptions = append(descriptions, e.Description)
 	}
 	return strings.Join(descriptions, "\n")
 }
 
 // AnyOf returns an expectation that is satisfied when any of the given
 // expectations is met.
-func AnyOf(anyOf ...Expectation) *SimpleExpectation {
+func AnyOf(anyOf ...Expectation) Expectation {
 	check := func(s State) Verdict {
 		for _, e := range anyOf {
 			verdict := e.Check(s)
@@ -125,9 +118,9 @@ func AnyOf(anyOf ...Expectation) *SimpleExpectation {
 		return Unmet
 	}
 	description := describeExpectations(anyOf...)
-	return &SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("Any of:\n%s", description),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("Any of:\n%s", description),
 	}
 }
 
@@ -141,7 +134,7 @@ func AnyOf(anyOf ...Expectation) *SimpleExpectation {
 // why an expectation failed. This should allow us to significantly improve
 // test output: we won't need to summarize state at all, as the verdict
 // explanation itself should describe clearly why the expectation not met.
-func AllOf(allOf ...Expectation) *SimpleExpectation {
+func AllOf(allOf ...Expectation) Expectation {
 	check := func(s State) Verdict {
 		verdict := Met
 		for _, e := range allOf {
@@ -152,15 +145,18 @@ func AllOf(allOf ...Expectation) *SimpleExpectation {
 		return verdict
 	}
 	description := describeExpectations(allOf...)
-	return &SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("All of:\n%s", description),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("All of:\n%s", description),
 	}
 }
 
-// ReadDiagnostics is an 'expectation' that is used to read diagnostics
-// atomically. It is intended to be used with 'OnceMet'.
-func ReadDiagnostics(fileName string, into *protocol.PublishDiagnosticsParams) *SimpleExpectation {
+// ReadDiagnostics is an Expectation that stores the current diagnostics for
+// fileName in into, whenever it is evaluated.
+//
+// It can be used in combination with OnceMet or AfterChange to capture the
+// state of diagnostics when other expectations are satisfied.
+func ReadDiagnostics(fileName string, into *protocol.PublishDiagnosticsParams) Expectation {
 	check := func(s State) Verdict {
 		diags, ok := s.diagnostics[fileName]
 		if !ok {
@@ -169,29 +165,29 @@ func ReadDiagnostics(fileName string, into *protocol.PublishDiagnosticsParams) *
 		*into = *diags
 		return Met
 	}
-	return &SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("read diagnostics for %q", fileName),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("read diagnostics for %q", fileName),
 	}
 }
 
 // NoOutstandingWork asserts that there is no work initiated using the LSP
 // $/progress API that has not completed.
-func NoOutstandingWork() SimpleExpectation {
+func NoOutstandingWork() Expectation {
 	check := func(s State) Verdict {
 		if len(s.outstandingWork()) == 0 {
 			return Met
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: "no outstanding work",
+	return Expectation{
+		Check:       check,
+		Description: "no outstanding work",
 	}
 }
 
 // NoShownMessage asserts that the editor has not received a ShowMessage.
-func NoShownMessage(subString string) SimpleExpectation {
+func NoShownMessage(subString string) Expectation {
 	check := func(s State) Verdict {
 		for _, m := range s.showMessage {
 			if strings.Contains(m.Message, subString) {
@@ -200,15 +196,15 @@ func NoShownMessage(subString string) SimpleExpectation {
 		}
 		return Met
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("no ShowMessage received containing %q", subString),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("no ShowMessage received containing %q", subString),
 	}
 }
 
 // ShownMessage asserts that the editor has received a ShowMessageRequest
 // containing the given substring.
-func ShownMessage(containing string) SimpleExpectation {
+func ShownMessage(containing string) Expectation {
 	check := func(s State) Verdict {
 		for _, m := range s.showMessage {
 			if strings.Contains(m.Message, containing) {
@@ -217,15 +213,15 @@ func ShownMessage(containing string) SimpleExpectation {
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: "received ShowMessage",
+	return Expectation{
+		Check:       check,
+		Description: "received ShowMessage",
 	}
 }
 
 // ShowMessageRequest asserts that the editor has received a ShowMessageRequest
 // with an action item that has the given title.
-func ShowMessageRequest(title string) SimpleExpectation {
+func ShowMessageRequest(title string) Expectation {
 	check := func(s State) Verdict {
 		if len(s.showMessageRequest) == 0 {
 			return Unmet
@@ -240,9 +236,9 @@ func ShowMessageRequest(title string) SimpleExpectation {
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: "received ShowMessageRequest",
+	return Expectation{
+		Check:       check,
+		Description: "received ShowMessageRequest",
 	}
 }
 
@@ -292,11 +288,9 @@ func (e *Env) DoneDiagnosingChanges() Expectation {
 // expectations.
 func (e *Env) AfterChange(expectations ...Expectation) {
 	e.T.Helper()
-	e.Await(
-		OnceMet(
-			e.DoneDiagnosingChanges(),
-			expectations...,
-		),
+	e.OnceMet(
+		e.DoneDiagnosingChanges(),
+		expectations...,
 	)
 }
 
@@ -352,16 +346,16 @@ func (e *Env) DoneWithClose() Expectation {
 // StartedWork expect a work item to have been started >= atLeast times.
 //
 // See CompletedWork.
-func StartedWork(title string, atLeast uint64) SimpleExpectation {
+func StartedWork(title string, atLeast uint64) Expectation {
 	check := func(s State) Verdict {
 		if s.startedWork()[title] >= atLeast {
 			return Met
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("started work %q at least %d time(s)", title, atLeast),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("started work %q at least %d time(s)", title, atLeast),
 	}
 }
 
@@ -369,7 +363,7 @@ func StartedWork(title string, atLeast uint64) SimpleExpectation {
 //
 // Since the Progress API doesn't include any hidden metadata, we must use the
 // progress notification title to identify the work we expect to be completed.
-func CompletedWork(title string, count uint64, atLeast bool) SimpleExpectation {
+func CompletedWork(title string, count uint64, atLeast bool) Expectation {
 	check := func(s State) Verdict {
 		completed := s.completedWork()
 		if completed[title] == count || atLeast && completed[title] > count {
@@ -381,9 +375,9 @@ func CompletedWork(title string, count uint64, atLeast bool) SimpleExpectation {
 	if atLeast {
 		desc = fmt.Sprintf("completed work %q at least %d time(s)", title, count)
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: desc,
+	return Expectation{
+		Check:       check,
+		Description: desc,
 	}
 }
 
@@ -400,7 +394,7 @@ type WorkStatus struct {
 //
 // If the token is not a progress token that the client has seen, this
 // expectation is Unmeetable.
-func CompletedProgress(token protocol.ProgressToken, into *WorkStatus) SimpleExpectation {
+func CompletedProgress(token protocol.ProgressToken, into *WorkStatus) Expectation {
 	check := func(s State) Verdict {
 		work, ok := s.work[token]
 		if !ok {
@@ -416,16 +410,16 @@ func CompletedProgress(token protocol.ProgressToken, into *WorkStatus) SimpleExp
 		return Unmet
 	}
 	desc := fmt.Sprintf("completed work for token %v", token)
-	return SimpleExpectation{
-		check:       check,
-		description: desc,
+	return Expectation{
+		Check:       check,
+		Description: desc,
 	}
 }
 
 // OutstandingWork expects a work item to be outstanding. The given title must
 // be an exact match, whereas the given msg must only be contained in the work
 // item's message.
-func OutstandingWork(title, msg string) SimpleExpectation {
+func OutstandingWork(title, msg string) Expectation {
 	check := func(s State) Verdict {
 		for _, work := range s.work {
 			if work.complete {
@@ -437,32 +431,15 @@ func OutstandingWork(title, msg string) SimpleExpectation {
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("outstanding work: %q containing %q", title, msg),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("outstanding work: %q containing %q", title, msg),
 	}
-}
-
-// LogExpectation is an expectation on the log messages received by the editor
-// from gopls.
-type LogExpectation struct {
-	check       func([]*protocol.LogMessageParams) Verdict
-	description string
-}
-
-// Check implements the Expectation interface.
-func (e LogExpectation) Check(s State) Verdict {
-	return e.check(s.logs)
-}
-
-// Description implements the Expectation interface.
-func (e LogExpectation) Description() string {
-	return e.description
 }
 
 // NoErrorLogs asserts that the client has not received any log messages of
 // error severity.
-func NoErrorLogs() LogExpectation {
+func NoErrorLogs() Expectation {
 	return NoLogMatching(protocol.Error, "")
 }
 
@@ -472,14 +449,14 @@ func NoErrorLogs() LogExpectation {
 // The count argument specifies the expected number of matching logs. If
 // atLeast is set, this is a lower bound, otherwise there must be exactly cound
 // matching logs.
-func LogMatching(typ protocol.MessageType, re string, count int, atLeast bool) LogExpectation {
+func LogMatching(typ protocol.MessageType, re string, count int, atLeast bool) Expectation {
 	rec, err := regexp.Compile(re)
 	if err != nil {
 		panic(err)
 	}
-	check := func(msgs []*protocol.LogMessageParams) Verdict {
+	check := func(state State) Verdict {
 		var found int
-		for _, msg := range msgs {
+		for _, msg := range state.logs {
 			if msg.Type == typ && rec.Match([]byte(msg.Message)) {
 				found++
 			}
@@ -494,16 +471,16 @@ func LogMatching(typ protocol.MessageType, re string, count int, atLeast bool) L
 	if atLeast {
 		desc = fmt.Sprintf("log message matching %q expected at least %v times", re, count)
 	}
-	return LogExpectation{
-		check:       check,
-		description: desc,
+	return Expectation{
+		Check:       check,
+		Description: desc,
 	}
 }
 
 // NoLogMatching asserts that the client has not received a log message
 // of type typ matching the regexp re. If re is an empty string, any log
 // message is considered a match.
-func NoLogMatching(typ protocol.MessageType, re string) LogExpectation {
+func NoLogMatching(typ protocol.MessageType, re string) Expectation {
 	var r *regexp.Regexp
 	if re != "" {
 		var err error
@@ -512,8 +489,8 @@ func NoLogMatching(typ protocol.MessageType, re string) LogExpectation {
 			panic(err)
 		}
 	}
-	check := func(msgs []*protocol.LogMessageParams) Verdict {
-		for _, msg := range msgs {
+	check := func(state State) Verdict {
+		for _, msg := range state.logs {
 			if msg.Type != typ {
 				continue
 			}
@@ -523,25 +500,25 @@ func NoLogMatching(typ protocol.MessageType, re string) LogExpectation {
 		}
 		return Met
 	}
-	return LogExpectation{
-		check:       check,
-		description: fmt.Sprintf("no log message matching %q", re),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("no log message matching %q", re),
 	}
 }
 
 // FileWatchMatching expects that a file registration matches re.
-func FileWatchMatching(re string) SimpleExpectation {
-	return SimpleExpectation{
-		check:       checkFileWatch(re, Met, Unmet),
-		description: fmt.Sprintf("file watch matching %q", re),
+func FileWatchMatching(re string) Expectation {
+	return Expectation{
+		Check:       checkFileWatch(re, Met, Unmet),
+		Description: fmt.Sprintf("file watch matching %q", re),
 	}
 }
 
 // NoFileWatchMatching expects that no file registration matches re.
-func NoFileWatchMatching(re string) SimpleExpectation {
-	return SimpleExpectation{
-		check:       checkFileWatch(re, Unmet, Met),
-		description: fmt.Sprintf("no file watch matching %q", re),
+func NoFileWatchMatching(re string) Expectation {
+	return Expectation{
+		Check:       checkFileWatch(re, Unmet, Met),
+		Description: fmt.Sprintf("no file watch matching %q", re),
 	}
 }
 
@@ -585,7 +562,7 @@ func jsonProperty(obj interface{}, path ...string) interface{} {
 // TODO(rfindley): remove this once TestWatchReplaceTargets has been revisited.
 //
 // Deprecated: use (No)FileWatchMatching
-func RegistrationMatching(re string) SimpleExpectation {
+func RegistrationMatching(re string) Expectation {
 	rec := regexp.MustCompile(re)
 	check := func(s State) Verdict {
 		for _, p := range s.registrations {
@@ -597,15 +574,15 @@ func RegistrationMatching(re string) SimpleExpectation {
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("registration matching %q", re),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("registration matching %q", re),
 	}
 }
 
 // UnregistrationMatching asserts that the client has received an
 // unregistration whose ID matches the given regexp.
-func UnregistrationMatching(re string) SimpleExpectation {
+func UnregistrationMatching(re string) Expectation {
 	rec := regexp.MustCompile(re)
 	check := func(s State) Verdict {
 		for _, p := range s.unregistrations {
@@ -617,216 +594,156 @@ func UnregistrationMatching(re string) SimpleExpectation {
 		}
 		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("unregistration matching %q", re),
+	return Expectation{
+		Check:       check,
+		Description: fmt.Sprintf("unregistration matching %q", re),
 	}
 }
 
-// A DiagnosticExpectation is a condition that must be met by the current set
-// of diagnostics for a file.
-type DiagnosticExpectation struct {
-	// optionally, the position of the diagnostic and the regex used to calculate it.
-	pos *fake.Pos
-	re  string
-
-	// optionally, the message that the diagnostic should contain.
-	message string
-
-	// whether the expectation is that the diagnostic is present, or absent.
-	present bool
-
-	// path is the scratch workdir-relative path to the file being asserted on.
-	path string
-
-	// optionally, the diagnostic source
-	source string
-}
-
-// Check implements the Expectation interface.
-func (e DiagnosticExpectation) Check(s State) Verdict {
-	diags, ok := s.diagnostics[e.path]
-	if !ok {
-		if !e.present {
-			return Met
-		}
-		return Unmet
-	}
-
-	found := false
-	for _, d := range diags.Diagnostics {
-		if e.pos != nil {
-			if d.Range.Start.Line != uint32(e.pos.Line) || d.Range.Start.Character != uint32(e.pos.Column) {
-				continue
-			}
-		}
-		if e.message != "" {
-			if !strings.Contains(d.Message, e.message) {
-				continue
-			}
-		}
-		if e.source != "" && e.source != d.Source {
-			continue
-		}
-		found = true
-		break
-	}
-
-	if found == e.present {
-		return Met
-	}
-	return Unmet
-}
-
-// Description implements the Expectation interface.
-func (e DiagnosticExpectation) Description() string {
-	desc := e.path + ":"
-	if !e.present {
-		desc += " no"
-	}
-	desc += " diagnostic"
-	if e.pos != nil {
-		desc += fmt.Sprintf(" at {line:%d, column:%d}", e.pos.Line, e.pos.Column)
-		if e.re != "" {
-			desc += fmt.Sprintf(" (location of %q)", e.re)
-		}
-	}
-	if e.message != "" {
-		desc += fmt.Sprintf(" with message %q", e.message)
-	}
-	if e.source != "" {
-		desc += fmt.Sprintf(" from source %q", e.source)
-	}
-	return desc
-}
-
-// NoOutstandingDiagnostics asserts that the workspace has no outstanding
-// diagnostic messages.
-func NoOutstandingDiagnostics() Expectation {
+// Diagnostics asserts that there is at least one diagnostic matching the given
+// filters.
+func Diagnostics(filters ...DiagnosticFilter) Expectation {
 	check := func(s State) Verdict {
-		for _, diags := range s.diagnostics {
-			if len(diags.Diagnostics) > 0 {
+		diags := flattenDiagnostics(s)
+		for _, filter := range filters {
+			var filtered []flatDiagnostic
+			for _, d := range diags {
+				if filter.check(d.name, d.diag) {
+					filtered = append(filtered, d)
+				}
+			}
+			if len(filtered) == 0 {
+				// TODO(rfindley): if/when expectations describe their own failure, we
+				// can provide more useful information here as to which filter caused
+				// the failure.
 				return Unmet
 			}
+			diags = filtered
 		}
 		return Met
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: "no outstanding diagnostics",
+	var descs []string
+	for _, filter := range filters {
+		descs = append(descs, filter.desc)
+	}
+	return Expectation{
+		Check:       check,
+		Description: "any diagnostics " + strings.Join(descs, ", "),
 	}
 }
 
-// EmptyDiagnostics asserts that empty diagnostics are sent for the
-// workspace-relative path name.
-func EmptyDiagnostics(name string) Expectation {
+// NoDiagnostics asserts that there are no diagnostics matching the given
+// filters. Notably, if no filters are supplied this assertion checks that
+// there are no diagnostics at all, for any file.
+func NoDiagnostics(filters ...DiagnosticFilter) Expectation {
 	check := func(s State) Verdict {
-		if diags := s.diagnostics[name]; diags != nil && len(diags.Diagnostics) == 0 {
-			return Met
+		diags := flattenDiagnostics(s)
+		for _, filter := range filters {
+			var filtered []flatDiagnostic
+			for _, d := range diags {
+				if filter.check(d.name, d.diag) {
+					filtered = append(filtered, d)
+				}
+			}
+			diags = filtered
 		}
-		return Unmet
-	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("empty diagnostics for %q", name),
-	}
-}
-
-// EmptyOrNoDiagnostics asserts that either no diagnostics are sent for the
-// workspace-relative path name, or empty diagnostics are sent.
-// TODO(rFindley): this subtlety shouldn't be necessary. Gopls should always
-// send at least one diagnostic set for open files.
-func EmptyOrNoDiagnostics(name string) Expectation {
-	check := func(s State) Verdict {
-		if diags := s.diagnostics[name]; diags == nil || len(diags.Diagnostics) == 0 {
-			return Met
+		if len(diags) > 0 {
+			return Unmet
 		}
-		return Unmet
+		return Met
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("empty or no diagnostics for %q", name),
+	var descs []string
+	for _, filter := range filters {
+		descs = append(descs, filter.desc)
+	}
+	return Expectation{
+		Check:       check,
+		Description: "no diagnostics " + strings.Join(descs, ", "),
 	}
 }
 
-// NoDiagnostics asserts that no diagnostics are sent for the
-// workspace-relative path name. It should be used primarily in conjunction
-// with a OnceMet, as it has to check that all outstanding diagnostics have
-// already been delivered.
-func NoDiagnostics(name string) Expectation {
-	check := func(s State) Verdict {
-		if _, ok := s.diagnostics[name]; !ok {
-			return Met
+type flatDiagnostic struct {
+	name string
+	diag protocol.Diagnostic
+}
+
+func flattenDiagnostics(state State) []flatDiagnostic {
+	var result []flatDiagnostic
+	for name, diags := range state.diagnostics {
+		for _, diag := range diags.Diagnostics {
+			result = append(result, flatDiagnostic{name, diag})
 		}
-		return Unmet
 	}
-	return SimpleExpectation{
-		check:       check,
-		description: fmt.Sprintf("no diagnostics for %q", name),
+	return result
+}
+
+// -- Diagnostic filters --
+
+// A DiagnosticFilter filters the set of diagnostics, for assertion with
+// Diagnostics or NoDiagnostics.
+type DiagnosticFilter struct {
+	desc  string
+	check func(name string, _ protocol.Diagnostic) bool
+}
+
+// ForFile filters to diagnostics matching the sandbox-relative file name.
+func ForFile(name string) DiagnosticFilter {
+	return DiagnosticFilter{
+		desc: fmt.Sprintf("for file %q", name),
+		check: func(diagName string, _ protocol.Diagnostic) bool {
+			return diagName == name
+		},
 	}
 }
 
-// DiagnosticAtRegexp expects that there is a diagnostic entry at the start
-// position matching the regexp search string re in the buffer specified by
-// name. Note that this currently ignores the end position.
-func (e *Env) DiagnosticAtRegexp(name, re string) DiagnosticExpectation {
-	e.T.Helper()
-	pos := e.RegexpSearch(name, re)
-	return DiagnosticExpectation{path: name, pos: &pos, re: re, present: true}
+// FromSource filters to diagnostics matching the given diagnostics source.
+func FromSource(source string) DiagnosticFilter {
+	return DiagnosticFilter{
+		desc: fmt.Sprintf("with source %q", source),
+		check: func(_ string, d protocol.Diagnostic) bool {
+			return d.Source == source
+		},
+	}
 }
 
-// DiagnosticAtRegexpWithMessage is like DiagnosticAtRegexp, but it also
-// checks for the content of the diagnostic message,
-func (e *Env) DiagnosticAtRegexpWithMessage(name, re, msg string) DiagnosticExpectation {
-	e.T.Helper()
-	pos := e.RegexpSearch(name, re)
-	return DiagnosticExpectation{path: name, pos: &pos, re: re, present: true, message: msg}
-}
-
-// DiagnosticAtRegexpFromSource expects a diagnostic at the first position
-// matching re, from the given source.
-func (e *Env) DiagnosticAtRegexpFromSource(name, re, source string) DiagnosticExpectation {
-	e.T.Helper()
-	pos := e.RegexpSearch(name, re)
-	return DiagnosticExpectation{path: name, pos: &pos, re: re, present: true, source: source}
-}
-
-// DiagnosticAt asserts that there is a diagnostic entry at the position
-// specified by line and col, for the workdir-relative path name.
-func DiagnosticAt(name string, line, col int) DiagnosticExpectation {
-	return DiagnosticExpectation{path: name, pos: &fake.Pos{Line: line, Column: col}, present: true}
-}
-
-// NoDiagnosticAtRegexp expects that there is no diagnostic entry at the start
-// position matching the regexp search string re in the buffer specified by
-// name. Note that this currently ignores the end position.
-// This should only be used in combination with OnceMet for a given condition,
-// otherwise it may always succeed.
-func (e *Env) NoDiagnosticAtRegexp(name, re string) DiagnosticExpectation {
-	e.T.Helper()
-	pos := e.RegexpSearch(name, re)
-	return DiagnosticExpectation{path: name, pos: &pos, re: re, present: false}
-}
-
-// NoDiagnosticWithMessage asserts that there is no diagnostic entry with the
-// given message.
+// AtRegexp filters to diagnostics in the file with sandbox-relative path name,
+// at the first position matching the given regexp pattern.
 //
-// This should only be used in combination with OnceMet for a given condition,
-// otherwise it may always succeed.
-func NoDiagnosticWithMessage(name, msg string) DiagnosticExpectation {
-	return DiagnosticExpectation{path: name, message: msg, present: false}
+// TODO(rfindley): pass in the editor to expectations, so that they may depend
+// on editor state and AtRegexp can be a function rather than a method.
+func (e *Env) AtRegexp(name, pattern string) DiagnosticFilter {
+	pos := e.RegexpSearch(name, pattern)
+	return DiagnosticFilter{
+		desc: fmt.Sprintf("at the first position matching %#q in %q", pattern, name),
+		check: func(diagName string, d protocol.Diagnostic) bool {
+			return diagName == name && d.Range.Start == pos
+		},
+	}
 }
 
-// GoSumDiagnostic asserts that a "go.sum is out of sync" diagnostic for the
-// given module (as formatted in a go.mod file, e.g. "example.com v1.0.0") is
-// present.
-func (e *Env) GoSumDiagnostic(name, module string) Expectation {
-	e.T.Helper()
-	// In 1.16, go.sum diagnostics should appear on the relevant module. Earlier
-	// errors have no information and appear on the module declaration.
-	if testenv.Go1Point() >= 16 {
-		return e.DiagnosticAtRegexpWithMessage(name, module, "go.sum is out of sync")
-	} else {
-		return e.DiagnosticAtRegexpWithMessage(name, `module`, "go.sum is out of sync")
+// AtPosition filters to diagnostics at location name:line:character, for a
+// sandbox-relative path name.
+//
+// Line and character are 0-based, and character measures UTF-16 codes.
+//
+// Note: prefer the more readable AtRegexp.
+func AtPosition(name string, line, character uint32) DiagnosticFilter {
+	pos := protocol.Position{Line: line, Character: character}
+	return DiagnosticFilter{
+		desc: fmt.Sprintf("at %s:%d:%d", name, line, character),
+		check: func(diagName string, d protocol.Diagnostic) bool {
+			return diagName == name && d.Range.Start == pos
+		},
+	}
+}
+
+// WithMessage filters to diagnostics whose message contains the given
+// substring.
+func WithMessage(substring string) DiagnosticFilter {
+	return DiagnosticFilter{
+		desc: fmt.Sprintf("with message containing %q", substring),
+		check: func(_ string, d protocol.Diagnostic) bool {
+			return strings.Contains(d.Message, substring)
+		},
 	}
 }

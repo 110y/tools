@@ -60,14 +60,12 @@ func main() {
 
 	Run(t, generatedWorkspace, func(t *testing.T, env *Env) {
 		env.Await(
-			env.DiagnosticAtRegexp("main.go", "lib1.(Answer)"),
+			Diagnostics(env.AtRegexp("main.go", "lib1.(Answer)")),
 		)
 		env.RunGenerate("./lib1")
 		env.RunGenerate("./lib2")
-		env.Await(
-			OnceMet(
-				env.DoneWithChangeWatchedFiles(),
-				EmptyDiagnostics("main.go")),
+		env.AfterChange(
+			NoDiagnostics(ForFile("main.go")),
 		)
 	})
 }

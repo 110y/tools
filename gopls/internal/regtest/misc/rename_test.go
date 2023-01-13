@@ -37,7 +37,7 @@ func main() {
 		pos := env.RegexpSearch("main.go", `main`)
 		tdpp := protocol.TextDocumentPositionParams{
 			TextDocument: env.Editor.TextDocumentIdentifier("main.go"),
-			Position:     pos.ToProtocolPosition(),
+			Position:     pos,
 		}
 		params := &protocol.PrepareRenameParams{
 			TextDocumentPositionParams: tdpp,
@@ -145,7 +145,7 @@ func main() {
 		pos := env.RegexpSearch("lib/a.go", "lib")
 		tdpp := protocol.TextDocumentPositionParams{
 			TextDocument: env.Editor.TextDocumentIdentifier("lib/a.go"),
-			Position:     pos.ToProtocolPosition(),
+			Position:     pos,
 		}
 		params := &protocol.PrepareRenameParams{
 			TextDocumentPositionParams: tdpp,
@@ -403,19 +403,17 @@ package b
 		// Rename files and verify that diagnostics are affected accordingly.
 
 		// Initially, we should have diagnostics on both X's, for their duplicate declaration.
-		env.Await(
-			OnceMet(
-				InitialWorkspaceLoad,
-				env.DiagnosticAtRegexp("a/a.go", "X"),
-				env.DiagnosticAtRegexp("a/x.go", "X"),
-			),
+		env.OnceMet(
+			InitialWorkspaceLoad,
+			Diagnostics(env.AtRegexp("a/a.go", "X")),
+			Diagnostics(env.AtRegexp("a/x.go", "X")),
 		)
 
 		// Moving x.go should make the diagnostic go away.
 		env.RenameFile("a/x.go", "b/x.go")
 		env.AfterChange(
-			EmptyDiagnostics("a/a.go"),                  // no more duplicate declarations
-			env.DiagnosticAtRegexp("b/b.go", "package"), // as package names mismatch
+			NoDiagnostics(ForFile("a/a.go")),               // no more duplicate declarations
+			Diagnostics(env.AtRegexp("b/b.go", "package")), // as package names mismatch
 		)
 
 		// Renaming should also work on open buffers.
@@ -424,15 +422,15 @@ package b
 		// Moving x.go back to a/ should cause the diagnostics to reappear.
 		env.RenameFile("b/x.go", "a/x.go")
 		env.AfterChange(
-			env.DiagnosticAtRegexp("a/a.go", "X"),
-			env.DiagnosticAtRegexp("a/x.go", "X"),
+			Diagnostics(env.AtRegexp("a/a.go", "X")),
+			Diagnostics(env.AtRegexp("a/x.go", "X")),
 		)
 
 		// Renaming the entire directory should move both the open and closed file.
 		env.RenameFile("a", "x")
 		env.AfterChange(
-			env.DiagnosticAtRegexp("x/a.go", "X"),
-			env.DiagnosticAtRegexp("x/x.go", "X"),
+			Diagnostics(env.AtRegexp("x/a.go", "X")),
+			Diagnostics(env.AtRegexp("x/x.go", "X")),
 		)
 
 		// As a sanity check, verify that x/x.go is open.
