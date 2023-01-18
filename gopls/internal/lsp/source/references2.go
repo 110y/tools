@@ -186,7 +186,7 @@ func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pkg
 		}
 	}
 
-	// Find interal "references" to the package from
+	// Find internal "references" to the package from
 	// of each package declaration in the target package itself.
 	//
 	// The widest package (possibly a test variant) has the
@@ -282,18 +282,6 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 		return nil, err
 	}
 
-	// We want the ordinary importable package,
-	// plus any test-augmented variants, since
-	// declarations in _test.go files may change
-	// the reference of a selection, or even a
-	// field into a method or vice versa.
-	//
-	// But we don't need intermediate test variants,
-	// as both their local and global references
-	// will be covered already by equivalent (though
-	// not types.Identical) objects in other variants.
-	RemoveIntermediateTestVariants(metas)
-
 	// The search functions will call report(loc) for each hit.
 	var (
 		refsMu sync.Mutex
@@ -337,6 +325,18 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 
 		// local
 		group.Go(func() error {
+			// We want the ordinary importable package,
+			// plus any test-augmented variants, since
+			// declarations in _test.go files may change
+			// the reference of a selection, or even a
+			// field into a method or vice versa.
+			//
+			// But we don't need intermediate test variants,
+			// as their local references will be covered
+			// already by other variants.
+			if m.IsIntermediateTestVariant() {
+				return nil
+			}
 			return localReferences(ctx, snapshot, declURI, declPosn.Offset, m, report)
 		})
 
@@ -346,9 +346,9 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 
 		// global
 		group.Go(func() error {
-			// Compute the global-scope query for each variant
-			// of the declaring package in parallel.
-			// We may assume the rdeps of each variant are disjoint.
+			// Compute the global-scope query for every variant
+			// of the declaring package in parallel,
+			// as the rdeps of each variant are disjoint.
 			rdeps, err := snapshot.ReverseDependencies(ctx, m.ID, transitive)
 			if err != nil {
 				return err
@@ -474,11 +474,13 @@ func globalReferences(ctx context.Context, snapshot Snapshot, m *Metadata, pkgPa
 }
 
 // mustLocation reports the location interval a syntax node,
-// which must belong to m.File! Safe for use only by references2.
+// which must belong to m.File.
+//
+// Safe for use only by references2 and implementations2.
 func mustLocation(pgf *ParsedGoFile, n ast.Node) protocol.Location {
 	loc, err := pgf.PosLocation(n.Pos(), n.End())
 	if err != nil {
-		panic(err) // can't happen in references2
+		panic(err) // can't happen in references2 or implementations2
 	}
 	return loc
 }
