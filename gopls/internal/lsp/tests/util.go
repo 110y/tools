@@ -275,33 +275,6 @@ func DiffCallHierarchyItems(gotCalls []protocol.CallHierarchyItem, expectedCalls
 	return ""
 }
 
-func ToProtocolCompletionItems(items []completion.CompletionItem) []protocol.CompletionItem {
-	var result []protocol.CompletionItem
-	for _, item := range items {
-		result = append(result, ToProtocolCompletionItem(item))
-	}
-	return result
-}
-
-func ToProtocolCompletionItem(item completion.CompletionItem) protocol.CompletionItem {
-	pItem := protocol.CompletionItem{
-		Label:         item.Label,
-		Kind:          item.Kind,
-		Detail:        item.Detail,
-		Documentation: item.Documentation,
-		InsertText:    item.InsertText,
-		TextEdit: &protocol.TextEdit{
-			NewText: item.Snippet(),
-		},
-		// Negate score so best score has lowest sort text like real API.
-		SortText: fmt.Sprint(-item.Score),
-	}
-	if pItem.InsertText == "" {
-		pItem.InsertText = pItem.Label
-	}
-	return pItem
-}
-
 func FilterBuiltins(src span.Span, items []protocol.CompletionItem) []protocol.CompletionItem {
 	var (
 		got          []protocol.CompletionItem
