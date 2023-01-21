@@ -33,7 +33,7 @@ type Symbol struct {
 
 // maxSymbols defines the maximum number of symbol results that should ever be
 // sent in response to a client.
-const maxSymbols = 100
+const maxSymbols = 10000
 
 // WorkspaceSymbols matches symbols across all views using the given query,
 // according to the match semantics parameterized by matcherType and style.
