@@ -867,6 +867,8 @@ func (r *runner) References(t *testing.T, src span.Span, itemList []span.Span) {
 			want := make(map[protocol.Location]bool)
 			for i, pos := range itemList {
 				// We don't want the first result if we aren't including the declaration.
+				// TODO(adonovan): don't assume a single declaration:
+				// there may be >1 if corresponding methods are considered.
 				if i == 0 && !includeDeclaration {
 					continue
 				}
@@ -1397,7 +1399,10 @@ func (r *runner) collectDiagnostics(view *cache.View) {
 	}
 	r.diagnostics = make(map[span.URI][]*source.Diagnostic)
 
-	snapshot, release := view.Snapshot(r.ctx)
+	snapshot, release, err := view.Snapshot()
+	if err != nil {
+		panic(err)
+	}
 	defer release()
 
 	// Always run diagnostics with analysis.

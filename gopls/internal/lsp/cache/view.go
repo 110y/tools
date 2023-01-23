@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -359,7 +360,8 @@ func (v *View) FileKind(fh source.FileHandle) source.FileKind {
 }
 
 func minorOptionsChange(a, b *source.Options) bool {
-	// Check if any of the settings that modify our understanding of files have been changed
+	// Check if any of the settings that modify our understanding of files have
+	// been changed.
 	if !reflect.DeepEqual(a.Env, b.Env) {
 		return false
 	}
@@ -677,17 +679,17 @@ func checkIgnored(suffix string) bool {
 	return false
 }
 
-func (v *View) Snapshot(ctx context.Context) (source.Snapshot, func()) {
+func (v *View) Snapshot() (source.Snapshot, func(), error) {
 	return v.getSnapshot()
 }
 
-func (v *View) getSnapshot() (*snapshot, func()) {
+func (v *View) getSnapshot() (*snapshot, func(), error) {
 	v.snapshotMu.Lock()
 	defer v.snapshotMu.Unlock()
 	if v.snapshot == nil {
-		panic("getSnapshot called after shutdown")
+		return nil, nil, errors.New("view is shutdown")
 	}
-	return v.snapshot, v.snapshot.Acquire()
+	return v.snapshot, v.snapshot.Acquire(), nil
 }
 
 func (s *snapshot) initialize(ctx context.Context, firstAttempt bool) {

@@ -159,6 +159,14 @@ See https://github.com/golang/go/issues/45732 for more information.`,
 			ReferencesProvider:        true,
 			RenameProvider:            renameOpts,
 			SelectionRangeProvider:    protocol.SelectionRangeRegistrationOptions{},
+			SemanticTokensProvider: protocol.SemanticTokensOptions{
+				Range: true,
+				Full:  true,
+				Legend: protocol.SemanticTokensLegend{
+					TokenTypes:     s.session.Options().SemanticTypes,
+					TokenModifiers: s.session.Options().SemanticMods,
+				},
+			},
 			SignatureHelpProvider: protocol.SignatureHelpOptions{
 				TriggerCharacters: []string{"(", ","},
 			},
@@ -212,9 +220,6 @@ func (s *Server) initialized(ctx context.Context, params *protocol.InitializedPa
 			ID:     "workspace/didChangeConfiguration",
 			Method: "workspace/didChangeConfiguration",
 		})
-	}
-	if options.SemanticTokens && options.DynamicRegistrationSemanticTokensSupported {
-		registrations = append(registrations, semanticTokenRegistration(options.SemanticTypes, options.SemanticMods))
 	}
 	if len(registrations) > 0 {
 		if err := s.client.RegisterCapability(ctx, &protocol.RegistrationParams{
@@ -559,7 +564,10 @@ func (s *Server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI
 	if err != nil {
 		return nil, nil, false, func() {}, err
 	}
-	snapshot, release := view.Snapshot(ctx)
+	snapshot, release, err := view.Snapshot()
+	if err != nil {
+		return nil, nil, false, func() {}, err
+	}
 	fh, err := snapshot.GetFile(ctx, uri)
 	if err != nil {
 		release()
