@@ -17,7 +17,6 @@ package source
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/token"
@@ -32,6 +31,7 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source/methodsets"
 	"golang.org/x/tools/gopls/internal/span"
+	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/event"
 )
 
@@ -39,11 +39,14 @@ import (
 // object as the subject of a References query.
 type ReferenceInfoV2 struct {
 	IsDeclaration bool
-	Name          string // TODO(adonovan): same for all elements; factor out of the slice?
 	Location      protocol.Location
-}
 
-var ErrFallback = errors.New("fallback")
+	// TODO(adonovan): these are the same for all elements; factor out of the slice.
+	// TODO(adonovan): Name is currently unused. If it's still unused when we
+	// eliminate 'references' (v1), delete it. Or replace both fields by a *Metadata.
+	PkgPath PackagePath
+	Name    string
+}
 
 // References returns a list of all references (sorted with
 // definitions before uses) to the object denoted by the identifier at
@@ -51,26 +54,11 @@ var ErrFallback = errors.New("fallback")
 func References(ctx context.Context, snapshot Snapshot, fh FileHandle, pp protocol.Position, includeDeclaration bool) ([]protocol.Location, error) {
 	references, err := referencesV2(ctx, snapshot, fh, pp, includeDeclaration)
 	if err != nil {
-		if err == ErrFallback {
-			// Fall back to old implementation.
-			// TODO(adonovan): support methods in V2 and eliminate referencesV1.
-			references, err := referencesV1(ctx, snapshot, fh, pp, includeDeclaration)
-			if err != nil {
-				return nil, err
-			}
-			var locations []protocol.Location
-			for _, ref := range references {
-				locations = append(locations, ref.MappedRange.Location())
-			}
-			return locations, nil
-		}
 		return nil, err
 	}
-	// TODO(adonovan): eliminate references[i].Name field?
-	// But it may be needed when replacing referencesV1.
-	var locations []protocol.Location
-	for _, ref := range references {
-		locations = append(locations, ref.Location)
+	locations := make([]protocol.Location, len(references))
+	for i, ref := range references {
+		locations[i] = ref.Location
 	}
 	return locations, nil
 }
@@ -78,22 +66,19 @@ func References(ctx context.Context, snapshot Snapshot, fh FileHandle, pp protoc
 // referencesV2 returns a list of all references (sorted with
 // definitions before uses) to the object denoted by the identifier at
 // the given file/position, searching the entire workspace.
-//
-// Returns ErrFallback if it can't yet handle the case, indicating
-// that we should call the old implementation.
 func referencesV2(ctx context.Context, snapshot Snapshot, f FileHandle, pp protocol.Position, includeDeclaration bool) ([]*ReferenceInfoV2, error) {
 	ctx, done := event.Start(ctx, "source.References2")
 	defer done()
 
 	// Is the cursor within the package name declaration?
-	pgf, inPackageName, err := parsePackageNameDecl(ctx, snapshot, f, pp)
+	_, inPackageName, err := parsePackageNameDecl(ctx, snapshot, f, pp)
 	if err != nil {
 		return nil, err
 	}
 
 	var refs []*ReferenceInfoV2
 	if inPackageName {
-		refs, err = packageReferences(ctx, snapshot, f.URI(), pgf.File.Name.Name)
+		refs, err = packageReferences(ctx, snapshot, f.URI())
 	} else {
 		refs, err = ordinaryReferences(ctx, snapshot, f.URI(), pp)
 	}
@@ -128,7 +113,7 @@ func referencesV2(ctx context.Context, snapshot Snapshot, f FileHandle, pp proto
 // declaration of the specified name and uri by searching among the
 // import declarations of all packages that directly import the target
 // package.
-func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pkgname string) ([]*ReferenceInfoV2, error) {
+func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI) ([]*ReferenceInfoV2, error) {
 	metas, err := snapshot.MetadataForFile(ctx, uri)
 	if err != nil {
 		return nil, err
@@ -153,7 +138,7 @@ func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pkg
 	if narrowest.ForTest != "" && strings.HasSuffix(string(uri), "_test.go") {
 		for _, f := range narrowest.CompiledGoFiles {
 			if !strings.HasSuffix(string(f), "_test.go") {
-				return packageReferences(ctx, snapshot, f, pkgname)
+				return packageReferences(ctx, snapshot, f)
 			}
 		}
 		// This package has no non-test files.
@@ -178,8 +163,9 @@ func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pkg
 					if rdep.DepsByImpPath[UnquoteImportPath(imp)] == narrowest.ID {
 						refs = append(refs, &ReferenceInfoV2{
 							IsDeclaration: false,
-							Name:          pkgname,
 							Location:      mustLocation(f, imp),
+							PkgPath:       narrowest.PkgPath,
+							Name:          string(narrowest.Name),
 						})
 					}
 				}
@@ -205,8 +191,9 @@ func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pkg
 		}
 		refs = append(refs, &ReferenceInfoV2{
 			IsDeclaration: true, // (one of many)
-			Name:          pkgname,
 			Location:      mustLocation(f, f.File.Name),
+			PkgPath:       widest.PkgPath,
+			Name:          string(widest.Name),
 		})
 	}
 
@@ -252,7 +239,7 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 		return nil, ErrNoIdentFound // can't happen
 	}
 
-	// nil, error, iota, or other built-in?
+	// nil, error, error.Error, iota, or other built-in?
 	if obj.Pkg() == nil {
 		// For some reason, existing tests require that iota has no references,
 		// nor an error. TODO(adonovan): do something more principled.
@@ -267,9 +254,57 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 	// This may include the query pkg, and possibly other variants.
 	declPosn := safetoken.StartPosition(pkg.FileSet(), obj.Pos())
 	declURI := span.URIFromPath(declPosn.Filename)
-	metas, err := snapshot.MetadataForFile(ctx, declURI)
+	variants, err := snapshot.MetadataForFile(ctx, declURI)
 	if err != nil {
 		return nil, err
+	}
+	if len(variants) == 0 {
+		return nil, fmt.Errorf("no packages for file %q", declURI) // can't happen
+	}
+
+	// Is object exported?
+	// If so, compute scope and targets of the global search.
+	var (
+		globalScope   = make(map[PackageID]*Metadata)
+		globalTargets map[PackagePath]map[objectpath.Path]unit
+	)
+	// TODO(adonovan): what about generic functions. Need to consider both
+	// uninstantiated and instantiated. The latter have no objectpath. Use Origin?
+	if path, err := objectpath.For(obj); err == nil && obj.Exported() {
+		pkgPath := variants[0].PkgPath // (all variants have same package path)
+		globalTargets = map[PackagePath]map[objectpath.Path]unit{
+			pkgPath: {path: {}}, // primary target
+		}
+
+		// How far need we search?
+		// For package-level objects, we need only search the direct importers.
+		// For fields and methods, we must search transitively.
+		transitive := obj.Pkg().Scope().Lookup(obj.Name()) != obj
+
+		// The scope is the union of rdeps of each variant.
+		// (Each set is disjoint so there's no benefit to
+		// to combining the metadata graph traversals.)
+		for _, m := range variants {
+			rdeps, err := snapshot.ReverseDependencies(ctx, m.ID, transitive)
+			if err != nil {
+				return nil, err
+			}
+			for id, rdep := range rdeps {
+				globalScope[id] = rdep
+			}
+		}
+
+		// Is object a method?
+		//
+		// If so, expand the search so that the targets include
+		// all methods that correspond to it through interface
+		// satisfaction, and the scope includes the rdeps of
+		// the package that declares each corresponding type.
+		if recv := effectiveReceiver(obj); recv != nil {
+			if err := expandMethodSearch(ctx, snapshot, obj.(*types.Func), recv, globalScope, globalTargets); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// The search functions will call report(loc) for each hit.
@@ -280,37 +315,14 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 	report := func(loc protocol.Location, isDecl bool) {
 		ref := &ReferenceInfoV2{
 			IsDeclaration: isDecl,
-			Name:          obj.Name(),
 			Location:      loc,
+			PkgPath:       pkg.PkgPath(),
+			Name:          obj.Name(),
 		}
 		refsMu.Lock()
 		refs = append(refs, ref)
 		refsMu.Unlock()
 	}
-
-	// Is the object exported?
-	// (objectpath succeeds for lowercase names, arguably a bug.)
-	var exportedObjectPaths map[objectpath.Path]unit
-	if path, err := objectpath.For(obj); err == nil && obj.Exported() {
-		exportedObjectPaths = map[objectpath.Path]unit{path: unit{}}
-
-		// If the object is an exported method, we need to search for
-		// all matching implementations (using the incremental
-		// implementation of 'implementations') and then search for
-		// the set of corresponding methods (requiring the incremental
-		// implementation of 'references' to be generalized to a set
-		// of search objects).
-		// Until then, we simply fall back to the old implementation for now.
-		// TODO(adonovan): fix.
-		if fn, ok := obj.(*types.Func); ok && fn.Type().(*types.Signature).Recv() != nil {
-			return nil, ErrFallback
-		}
-	}
-
-	// If it is exported, how far need we search?
-	// For package-level objects, we need only search the direct importers.
-	// For fields and methods, we must search transitively.
-	transitive := obj.Pkg().Scope().Lookup(obj.Name()) != obj
 
 	// Loop over the variants of the declaring package,
 	// and perform both the local (in-package) and global
@@ -322,54 +334,97 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 	//
 	// Careful: this goroutine must not return before group.Wait.
 	var group errgroup.Group
-	for _, m := range metas { // for each variant
-		m := m
 
-		// local
+	// Compute local references for each variant.
+	for _, m := range variants {
+		// We want the ordinary importable package,
+		// plus any test-augmented variants, since
+		// declarations in _test.go files may change
+		// the reference of a selection, or even a
+		// field into a method or vice versa.
+		//
+		// But we don't need intermediate test variants,
+		// as their local references will be covered
+		// already by other variants.
+		if m.IsIntermediateTestVariant() {
+			continue
+		}
+		m := m
 		group.Go(func() error {
-			// We want the ordinary importable package,
-			// plus any test-augmented variants, since
-			// declarations in _test.go files may change
-			// the reference of a selection, or even a
-			// field into a method or vice versa.
-			//
-			// But we don't need intermediate test variants,
-			// as their local references will be covered
-			// already by other variants.
-			if m.IsIntermediateTestVariant() {
-				return nil
-			}
 			return localReferences(ctx, snapshot, declURI, declPosn.Offset, m, report)
 		})
+	}
 
-		if exportedObjectPaths == nil {
-			continue // non-exported
-		}
-
-		targets := map[PackagePath]map[objectpath.Path]struct{}{m.PkgPath: exportedObjectPaths}
-
-		// global
+	// Compute global references for selected reverse dependencies.
+	for _, m := range globalScope {
+		m := m
 		group.Go(func() error {
-			// Compute the global-scope query for every variant
-			// of the declaring package in parallel,
-			// as the rdeps of each variant are disjoint.
-			rdeps, err := snapshot.ReverseDependencies(ctx, m.ID, transitive)
-			if err != nil {
-				return err
-			}
-			for _, rdep := range rdeps {
-				rdep := rdep
-				group.Go(func() error {
-					return globalReferences(ctx, snapshot, rdep, targets, report)
-				})
-			}
-			return nil
+			return globalReferences(ctx, snapshot, m, globalTargets, report)
 		})
 	}
+
 	if err := group.Wait(); err != nil {
 		return nil, err
 	}
 	return refs, nil
+}
+
+// expandMethodSearch expands the scope and targets of a global search
+// for an exported method to include all methods that correspond to
+// it through interface satisfaction.
+//
+// recv is the method's effective receiver type, for method-set computations.
+func expandMethodSearch(ctx context.Context, snapshot Snapshot, method *types.Func, recv types.Type, scope map[PackageID]*Metadata, targets map[PackagePath]map[objectpath.Path]unit) error {
+	// Compute the method-set fingerprint used as a key to the global search.
+	key, hasMethods := methodsets.KeyOf(recv)
+	if !hasMethods {
+		return bug.Errorf("KeyOf(%s)={} yet %s is a method", recv, method)
+	}
+	metas, err := snapshot.AllMetadata(ctx)
+	if err != nil {
+		return err
+	}
+	allIDs := make([]PackageID, 0, len(metas))
+	for _, m := range metas {
+		allIDs = append(allIDs, m.ID)
+	}
+	// Search the methodset index of each package in the workspace.
+	allPkgs, err := snapshot.TypeCheck(ctx, TypecheckFull, allIDs...)
+	if err != nil {
+		return err
+	}
+	var group errgroup.Group
+	for _, pkg := range allPkgs {
+		pkg := pkg
+		group.Go(func() error {
+			// Consult index for matching methods.
+			results := pkg.MethodSetsIndex().Search(key, method.Name())
+
+			// Expand global search scope to include rdeps of this pkg.
+			if len(results) > 0 {
+				rdeps, err := snapshot.ReverseDependencies(ctx, pkg.ID(), true)
+				if err != nil {
+					return err
+				}
+				for _, rdep := range rdeps {
+					scope[rdep.ID] = rdep
+				}
+			}
+
+			// Add each corresponding method the to set of global search targets.
+			for _, res := range results {
+				methodPkg := PackagePath(res.PkgPath)
+				opaths, ok := targets[methodPkg]
+				if !ok {
+					opaths = make(map[objectpath.Path]unit)
+					targets[methodPkg] = opaths
+				}
+				opaths[res.ObjectPath] = unit{}
+			}
+			return nil
+		})
+	}
+	return group.Wait()
 }
 
 // localReferences reports each reference to the object
@@ -402,17 +457,6 @@ func localReferences(ctx context.Context, snapshot Snapshot, declURI span.URI, d
 		report(mustLocation(pgf, node), true)
 	}
 
-	// receiver returns the effective receiver type for method-set
-	// comparisons for obj, if it is a method, or nil otherwise.
-	receiver := func(obj types.Object) types.Type {
-		if fn, ok := obj.(*types.Func); ok {
-			if recv := fn.Type().(*types.Signature).Recv(); recv != nil {
-				return methodsets.EnsurePointer(recv.Type())
-			}
-		}
-		return nil
-	}
-
 	// If we're searching for references to a method, broaden the
 	// search to include references to corresponding methods of
 	// mutually assignable receiver types.
@@ -420,7 +464,7 @@ func localReferences(ctx context.Context, snapshot Snapshot, declURI span.URI, d
 	var methodRecvs []types.Type
 	var methodName string // name of an arbitrary target, iff a method
 	for obj := range targets {
-		if t := receiver(obj); t != nil {
+		if t := effectiveReceiver(obj); t != nil {
 			methodRecvs = append(methodRecvs, t)
 			methodName = obj.Name()
 		}
@@ -432,7 +476,7 @@ func localReferences(ctx context.Context, snapshot Snapshot, declURI span.URI, d
 		if targets[obj] != nil {
 			return true
 		} else if methodRecvs != nil && obj.Name() == methodName {
-			if orecv := receiver(obj); orecv != nil {
+			if orecv := effectiveReceiver(obj); orecv != nil {
 				for _, mrecv := range methodRecvs {
 					if concreteImplementsIntf(orecv, mrecv) {
 						return true
@@ -453,6 +497,17 @@ func localReferences(ctx context.Context, snapshot Snapshot, declURI span.URI, d
 			}
 			return true
 		})
+	}
+	return nil
+}
+
+// effectiveReceiver returns the effective receiver type for method-set
+// comparisons for obj, if it is a method, or nil otherwise.
+func effectiveReceiver(obj types.Object) types.Type {
+	if fn, ok := obj.(*types.Func); ok {
+		if recv := fn.Type().(*types.Signature).Recv(); recv != nil {
+			return methodsets.EnsurePointer(recv.Type())
+		}
 	}
 	return nil
 }
