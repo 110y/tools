@@ -327,7 +327,7 @@ func hoverIdentifier(ctx context.Context, i *IdentifierInfo) (*HoverJSON, error)
 	// Check if the identifier is test-only (and is therefore not part of a
 	// package's API). This is true if the request originated in a test package,
 	// and if the declaration is also found in the same test package.
-	if i.pkg != nil && obj.Pkg() != nil && i.pkg.ForTest() != "" {
+	if i.pkg != nil && obj.Pkg() != nil && i.pkg.Metadata().ForTest != "" {
 		if _, err := i.pkg.File(i.Declaration.MappedRange[0].URI()); err == nil {
 			return h, nil
 		}
@@ -443,18 +443,22 @@ func moduleAtVersion(path string, i *IdentifierInfo) (string, string, bool) {
 	if strings.ToLower(i.Snapshot.View().Options().LinkTarget) != "pkg.go.dev" {
 		return "", "", false
 	}
-	impPkg, err := i.pkg.DirectDep(PackagePath(path))
-	if err != nil {
+	impID, ok := i.pkg.Metadata().DepsByPkgPath[PackagePath(path)]
+	if !ok {
 		return "", "", false
 	}
-	if impPkg.Version() == nil {
+	impMeta := i.Snapshot.Metadata(impID)
+	if impMeta == nil {
 		return "", "", false
 	}
-	version, modpath := impPkg.Version().Version, impPkg.Version().Path
-	if modpath == "" || version == "" {
+	module := impMeta.Module
+	if module == nil {
 		return "", "", false
 	}
-	return modpath, version, true
+	if module.Path == "" || module.Version == "" {
+		return "", "", false
+	}
+	return module.Path, module.Version, true
 }
 
 // objectString is a wrapper around the types.ObjectString function.
@@ -530,25 +534,38 @@ func FindHoverContext(ctx context.Context, s Snapshot, pkg Package, obj types.Ob
 		}
 	case *ast.ImportSpec:
 		// Try to find the package documentation for an imported package.
-		importPath, err := strconv.Unquote(node.Path.Value)
-		if err != nil {
-			return nil, err
+		importPath := UnquoteImportPath(node)
+		impID := pkg.Metadata().DepsByImpPath[importPath]
+		if impID == "" {
+			return nil, fmt.Errorf("failed to resolve import %q", importPath)
 		}
-		imp, err := pkg.ResolveImportPath(ImportPath(importPath))
-		if err != nil {
-			return nil, err
+		impMetadata := s.Metadata(impID)
+		if impMetadata == nil {
+			return nil, fmt.Errorf("failed to resolve import ID %q", impID)
 		}
-		// Assume that only one file will contain package documentation,
-		// so pick the first file that has a doc comment.
-		for _, file := range imp.GetSyntax() {
-			if file.Doc != nil {
-				info = &HoverContext{Comment: file.Doc}
-				if file.Name != nil {
-					info.signatureSource = "package " + file.Name.Name
+		for _, f := range impMetadata.CompiledGoFiles {
+			fh, err := s.GetFile(ctx, f)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
 				}
-				break
+				continue
+			}
+			pgf, err := s.ParseGo(ctx, fh, ParseHeader)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				continue
+			}
+			if pgf.File.Doc != nil {
+				return &HoverContext{
+					Comment:         pgf.File.Doc,
+					signatureSource: "package " + impMetadata.Name,
+				}, nil
 			}
 		}
+
 	case *ast.GenDecl:
 		switch obj := obj.(type) {
 		case *types.TypeName, *types.Var, *types.Const, *types.Func:

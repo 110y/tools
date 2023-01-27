@@ -154,10 +154,7 @@ func (r *runner) CallHierarchy(t *testing.T, spn span.Span, expectedCalls *tests
 	}
 
 	params := &protocol.CallHierarchyPrepareParams{
-		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-			Position:     loc.Range.Start,
-		},
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	}
 
 	items, err := r.server.PrepareCallHierarchy(r.ctx, params)
@@ -678,10 +675,7 @@ func (r *runner) Definition(t *testing.T, spn span.Span, d tests.Definition) {
 	if err != nil {
 		t.Fatalf("failed for %v: %v", d.Src, err)
 	}
-	tdpp := protocol.TextDocumentPositionParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-		Position:     loc.Range.Start,
-	}
+	tdpp := protocol.LocationTextDocumentPositionParams(loc)
 	var locs []protocol.Location
 	var hover *protocol.Hover
 	if d.IsType {
@@ -749,10 +743,7 @@ func (r *runner) Implementation(t *testing.T, spn span.Span, wantSpans []span.Sp
 		t.Fatal(err)
 	}
 	gotImpls, err := r.server.Implementation(r.ctx, &protocol.ImplementationParams{
-		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-			Position:     loc.Range.Start,
-		},
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	})
 	if err != nil {
 		t.Fatalf("Server.Implementation(%s): %v", spn, err)
@@ -771,45 +762,47 @@ func (r *runner) Implementation(t *testing.T, spn span.Span, wantSpans []span.Sp
 	}
 }
 
-func (r *runner) Highlight(t *testing.T, src span.Span, locations []span.Span) {
+func (r *runner) Highlight(t *testing.T, src span.Span, spans []span.Span) {
 	m, err := r.data.Mapper(src.URI())
 	if err != nil {
 		t.Fatal(err)
 	}
 	loc, err := m.SpanLocation(src)
 	if err != nil {
-		t.Fatalf("failed for %v: %v", locations[0], err)
-	}
-	tdpp := protocol.TextDocumentPositionParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-		Position:     loc.Range.Start,
+		t.Fatal(err)
 	}
 	params := &protocol.DocumentHighlightParams{
-		TextDocumentPositionParams: tdpp,
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	}
 	highlights, err := r.server.DocumentHighlight(r.ctx, params)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("DocumentHighlight(%v) failed: %v", params, err)
 	}
-	if len(highlights) != len(locations) {
-		t.Fatalf("got %d highlights for highlight at %v:%v:%v, expected %d", len(highlights), src.URI().Filename(), src.Start().Line(), src.Start().Column(), len(locations))
+	var got []protocol.Range
+	for _, h := range highlights {
+		got = append(got, h.Range)
 	}
-	// Check to make sure highlights have a valid range.
-	var results []span.Span
-	for i := range highlights {
-		h, err := m.RangeSpan(highlights[i].Range)
+
+	var want []protocol.Range
+	for _, s := range spans {
+		rng, err := m.SpanRange(s)
 		if err != nil {
-			t.Fatalf("failed for %v: %v", highlights[i], err)
+			t.Fatalf("Mapper.SpanRange(%v) failed: %v", s, err)
 		}
-		results = append(results, h)
+		want = append(want, rng)
 	}
-	// Sort results to make tests deterministic since DocumentHighlight uses a map.
-	span.SortSpans(results)
-	// Check to make sure all the expected highlights are found.
-	for i := range results {
-		if results[i] != locations[i] {
-			t.Errorf("want %v, got %v\n", locations[i], results[i])
-		}
+
+	sortRanges := func(s []protocol.Range) {
+		sort.Slice(s, func(i, j int) bool {
+			return protocol.CompareRange(s[i], s[j]) < 0
+		})
+	}
+
+	sortRanges(got)
+	sortRanges(want)
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("DocumentHighlight(%v) mismatch (-want +got):\n%s", src, diff)
 	}
 }
 
@@ -822,12 +815,8 @@ func (r *runner) Hover(t *testing.T, src span.Span, text string) {
 	if err != nil {
 		t.Fatalf("failed for %v", err)
 	}
-	tdpp := protocol.TextDocumentPositionParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-		Position:     loc.Range.Start,
-	}
 	params := &protocol.HoverParams{
-		TextDocumentPositionParams: tdpp,
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	}
 	hover, err := r.server.Hover(r.ctx, params)
 	if err != nil {
@@ -883,10 +872,7 @@ func (r *runner) References(t *testing.T, src span.Span, itemList []span.Span) {
 				want[loc] = true
 			}
 			params := &protocol.ReferenceParams{
-				TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-					TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-					Position:     loc.Range.Start,
-				},
+				TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 				Context: protocol.ReferenceContext{
 					IncludeDeclaration: includeDeclaration,
 				},
@@ -1054,12 +1040,8 @@ func (r *runner) PrepareRename(t *testing.T, src span.Span, want *source.Prepare
 	if err != nil {
 		t.Fatalf("failed for %v: %v", src, err)
 	}
-	tdpp := protocol.TextDocumentPositionParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: loc.URI},
-		Position:     loc.Range.Start,
-	}
 	params := &protocol.PrepareRenameParams{
-		TextDocumentPositionParams: tdpp,
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	}
 	got, err := r.server.PrepareRename(context.Background(), params)
 	if err != nil {
@@ -1195,14 +1177,8 @@ func (r *runner) SignatureHelp(t *testing.T, spn span.Span, want *protocol.Signa
 	if err != nil {
 		t.Fatalf("failed for %v: %v", loc, err)
 	}
-	tdpp := protocol.TextDocumentPositionParams{
-		TextDocument: protocol.TextDocumentIdentifier{
-			URI: protocol.URIFromSpanURI(spn.URI()),
-		},
-		Position: loc.Range.Start,
-	}
 	params := &protocol.SignatureHelpParams{
-		TextDocumentPositionParams: tdpp,
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	}
 	got, err := r.server.SignatureHelp(r.ctx, params)
 	if err != nil {
@@ -1353,43 +1329,6 @@ func (r *runner) SelectionRanges(t *testing.T, spn span.Span) {
 	}
 	if diff := compare.Text(got, string(want)); diff != "" {
 		t.Errorf("%s mismatch\n%s", testName, diff)
-	}
-}
-
-func TestBytesOffset(t *testing.T) {
-	tests := []struct {
-		text string
-		pos  protocol.Position
-		want int
-	}{
-		// U+10400 encodes as [F0 90 90 80] in UTF-8 and [D801 DC00] in UTF-16.
-		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 0}, want: 0},
-		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 1}, want: 1},
-		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 2}, want: 1},
-		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 3}, want: 5},
-		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 4}, want: 6},
-		{text: `a𐐀b`, pos: protocol.Position{Line: 0, Character: 5}, want: -1},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 0, Character: 3}, want: 3},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 0, Character: 4}, want: -1},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 0}, want: 4},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 3}, want: 7},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 1, Character: 4}, want: -1},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 2, Character: 0}, want: 8},
-		{text: "aaa\nbbb\n", pos: protocol.Position{Line: 2, Character: 1}, want: -1},
-		{text: "aaa\nbbb\n\n", pos: protocol.Position{Line: 2, Character: 0}, want: 8},
-	}
-
-	for i, test := range tests {
-		fname := fmt.Sprintf("test %d", i)
-		uri := span.URIFromPath(fname)
-		mapper := protocol.NewMapper(uri, []byte(test.text))
-		got, err := mapper.PositionPoint(test.pos)
-		if err != nil && test.want != -1 {
-			t.Errorf("%d: unexpected error: %v", i, err)
-		}
-		if err == nil && got.Offset() != test.want {
-			t.Errorf("want %d for %q(Line:%d,Character:%d), but got %d", test.want, test.text, int(test.pos.Line), int(test.pos.Character), got.Offset())
-		}
 	}
 }
 

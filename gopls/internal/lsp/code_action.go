@@ -158,16 +158,20 @@ func (s *Server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 
 		// Type-check the package and also run analysis,
 		// then combine their diagnostics.
-		pkg, _, err := source.PackageForFile(ctx, snapshot, fh.URI(), source.TypecheckFull, source.WidestPackage)
+		pkg, _, err := source.PackageForFile(ctx, snapshot, fh.URI(), source.TypecheckFull, source.NarrowestPackage)
 		if err != nil {
 			return nil, err
 		}
-		analysisDiags, err := source.Analyze(ctx, snapshot, pkg.ID(), true)
+		pkgDiags, err := pkg.DiagnosticsForFile(ctx, snapshot, uri)
+		if err != nil {
+			return nil, err
+		}
+		analysisDiags, err := source.Analyze(ctx, snapshot, pkg.Metadata().ID, true)
 		if err != nil {
 			return nil, err
 		}
 		var fileDiags []*source.Diagnostic
-		source.CombineDiagnostics(pkg, fh.URI(), analysisDiags, &fileDiags, &fileDiags)
+		source.CombineDiagnostics(pkgDiags, analysisDiags[uri], &fileDiags, &fileDiags)
 
 		// Split diagnostics into fixes, which must match incoming diagnostics,
 		// and non-fixes, which must match the requested range. Build actions

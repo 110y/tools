@@ -7,7 +7,6 @@ package bench
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
@@ -58,8 +57,8 @@ func benchmarkCompletion(options completionBenchOptions, b *testing.B) {
 	}
 
 	// Run a completion to make sure the system is warm.
-	pos := env.RegexpSearch(options.file, options.locationRegexp)
-	completions := env.Completion(options.file, pos)
+	loc := env.RegexpSearch(options.file, options.locationRegexp)
+	completions := env.Completion(loc)
 
 	if testing.Verbose() {
 		fmt.Println("Results:")
@@ -78,7 +77,7 @@ func benchmarkCompletion(options completionBenchOptions, b *testing.B) {
 			if options.beforeCompletion != nil {
 				options.beforeCompletion(env)
 			}
-			env.Completion(options.file, pos)
+			env.Completion(loc)
 		}
 	})
 }
@@ -87,14 +86,12 @@ func benchmarkCompletion(options completionBenchOptions, b *testing.B) {
 // the given file.
 func endRangeInBuffer(env *Env, name string) protocol.Range {
 	buffer := env.BufferText(name)
-	lines := strings.Split(buffer, "\n")
-	numLines := len(lines)
-
-	end := protocol.Position{
-		Line:      uint32(numLines - 1),
-		Character: uint32(len([]rune(lines[numLines-1]))),
+	m := protocol.NewMapper("", []byte(buffer))
+	rng, err := m.OffsetRange(len(buffer), len(buffer))
+	if err != nil {
+		env.T.Fatal(err)
 	}
-	return protocol.Range{Start: end, End: end}
+	return rng
 }
 
 // Benchmark struct completion in tools codebase.

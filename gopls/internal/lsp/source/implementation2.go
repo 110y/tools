@@ -137,11 +137,9 @@ func implementations2(ctx context.Context, snapshot Snapshot, fh FileHandle, pp 
 			queryType = recv.Type()
 			queryMethodID = obj.Id()
 		}
-	default:
-		return nil, fmt.Errorf("%s is not a type or method", id.Name)
 	}
 	if queryType == nil {
-		return nil, ErrNotAType
+		return nil, fmt.Errorf("%s is not a type or method", id.Name)
 	}
 
 	// Compute the method-set fingerprint used as a key to the global search.
@@ -166,7 +164,7 @@ func implementations2(ctx context.Context, snapshot Snapshot, fh FileHandle, pp 
 	}
 	globalIDs := make([]PackageID, 0, len(globalMetas))
 	for _, m := range globalMetas {
-		if m.PkgPath == declPkg.PkgPath() {
+		if m.PkgPath == declPkg.Metadata().PkgPath {
 			continue // declaring package is handled by local implementation
 		}
 		globalIDs = append(globalIDs, m.ID)

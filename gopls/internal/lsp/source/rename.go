@@ -23,6 +23,7 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/span"
+	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/refactor/satisfy"
@@ -30,6 +31,7 @@ import (
 
 type renamer struct {
 	ctx                context.Context
+	snapshot           Snapshot
 	refs               []*ReferenceInfo
 	objsToUpdate       map[types.Object]bool
 	hadConflicts       bool
@@ -57,98 +59,101 @@ func PrepareRename(ctx context.Context, snapshot Snapshot, f FileHandle, pp prot
 	defer done()
 
 	// Is the cursor within the package name declaration?
-	pgf, inPackageName, err := parsePackageNameDecl(ctx, snapshot, f, pp)
-	if err != nil {
+	if pgf, inPackageName, err := parsePackageNameDecl(ctx, snapshot, f, pp); err != nil {
 		return nil, err, err
-	}
-	if inPackageName {
-		fileRenameSupported := false
-		for _, op := range snapshot.View().Options().SupportedResourceOperations {
-			if op == protocol.Rename {
-				fileRenameSupported = true
-				break
-			}
-		}
-
-		if !fileRenameSupported {
-			err := errors.New("can't rename package: LSP client does not support file renaming")
-			return nil, err, err
-		}
-		fileMeta, err := snapshot.MetadataForFile(ctx, f.URI())
-		if err != nil {
-			return nil, err, err
-		}
-
-		if len(fileMeta) == 0 {
-			err := fmt.Errorf("no packages found for file %q", f.URI())
-			return nil, err, err
-		}
-
-		meta := fileMeta[0]
-
-		if meta.Name == "main" {
-			err := errors.New("can't rename package \"main\"")
-			return nil, err, err
-		}
-
-		if strings.HasSuffix(string(meta.Name), "_test") {
-			err := errors.New("can't rename x_test packages")
-			return nil, err, err
-		}
-
-		if meta.Module == nil {
-			err := fmt.Errorf("can't rename package: missing module information for package %q", meta.PkgPath)
-			return nil, err, err
-		}
-
-		if meta.Module.Path == string(meta.PkgPath) {
-			err := fmt.Errorf("can't rename package: package path %q is the same as module path %q", meta.PkgPath, meta.Module.Path)
-			return nil, err, err
-		}
-
-		// Return the location of the package declaration.
-		rng, err := pgf.NodeRange(pgf.File.Name)
-		if err != nil {
-			return nil, err, err
-		}
-		return &PrepareItem{
-			Range: rng,
-			Text:  string(meta.Name),
-		}, nil, nil
+	} else if inPackageName {
+		item, err := prepareRenamePackageName(ctx, snapshot, pgf)
+		return item, err, err
 	}
 
-	qos, err := qualifiedObjsAtProtocolPos(ctx, snapshot, f.URI(), pp)
+	// Ordinary (non-package) renaming.
+	//
+	// Type-check the current package, locate the reference at the position,
+	// validate the object, and report its name and range.
+	//
+	// TODO(adonovan): in all cases below, we return usererr=nil,
+	// which means we return (nil, nil) at the protocol
+	// layer. This seems like a bug, or at best an exploitation of
+	// knowledge of VSCode-specific behavior. Can we avoid that?
+	pkg, pgf, err := PackageForFile(ctx, snapshot, f.URI(), TypecheckFull, NarrowestPackage)
 	if err != nil {
 		return nil, nil, err
 	}
-	node, obj, pkg := qos[0].node, qos[0].obj, qos[0].sourcePkg
+	pos, err := pgf.PositionPos(pp)
+	if err != nil {
+		return nil, nil, err
+	}
+	targets, node, err := objectsAt(pkg.GetTypesInfo(), pgf.File, pos)
+	if err != nil {
+		return nil, nil, err
+	}
+	var obj types.Object
+	for obj = range targets {
+		break // pick one arbitrarily
+	}
 	if err := checkRenamable(obj); err != nil {
 		return nil, nil, err
 	}
-	result, err := computePrepareRenameResp(snapshot, pkg, node, obj.Name())
+	rng, err := pgf.NodeRange(node)
 	if err != nil {
 		return nil, nil, err
 	}
-	return result, nil, nil
-}
-
-func computePrepareRenameResp(snapshot Snapshot, pkg Package, node ast.Node, text string) (*PrepareItem, error) {
-	mr, err := posToMappedRange(pkg, node.Pos(), node.End())
-	if err != nil {
-		return nil, err
-	}
-	rng := mr.Range()
 	if _, isImport := node.(*ast.ImportSpec); isImport {
 		// We're not really renaming the import path.
 		rng.End = rng.Start
 	}
 	return &PrepareItem{
 		Range: rng,
-		Text:  text,
+		Text:  obj.Name(),
+	}, nil, nil
+}
+
+func prepareRenamePackageName(ctx context.Context, snapshot Snapshot, pgf *ParsedGoFile) (*PrepareItem, error) {
+	// Does the client support file renaming?
+	fileRenameSupported := false
+	for _, op := range snapshot.View().Options().SupportedResourceOperations {
+		if op == protocol.Rename {
+			fileRenameSupported = true
+			break
+		}
+	}
+	if !fileRenameSupported {
+		return nil, errors.New("can't rename package: LSP client does not support file renaming")
+	}
+
+	// Check validity of the metadata for the file's containing package.
+	fileMeta, err := snapshot.MetadataForFile(ctx, pgf.URI)
+	if err != nil {
+		return nil, err
+	}
+	if len(fileMeta) == 0 {
+		return nil, fmt.Errorf("no packages found for file %q", pgf.URI)
+	}
+	meta := fileMeta[0]
+	if meta.Name == "main" {
+		return nil, fmt.Errorf("can't rename package \"main\"")
+	}
+	if strings.HasSuffix(string(meta.Name), "_test") {
+		return nil, fmt.Errorf("can't rename x_test packages")
+	}
+	if meta.Module == nil {
+		return nil, fmt.Errorf("can't rename package: missing module information for package %q", meta.PkgPath)
+	}
+	if meta.Module.Path == string(meta.PkgPath) {
+		return nil, fmt.Errorf("can't rename package: package path %q is the same as module path %q", meta.PkgPath, meta.Module.Path)
+	}
+
+	// Return the location of the package declaration.
+	rng, err := pgf.NodeRange(pgf.File.Name)
+	if err != nil {
+		return nil, err
+	}
+	return &PrepareItem{
+		Range: rng,
+		Text:  string(meta.Name),
 	}, nil
 }
 
-// checkRenamable verifies if an obj may be renamed.
 func checkRenamable(obj types.Object) error {
 	if v, ok := obj.(*types.Var); ok && v.Embedded() {
 		return errors.New("can't rename embedded fields: rename the type directly or name the field")
@@ -166,145 +171,26 @@ func Rename(ctx context.Context, s Snapshot, f FileHandle, pp protocol.Position,
 	ctx, done := event.Start(ctx, "source.Rename")
 	defer done()
 
-	// Is the cursor within the package name declaration?
-	_, inPackageName, err := parsePackageNameDecl(ctx, s, f, pp)
-	if err != nil {
+	// Cursor within package name declaration?
+	if _, inPackageName, err := parsePackageNameDecl(ctx, s, f, pp); err != nil {
 		return nil, false, err
-	}
-	if inPackageName {
-		if !isValidIdentifier(newName) {
-			return nil, true, fmt.Errorf("%q is not a valid identifier", newName)
-		}
-
-		fileMeta, err := s.MetadataForFile(ctx, f.URI())
-		if err != nil {
-			return nil, true, err
-		}
-
-		if len(fileMeta) == 0 {
-			return nil, true, fmt.Errorf("no packages found for file %q", f.URI())
-		}
-
-		// We need metadata for the relevant package and module paths. These should
-		// be the same for all packages containing the file.
-		//
-		// TODO(rfindley): we mix package path and import path here haphazardly.
-		// Fix this.
-		meta := fileMeta[0]
-		oldPath := meta.PkgPath
-		var modulePath PackagePath
-		if mi := meta.Module; mi == nil {
-			return nil, true, fmt.Errorf("cannot rename package: missing module information for package %q", meta.PkgPath)
-		} else {
-			modulePath = PackagePath(mi.Path)
-		}
-
-		if strings.HasSuffix(newName, "_test") {
-			return nil, true, fmt.Errorf("cannot rename to _test package")
-		}
-
-		metadata, err := s.AllMetadata(ctx)
-		if err != nil {
-			return nil, true, err
-		}
-
-		renamingEdits, err := renamePackage(ctx, s, modulePath, oldPath, PackageName(newName), metadata)
-		if err != nil {
-			return nil, true, err
-		}
-
-		oldBase := filepath.Dir(span.URI.Filename(f.URI()))
-		newPkgDir := filepath.Join(filepath.Dir(oldBase), newName)
-
-		// TODO: should this operate on all go.mod files, irrespective of whether they are included in the workspace?
-		// Get all active mod files in the workspace
-		modFiles := s.ModFiles()
-		for _, m := range modFiles {
-			fh, err := s.GetFile(ctx, m)
-			if err != nil {
-				return nil, true, err
-			}
-			pm, err := s.ParseMod(ctx, fh)
-			if err != nil {
-				return nil, true, err
-			}
-
-			modFileDir := filepath.Dir(pm.URI.Filename())
-			affectedReplaces := []*modfile.Replace{}
-
-			// Check if any replace directives need to be fixed
-			for _, r := range pm.File.Replace {
-				if !strings.HasPrefix(r.New.Path, "/") && !strings.HasPrefix(r.New.Path, "./") && !strings.HasPrefix(r.New.Path, "../") {
-					continue
-				}
-
-				replacedPath := r.New.Path
-				if strings.HasPrefix(r.New.Path, "./") || strings.HasPrefix(r.New.Path, "../") {
-					replacedPath = filepath.Join(modFileDir, r.New.Path)
-				}
-
-				// TODO: Is there a risk of converting a '\' delimited replacement to a '/' delimited replacement?
-				if !strings.HasPrefix(filepath.ToSlash(replacedPath)+"/", filepath.ToSlash(oldBase)+"/") {
-					continue // not affected by the package renaming
-				}
-
-				affectedReplaces = append(affectedReplaces, r)
-			}
-
-			if len(affectedReplaces) == 0 {
-				continue
-			}
-			copied, err := modfile.Parse("", pm.Mapper.Content, nil)
-			if err != nil {
-				return nil, true, err
-			}
-
-			for _, r := range affectedReplaces {
-				replacedPath := r.New.Path
-				if strings.HasPrefix(r.New.Path, "./") || strings.HasPrefix(r.New.Path, "../") {
-					replacedPath = filepath.Join(modFileDir, r.New.Path)
-				}
-
-				suffix := strings.TrimPrefix(replacedPath, string(oldBase))
-
-				newReplacedPath, err := filepath.Rel(modFileDir, newPkgDir+suffix)
-				if err != nil {
-					return nil, true, err
-				}
-
-				newReplacedPath = filepath.ToSlash(newReplacedPath)
-
-				if !strings.HasPrefix(newReplacedPath, "/") && !strings.HasPrefix(newReplacedPath, "../") {
-					newReplacedPath = "./" + newReplacedPath
-				}
-
-				if err := copied.AddReplace(r.Old.Path, "", newReplacedPath, ""); err != nil {
-					return nil, true, err
-				}
-			}
-
-			copied.Cleanup()
-			newContent, err := copied.Format()
-			if err != nil {
-				return nil, true, err
-			}
-
-			// Calculate the edits to be made due to the change.
-			diff := s.View().Options().ComputeEdits(string(pm.Mapper.Content), string(newContent))
-			modFileEdits, err := ToProtocolEdits(pm.Mapper, diff)
-			if err != nil {
-				return nil, true, err
-			}
-
-			renamingEdits[pm.URI] = append(renamingEdits[pm.URI], modFileEdits...)
-		}
-
-		return renamingEdits, true, nil
+	} else if inPackageName {
+		return renamePackageName(ctx, s, f, pp, newName)
 	}
 
+	// ordinary (non-package) rename
 	qos, err := qualifiedObjsAtProtocolPos(ctx, s, f.URI(), pp)
 	if err != nil {
 		return nil, false, err
+	}
+	if err := checkRenamable(qos[0].obj); err != nil {
+		return nil, false, err
+	}
+	if qos[0].obj.Name() == newName {
+		return nil, false, fmt.Errorf("old and new names are the same: %s", newName)
+	}
+	if !isValidIdentifier(newName) {
+		return nil, false, fmt.Errorf("invalid identifier to rename: %q", newName)
 	}
 	result, err := renameObj(ctx, s, newName, qos)
 	if err != nil {
@@ -312,6 +198,137 @@ func Rename(ctx context.Context, s Snapshot, f FileHandle, pp protocol.Position,
 	}
 
 	return result, false, nil
+}
+
+func renamePackageName(ctx context.Context, s Snapshot, f FileHandle, pp protocol.Position, newName string) (map[span.URI][]protocol.TextEdit, bool, error) {
+	if !isValidIdentifier(newName) {
+		return nil, true, fmt.Errorf("%q is not a valid identifier", newName)
+	}
+
+	fileMeta, err := s.MetadataForFile(ctx, f.URI())
+	if err != nil {
+		return nil, true, err
+	}
+
+	if len(fileMeta) == 0 {
+		return nil, true, fmt.Errorf("no packages found for file %q", f.URI())
+	}
+
+	// We need metadata for the relevant package and module paths. These should
+	// be the same for all packages containing the file.
+	//
+	// TODO(rfindley): we mix package path and import path here haphazardly.
+	// Fix this.
+	meta := fileMeta[0]
+	oldPath := meta.PkgPath
+	var modulePath PackagePath
+	if mi := meta.Module; mi == nil {
+		return nil, true, fmt.Errorf("cannot rename package: missing module information for package %q", meta.PkgPath)
+	} else {
+		modulePath = PackagePath(mi.Path)
+	}
+
+	if strings.HasSuffix(newName, "_test") {
+		return nil, true, fmt.Errorf("cannot rename to _test package")
+	}
+
+	metadata, err := s.AllMetadata(ctx)
+	if err != nil {
+		return nil, true, err
+	}
+
+	renamingEdits, err := renamePackage(ctx, s, modulePath, oldPath, PackageName(newName), metadata)
+	if err != nil {
+		return nil, true, err
+	}
+
+	oldBase := filepath.Dir(span.URI.Filename(f.URI()))
+	newPkgDir := filepath.Join(filepath.Dir(oldBase), newName)
+
+	// TODO: should this operate on all go.mod files, irrespective of whether they are included in the workspace?
+	// Get all active mod files in the workspace
+	modFiles := s.ModFiles()
+	for _, m := range modFiles {
+		fh, err := s.GetFile(ctx, m)
+		if err != nil {
+			return nil, true, err
+		}
+		pm, err := s.ParseMod(ctx, fh)
+		if err != nil {
+			return nil, true, err
+		}
+
+		modFileDir := filepath.Dir(pm.URI.Filename())
+		affectedReplaces := []*modfile.Replace{}
+
+		// Check if any replace directives need to be fixed
+		for _, r := range pm.File.Replace {
+			if !strings.HasPrefix(r.New.Path, "/") && !strings.HasPrefix(r.New.Path, "./") && !strings.HasPrefix(r.New.Path, "../") {
+				continue
+			}
+
+			replacedPath := r.New.Path
+			if strings.HasPrefix(r.New.Path, "./") || strings.HasPrefix(r.New.Path, "../") {
+				replacedPath = filepath.Join(modFileDir, r.New.Path)
+			}
+
+			// TODO: Is there a risk of converting a '\' delimited replacement to a '/' delimited replacement?
+			if !strings.HasPrefix(filepath.ToSlash(replacedPath)+"/", filepath.ToSlash(oldBase)+"/") {
+				continue // not affected by the package renaming
+			}
+
+			affectedReplaces = append(affectedReplaces, r)
+		}
+
+		if len(affectedReplaces) == 0 {
+			continue
+		}
+		copied, err := modfile.Parse("", pm.Mapper.Content, nil)
+		if err != nil {
+			return nil, true, err
+		}
+
+		for _, r := range affectedReplaces {
+			replacedPath := r.New.Path
+			if strings.HasPrefix(r.New.Path, "./") || strings.HasPrefix(r.New.Path, "../") {
+				replacedPath = filepath.Join(modFileDir, r.New.Path)
+			}
+
+			suffix := strings.TrimPrefix(replacedPath, string(oldBase))
+
+			newReplacedPath, err := filepath.Rel(modFileDir, newPkgDir+suffix)
+			if err != nil {
+				return nil, true, err
+			}
+
+			newReplacedPath = filepath.ToSlash(newReplacedPath)
+
+			if !strings.HasPrefix(newReplacedPath, "/") && !strings.HasPrefix(newReplacedPath, "../") {
+				newReplacedPath = "./" + newReplacedPath
+			}
+
+			if err := copied.AddReplace(r.Old.Path, "", newReplacedPath, ""); err != nil {
+				return nil, true, err
+			}
+		}
+
+		copied.Cleanup()
+		newContent, err := copied.Format()
+		if err != nil {
+			return nil, true, err
+		}
+
+		// Calculate the edits to be made due to the change.
+		diff := s.View().Options().ComputeEdits(string(pm.Mapper.Content), string(newContent))
+		modFileEdits, err := ToProtocolEdits(pm.Mapper, diff)
+		if err != nil {
+			return nil, true, err
+		}
+
+		renamingEdits[pm.URI] = append(renamingEdits[pm.URI], modFileEdits...)
+	}
+
+	return renamingEdits, true, nil
 }
 
 // renamePackage computes all workspace edits required to rename the package
@@ -485,6 +502,11 @@ func renameImports(ctx context.Context, snapshot Snapshot, m *Metadata, newPath 
 				// If the import does not explicitly specify
 				// a local name, then we need to invoke the
 				// type checker to locate references to update.
+				//
+				// TODO(adonovan): is this actually true?
+				// Renaming an import with a local name can still
+				// cause conflicts: shadowing of built-ins, or of
+				// package-level decls in the same or another file.
 				if imp.Name == nil {
 					needsTypeCheck[rdep.ID] = append(needsTypeCheck[rdep.ID], uri)
 				}
@@ -547,6 +569,22 @@ func renameImports(ctx context.Context, snapshot Snapshot, m *Metadata, newPath 
 					try++
 					localName = fmt.Sprintf("%s%d", newName, try)
 				}
+
+				// renameObj detects various conflicts, including:
+				// - new name conflicts with a package-level decl in this file;
+				// - new name hides a package-level decl in another file that
+				//   is actually referenced in this file;
+				// - new name hides a built-in that is actually referenced
+				//   in this file;
+				// - a reference in this file to the old package name would
+				//   become shadowed by an intervening declaration that
+				//   uses the new name.
+				// It returns the edits if no conflict was detected.
+				//
+				// TODO(adonovan): reduce the strength of this operation
+				// since, for imports specifically, it should require only
+				// the current file and the current package, which we
+				// already have. Finding references is trivial (Info.Uses).
 				changes, err := renameObj(ctx, snapshot, localName, qos)
 				if err != nil {
 					return err
@@ -575,26 +613,16 @@ func renameImports(ctx context.Context, snapshot Snapshot, m *Metadata, newPath 
 // renameObj returns a map of TextEdits for renaming an identifier within a file
 // and boolean value of true if there is no renaming conflicts and false otherwise.
 func renameObj(ctx context.Context, s Snapshot, newName string, qos []qualifiedObject) (map[span.URI][]protocol.TextEdit, error) {
-	obj := qos[0].obj
-
-	if err := checkRenamable(obj); err != nil {
-		return nil, err
-	}
-	if obj.Name() == newName {
-		return nil, fmt.Errorf("old and new names are the same: %s", newName)
-	}
-	if !isValidIdentifier(newName) {
-		return nil, fmt.Errorf("invalid identifier to rename: %q", newName)
-	}
-	refs, err := references(ctx, s, qos, true, false, true)
+	refs, err := references(ctx, s, qos)
 	if err != nil {
 		return nil, err
 	}
 	r := renamer{
 		ctx:          ctx,
+		snapshot:     s,
 		refs:         refs,
 		objsToUpdate: make(map[types.Object]bool),
-		from:         obj.Name(),
+		from:         qos[0].obj.Name(),
 		to:           newName,
 		packages:     make(map[*types.Package]Package),
 	}
@@ -623,7 +651,7 @@ func renameObj(ctx context.Context, s Snapshot, newName string, qos []qualifiedO
 		}
 	}
 	if r.hadConflicts {
-		return nil, fmt.Errorf(r.errors)
+		return nil, fmt.Errorf("%s", r.errors)
 	}
 
 	changes, err := r.update()
@@ -735,7 +763,7 @@ func (r *renamer) update() (map[span.URI][]diff.Edit, error) {
 
 // docComment returns the doc for an identifier.
 func (r *renamer) docComment(pkg Package, id *ast.Ident) *ast.CommentGroup {
-	_, tokFile, nodes, _ := pathEnclosingInterval(pkg, id.Pos(), id.End())
+	_, tokFile, nodes, _ := pathEnclosingInterval(r.ctx, r.snapshot, pkg, id.Pos(), id.End())
 	for _, node := range nodes {
 		switch decl := node.(type) {
 		case *ast.FuncDecl:
@@ -788,7 +816,7 @@ func (r *renamer) docComment(pkg Package, id *ast.Ident) *ast.CommentGroup {
 func (r *renamer) updatePkgName(pkgName *types.PkgName) (*diff.Edit, error) {
 	// Modify ImportSpec syntax to add or remove the Name as needed.
 	pkg := r.packages[pkgName.Pkg()]
-	_, tokFile, path, _ := pathEnclosingInterval(pkg, pkgName.Pos(), pkgName.Pos())
+	_, tokFile, path, _ := pathEnclosingInterval(r.ctx, r.snapshot, pkg, pkgName.Pos(), pkgName.Pos())
 	if len(path) < 2 {
 		return nil, fmt.Errorf("no path enclosing interval for %s", pkgName.Name())
 	}
@@ -815,4 +843,364 @@ func (r *renamer) updatePkgName(pkgName *types.PkgName) (*diff.Edit, error) {
 		End:   end,
 		New:   newText,
 	}, nil
+}
+
+// qualifiedObjsAtProtocolPos returns info for all the types.Objects referenced
+// at the given position, for the following selection of packages:
+//
+// 1. all packages (including all test variants), in their workspace parse mode
+// 2. if not included above, at least one package containing uri in full parse mode
+//
+// Finding objects in (1) ensures that we locate references within all
+// workspace packages, including in x_test packages. Including (2) ensures that
+// we find local references in the current package, for non-workspace packages
+// that may be open.
+func qualifiedObjsAtProtocolPos(ctx context.Context, s Snapshot, uri span.URI, pp protocol.Position) ([]qualifiedObject, error) {
+	fh, err := s.GetFile(ctx, uri)
+	if err != nil {
+		return nil, err
+	}
+	content, err := fh.Read()
+	if err != nil {
+		return nil, err
+	}
+	m := protocol.NewMapper(uri, content)
+	offset, err := m.PositionOffset(pp)
+	if err != nil {
+		return nil, err
+	}
+	return qualifiedObjsAtLocation(ctx, s, positionKey{uri, offset}, map[positionKey]bool{})
+}
+
+// A qualifiedObject is the result of resolving a reference from an
+// identifier to an object.
+type qualifiedObject struct {
+	obj types.Object // the referenced object
+	pkg Package      // the Package that defines the object (nil => universe)
+}
+
+// A positionKey identifies a byte offset within a file (URI).
+//
+// When a file has been parsed multiple times in the same FileSet,
+// there may be multiple token.Pos values denoting the same logical
+// position. In such situations, a positionKey may be used for
+// de-duplication.
+type positionKey struct {
+	uri    span.URI
+	offset int
+}
+
+// qualifiedObjsAtLocation finds all objects referenced at offset in uri,
+// across all packages in the snapshot.
+func qualifiedObjsAtLocation(ctx context.Context, s Snapshot, key positionKey, seen map[positionKey]bool) ([]qualifiedObject, error) {
+	if seen[key] {
+		return nil, nil
+	}
+	seen[key] = true
+
+	// We search for referenced objects starting with all packages containing the
+	// current location, and then repeating the search for every distinct object
+	// location discovered.
+	//
+	// In the common case, there should be at most one additional location to
+	// consider: the definition of the object referenced by the location. But we
+	// try to be comprehensive in case we ever support variations on build
+	// constraints.
+	metas, err := s.MetadataForFile(ctx, key.uri)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]PackageID, len(metas))
+	for i, m := range metas {
+		ids[i] = m.ID
+	}
+	pkgs, err := s.TypeCheck(ctx, TypecheckWorkspace, ids...)
+	if err != nil {
+		return nil, err
+	}
+
+	// In order to allow basic references/rename/implementations to function when
+	// non-workspace packages are open, ensure that we have at least one fully
+	// parsed package for the current file. This allows us to find references
+	// inside the open package. Use WidestPackage to capture references in test
+	// files.
+	hasFullPackage := false
+	for _, pkg := range pkgs {
+		if pkg.ParseMode() == ParseFull {
+			hasFullPackage = true
+			break
+		}
+	}
+	if !hasFullPackage {
+		pkg, _, err := PackageForFile(ctx, s, key.uri, TypecheckFull, WidestPackage)
+		if err != nil {
+			return nil, err
+		}
+		pkgs = append(pkgs, pkg)
+	}
+
+	// report objects in the order we encounter them. This ensures that the first
+	// result is at the cursor...
+	var qualifiedObjs []qualifiedObject
+	// ...but avoid duplicates.
+	seenObjs := map[types.Object]bool{}
+
+	for _, searchpkg := range pkgs {
+		pgf, err := searchpkg.File(key.uri)
+		if err != nil {
+			return nil, err
+		}
+		pos := pgf.Tok.Pos(key.offset)
+
+		// TODO(adonovan): replace this section with a call to objectsAt().
+		path := pathEnclosingObjNode(pgf.File, pos)
+		if path == nil {
+			continue
+		}
+		var objs []types.Object
+		switch leaf := path[0].(type) {
+		case *ast.Ident:
+			// If leaf represents an implicit type switch object or the type
+			// switch "assign" variable, expand to all of the type switch's
+			// implicit objects.
+			if implicits, _ := typeSwitchImplicits(searchpkg.GetTypesInfo(), path); len(implicits) > 0 {
+				objs = append(objs, implicits...)
+			} else {
+				obj := searchpkg.GetTypesInfo().ObjectOf(leaf)
+				if obj == nil {
+					return nil, fmt.Errorf("no object found for %q", leaf.Name)
+				}
+				objs = append(objs, obj)
+			}
+		case *ast.ImportSpec:
+			// Look up the implicit *types.PkgName.
+			obj := searchpkg.GetTypesInfo().Implicits[leaf]
+			if obj == nil {
+				return nil, fmt.Errorf("no object found for import %s", UnquoteImportPath(leaf))
+			}
+			objs = append(objs, obj)
+		}
+
+		// Get all of the transitive dependencies of the search package.
+		pkgSet := map[*types.Package]Package{
+			searchpkg.GetTypes(): searchpkg,
+		}
+		deps := recursiveDeps(s, searchpkg.Metadata())[1:]
+		// Ignore the error from type checking, but check if the context was
+		// canceled (which would have caused TypeCheck to exit early).
+		depPkgs, _ := s.TypeCheck(ctx, TypecheckWorkspace, deps...)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		for _, dep := range depPkgs {
+			// Since we ignored the error from type checking, pkg may be nil.
+			if dep != nil {
+				pkgSet[dep.GetTypes()] = dep
+			}
+		}
+
+		for _, obj := range objs {
+			if obj.Parent() == types.Universe {
+				return nil, fmt.Errorf("%q: builtin object", obj.Name())
+			}
+			pkg, ok := pkgSet[obj.Pkg()]
+			if !ok {
+				event.Error(ctx, fmt.Sprintf("no package for obj %s: %v", obj, obj.Pkg()), err)
+				continue
+			}
+			qualifiedObjs = append(qualifiedObjs, qualifiedObject{obj: obj, pkg: pkg})
+			seenObjs[obj] = true
+
+			// If the qualified object is in another file (or more likely, another
+			// package), it's possible that there is another copy of it in a package
+			// that we haven't searched, e.g. a test variant. See golang/go#47564.
+			//
+			// In order to be sure we've considered all packages, call
+			// qualifiedObjsAtLocation recursively for all locations we encounter. We
+			// could probably be more precise here, only continuing the search if obj
+			// is in another package, but this should be good enough to find all
+			// uses.
+
+			if key, found := packagePositionKey(pkg, obj.Pos()); found {
+				otherObjs, err := qualifiedObjsAtLocation(ctx, s, key, seen)
+				if err != nil {
+					return nil, err
+				}
+				for _, other := range otherObjs {
+					if !seenObjs[other.obj] {
+						qualifiedObjs = append(qualifiedObjs, other)
+						seenObjs[other.obj] = true
+					}
+				}
+			} else {
+				return nil, fmt.Errorf("missing file for position of %q in %q", obj.Name(), obj.Pkg().Name())
+			}
+		}
+	}
+	// Return an error if no objects were found since callers will assume that
+	// the slice has at least 1 element.
+	if len(qualifiedObjs) == 0 {
+		return nil, errNoObjectFound
+	}
+	return qualifiedObjs, nil
+}
+
+// packagePositionKey finds the positionKey for the given pos.
+//
+// The second result reports whether the position was found.
+func packagePositionKey(pkg Package, pos token.Pos) (positionKey, bool) {
+	for _, pgf := range pkg.CompiledGoFiles() {
+		offset, err := safetoken.Offset(pgf.Tok, pos)
+		if err == nil {
+			return positionKey{pgf.URI, offset}, true
+		}
+	}
+	return positionKey{}, false
+}
+
+// ReferenceInfo holds information about reference to an identifier in Go source.
+type ReferenceInfo struct {
+	MappedRange   protocol.MappedRange
+	ident         *ast.Ident
+	obj           types.Object
+	pkg           Package
+	isDeclaration bool
+}
+
+// references is a helper function to avoid recomputing qualifiedObjsAtProtocolPos.
+// The first element of qos is considered to be the declaration;
+// if isDeclaration, the first result is an extra item for it.
+// Only the definition-related fields of qualifiedObject are used.
+// (Arguably it should accept a smaller data type.)
+//
+// This implementation serves Server.rename. TODO(adonovan): obviate it.
+func references(ctx context.Context, snapshot Snapshot, qos []qualifiedObject) ([]*ReferenceInfo, error) {
+	var (
+		references []*ReferenceInfo
+		seen       = make(map[positionKey]bool)
+	)
+
+	pos := qos[0].obj.Pos()
+	if pos == token.NoPos {
+		return nil, fmt.Errorf("no position for %s", qos[0].obj) // e.g. error.Error
+	}
+	// Inv: qos[0].pkg != nil, since Pos is valid.
+	// Inv: qos[*].pkg != nil, since all qos are logically the same declaration.
+	filename := safetoken.StartPosition(qos[0].pkg.FileSet(), pos).Filename
+	pgf, err := qos[0].pkg.File(span.URIFromPath(filename))
+	if err != nil {
+		return nil, err
+	}
+	declIdent, err := findIdentifier(ctx, snapshot, qos[0].pkg, pgf, qos[0].obj.Pos())
+	if err != nil {
+		return nil, err
+	}
+	// Make sure declaration is the first item in the response.
+	references = append(references, &ReferenceInfo{
+		MappedRange:   declIdent.MappedRange,
+		ident:         declIdent.ident,
+		obj:           qos[0].obj,
+		pkg:           declIdent.pkg,
+		isDeclaration: true,
+	})
+
+	for _, qo := range qos {
+		var searchPkgs []Package
+
+		// Only search dependents if the object is exported.
+		if qo.obj.Exported() {
+			// If obj is a package-level object, we need only search
+			// among direct reverse dependencies.
+			// TODO(adonovan): opt: this will still spuriously search
+			// transitively for (e.g.) capitalized local variables.
+			// We could do better by checking for an objectpath.
+			transitive := qo.obj.Pkg().Scope().Lookup(qo.obj.Name()) != qo.obj
+			rdeps, err := snapshot.ReverseDependencies(ctx, qo.pkg.Metadata().ID, transitive)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]PackageID, 0, len(rdeps))
+			for _, rdep := range rdeps {
+				ids = append(ids, rdep.ID)
+			}
+			// TODO(adonovan): opt: build a search index
+			// that doesn't require type checking.
+			reverseDeps, err := snapshot.TypeCheck(ctx, TypecheckFull, ids...)
+			if err != nil {
+				return nil, err
+			}
+			searchPkgs = append(searchPkgs, reverseDeps...)
+		}
+		// Add the package in which the identifier is declared.
+		searchPkgs = append(searchPkgs, qo.pkg)
+		for _, pkg := range searchPkgs {
+			for ident, obj := range pkg.GetTypesInfo().Uses {
+				// For instantiated objects (as in methods or fields on instantiated
+				// types), we may not have pointer-identical objects but still want to
+				// consider them references.
+				if !equalOrigin(obj, qo.obj) {
+					// If ident is not a use of qo.obj, skip it, with one exception:
+					// uses of an embedded field can be considered references of the
+					// embedded type name
+					v, ok := obj.(*types.Var)
+					if !ok || !v.Embedded() {
+						continue
+					}
+					named, ok := v.Type().(*types.Named)
+					if !ok || named.Obj() != qo.obj {
+						continue
+					}
+				}
+				key, found := packagePositionKey(pkg, ident.Pos())
+				if !found {
+					bug.Reportf("ident %v (pos: %v) not found in package %v", ident.Name, ident.Pos(), pkg.Metadata().ID)
+					continue
+				}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				filename := pkg.FileSet().File(ident.Pos()).Name()
+				pgf, err := pkg.File(span.URIFromPath(filename))
+				if err != nil {
+					return nil, err
+				}
+				rng, err := pgf.PosMappedRange(ident.Pos(), ident.End())
+				if err != nil {
+					return nil, err
+				}
+				references = append(references, &ReferenceInfo{
+					ident:       ident,
+					pkg:         pkg,
+					obj:         obj,
+					MappedRange: rng,
+				})
+			}
+		}
+	}
+
+	return references, nil
+}
+
+// equalOrigin reports whether obj1 and obj2 have equivalent origin object.
+// This may be the case even if obj1 != obj2, if one or both of them is
+// instantiated.
+func equalOrigin(obj1, obj2 types.Object) bool {
+	return obj1.Pkg() == obj2.Pkg() && obj1.Pos() == obj2.Pos() && obj1.Name() == obj2.Name()
+}
+
+// parsePackageNameDecl is a convenience function that parses and
+// returns the package name declaration of file fh, and reports
+// whether the position ppos lies within it.
+//
+// Note: also used by references2.
+func parsePackageNameDecl(ctx context.Context, snapshot Snapshot, fh FileHandle, ppos protocol.Position) (*ParsedGoFile, bool, error) {
+	pgf, err := snapshot.ParseGo(ctx, fh, ParseHeader)
+	if err != nil {
+		return nil, false, err
+	}
+	// Careful: because we used ParseHeader,
+	// pgf.Pos(ppos) may be beyond EOF => (0, err).
+	pos, _ := pgf.PositionPos(ppos)
+	return pgf, pgf.File.Name.Pos() <= pos && pos <= pgf.File.Name.End(), nil
 }
