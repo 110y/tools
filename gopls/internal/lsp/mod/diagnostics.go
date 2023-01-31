@@ -191,20 +191,20 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 		return nil, err
 	}
 
-	fromGovulncheck := true
+	diagSource := source.Govulncheck
 	vs := snapshot.View().Vulnerabilities(fh.URI())[fh.URI()]
 	if vs == nil && snapshot.View().Options().Vulncheck == source.ModeVulncheckImports {
 		vs, err = snapshot.ModVuln(ctx, fh.URI())
 		if err != nil {
 			return nil, err
 		}
-		fromGovulncheck = false
+		diagSource = source.Vulncheck
 	}
 	if vs == nil || len(vs.Vulns) == 0 {
 		return nil, nil
 	}
 
-	suggestRunOrResetGovulncheck, err := suggestGovulncheckAction(fromGovulncheck, fh.URI())
+	suggestRunOrResetGovulncheck, err := suggestGovulncheckAction(diagSource == source.Govulncheck, fh.URI())
 	if err != nil {
 		// must not happen
 		return nil, err // TODO: bug report
@@ -310,8 +310,8 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 				URI:            fh.URI(),
 				Range:          rng,
 				Severity:       protocol.SeverityWarning,
-				Source:         source.Vulncheck,
-				Message:        getVulnMessage(req.Mod.Path, warning, true, fromGovulncheck),
+				Source:         diagSource,
+				Message:        getVulnMessage(req.Mod.Path, warning, true, diagSource == source.Govulncheck),
 				SuggestedFixes: warningFixes,
 				Related:        relatedInfo,
 			})
@@ -322,8 +322,8 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 				URI:            fh.URI(),
 				Range:          rng,
 				Severity:       protocol.SeverityInformation,
-				Source:         source.Vulncheck,
-				Message:        getVulnMessage(req.Mod.Path, info, false, fromGovulncheck),
+				Source:         diagSource,
+				Message:        getVulnMessage(req.Mod.Path, info, false, diagSource == source.Govulncheck),
 				SuggestedFixes: infoFixes,
 				Related:        relatedInfo,
 			})
@@ -365,8 +365,8 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 				URI:            fh.URI(),
 				Range:          rng,
 				Severity:       protocol.SeverityWarning,
-				Source:         source.Vulncheck,
-				Message:        getVulnMessage(stdlib, warning, true, fromGovulncheck),
+				Source:         diagSource,
+				Message:        getVulnMessage(stdlib, warning, true, diagSource == source.Govulncheck),
 				SuggestedFixes: fixes,
 				Related:        relatedInfo,
 			})
@@ -377,8 +377,8 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 				URI:            fh.URI(),
 				Range:          rng,
 				Severity:       protocol.SeverityInformation,
-				Source:         source.Vulncheck,
-				Message:        getVulnMessage(stdlib, info, false, fromGovulncheck),
+				Source:         diagSource,
+				Message:        getVulnMessage(stdlib, info, false, diagSource == source.Govulncheck),
 				SuggestedFixes: fixes,
 				Related:        relatedInfo,
 			})
@@ -396,7 +396,7 @@ func suggestGovulncheckAction(fromGovulncheck bool, uri span.URI) (source.Sugges
 	if fromGovulncheck {
 		resetVulncheck, err := command.NewResetGoModDiagnosticsCommand("Reset govulncheck result", command.ResetGoModDiagnosticsArgs{
 			URIArg:           command.URIArg{URI: protocol.DocumentURI(uri)},
-			DiagnosticSource: string(source.Vulncheck),
+			DiagnosticSource: string(source.Govulncheck),
 		})
 		if err != nil {
 			return source.SuggestedFix{}, err
@@ -527,34 +527,37 @@ func SelectUpgradeCodeActions(actions []protocol.CodeAction) []protocol.CodeActi
 	if len(actions) <= 1 {
 		return actions // return early if no sorting necessary
 	}
-	var others []protocol.CodeAction
+	var versionedUpgrade, latestUpgrade, resetAction protocol.CodeAction
+	var chosenVersionedUpgrade string
+	var selected []protocol.CodeAction
 
 	seen := make(map[string]bool)
 
-	set := make(map[string]protocol.CodeAction)
 	for _, action := range actions {
 		if strings.HasPrefix(action.Title, upgradeCodeActionPrefix) {
-			set[action.Command.Title] = action
+			if v := getUpgradeVersion(action); v == "latest" && latestUpgrade.Title == "" {
+				latestUpgrade = action
+			} else if versionedUpgrade.Title == "" || semver.Compare(v, chosenVersionedUpgrade) > 0 {
+				chosenVersionedUpgrade = v
+				versionedUpgrade = action
+			}
+		} else if strings.HasPrefix(action.Title, "Reset govulncheck") {
+			resetAction = action
 		} else if !seen[action.Command.Title] {
 			seen[action.Command.Title] = true
-			others = append(others, action)
+			selected = append(selected, action)
 		}
 	}
-	var upgrades []protocol.CodeAction
-	for _, action := range set {
-		upgrades = append(upgrades, action)
+	if versionedUpgrade.Title != "" {
+		selected = append(selected, versionedUpgrade)
 	}
-	// Sort results by version number, latest first.
-	// There should be no duplicates at this point.
-	sort.Slice(upgrades, func(i, j int) bool {
-		vi, vj := getUpgradeVersion(upgrades[i]), getUpgradeVersion(upgrades[j])
-		return vi == "latest" || (vj != "latest" && semver.Compare(vi, vj) > 0)
-	})
-	// Choose at most one specific version and the latest.
-	if getUpgradeVersion(upgrades[0]) == "latest" {
-		return append(upgrades[:2], others...)
+	if latestUpgrade.Title != "" {
+		selected = append(selected, latestUpgrade)
 	}
-	return append(upgrades[:1], others...)
+	if resetAction.Title != "" {
+		selected = append(selected, resetAction)
+	}
+	return selected
 }
 
 func getUpgradeVersion(p protocol.CodeAction) string {

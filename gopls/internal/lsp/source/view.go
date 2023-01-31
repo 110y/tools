@@ -419,7 +419,7 @@ func (pgf *ParsedGoFile) NodeLocation(node ast.Node) (protocol.Location, error) 
 	return pgf.Mapper.PosLocation(pgf.Tok, node.Pos(), node.End())
 }
 
-// RangeToSpanRange parses a protocol Range back into the go/token domain.
+// RangeToTokenRange parses a protocol Range back into the go/token domain.
 func (pgf *ParsedGoFile) RangeToTokenRange(r protocol.Range) (safetoken.Range, error) {
 	start, end, err := pgf.Mapper.RangeOffsets(r)
 	if err != nil {
@@ -697,6 +697,23 @@ const (
 	Work
 )
 
+func (k FileKind) String() string {
+	switch k {
+	case Go:
+		return "go"
+	case Mod:
+		return "go.mod"
+	case Sum:
+		return "go.sum"
+	case Tmpl:
+		return "tmpl"
+	case Work:
+		return "go.work"
+	default:
+		return fmt.Sprintf("internal error: unknown file kind %d", k)
+	}
+}
+
 // Analyzer represents a go/analysis analyzer with some boolean properties
 // that let the user know how to use the analyzer.
 type Analyzer struct {
@@ -823,7 +840,8 @@ const (
 	ModTidyError             DiagnosticSource = "go mod tidy"
 	OptimizationDetailsError DiagnosticSource = "optimizer details"
 	UpgradeNotification      DiagnosticSource = "upgrade available"
-	Vulncheck                DiagnosticSource = "govulncheck"
+	Vulncheck                DiagnosticSource = "vulncheck imports"
+	Govulncheck              DiagnosticSource = "govulncheck"
 	TemplateError            DiagnosticSource = "template"
 	WorkFileError            DiagnosticSource = "go.work file"
 )

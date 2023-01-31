@@ -229,7 +229,7 @@ func (app *Application) Run(ctx context.Context, args ...string) error {
 	return tool.CommandLineErrorf("Unknown command %v", command)
 }
 
-// commands returns the set of commands supported by the gopls tool on the
+// Commands returns the set of commands supported by the gopls tool on the
 // command line.
 // The command is specified by the first non flag argument.
 func (app *Application) Commands() []tool.Application {
@@ -525,6 +525,22 @@ func (c *cmdClient) ShowDocument(context.Context, *protocol.ShowDocumentParams) 
 }
 
 func (c *cmdClient) WorkDoneProgressCreate(context.Context, *protocol.WorkDoneProgressCreateParams) error {
+	return nil
+}
+
+func (c *cmdClient) DiagnosticRefresh(context.Context) error {
+	return nil
+}
+
+func (c *cmdClient) InlayHintRefresh(context.Context) error {
+	return nil
+}
+
+func (c *cmdClient) SemanticTokensRefresh(context.Context) error {
+	return nil
+}
+
+func (c *cmdClient) InlineValueRefresh(context.Context) error {
 	return nil
 }
 

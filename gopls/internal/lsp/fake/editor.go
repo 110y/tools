@@ -279,7 +279,8 @@ func (e *Editor) initialize(ctx context.Context) error {
 		},
 	}
 
-	params.Trace = "messages"
+	trace := protocol.TraceValues("messages")
+	params.Trace = &trace
 	// TODO: support workspace folders.
 	if e.Server != nil {
 		resp, err := e.Server.Initialize(ctx, params)
@@ -792,7 +793,7 @@ func (e *Editor) GoToTypeDefinition(ctx context.Context, loc protocol.Location) 
 	return e.extractFirstLocation(ctx, resp)
 }
 
-// extractFirstPathAndPos returns the first location.
+// extractFirstLocation returns the first location.
 // It opens the file if needed.
 func (e *Editor) extractFirstLocation(ctx context.Context, locs []protocol.Location) (protocol.Location, error) {
 	if len(locs) == 0 {
@@ -1182,6 +1183,23 @@ func (e *Editor) Implementations(ctx context.Context, loc protocol.Location) ([]
 		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
 	}
 	return e.Server.Implementation(ctx, params)
+}
+
+func (e *Editor) SignatureHelp(ctx context.Context, loc protocol.Location) (*protocol.SignatureHelp, error) {
+	if e.Server == nil {
+		return nil, nil
+	}
+	path := e.sandbox.Workdir.URIToPath(loc.URI)
+	e.mu.Lock()
+	_, ok := e.buffers[path]
+	e.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("buffer %q is not open", path)
+	}
+	params := &protocol.SignatureHelpParams{
+		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
+	}
+	return e.Server.SignatureHelp(ctx, params)
 }
 
 func (e *Editor) RenameFile(ctx context.Context, oldPath, newPath string) error {
