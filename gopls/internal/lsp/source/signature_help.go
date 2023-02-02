@@ -97,21 +97,20 @@ FindCall:
 		comment *ast.CommentGroup
 	)
 	if obj != nil {
-		declPkg, err := FindPackageFromPos(ctx, snapshot, pkg, obj.Pos())
-		if err != nil {
-			return nil, 0, err
-		}
-		node, _ := FindDeclAndField(declPkg.GetSyntax(), obj.Pos()) // may be nil
-		d, err := FindHoverContext(ctx, snapshot, pkg, obj, node, nil)
+		d, err := HoverDocForObject(ctx, snapshot, pkg, obj)
 		if err != nil {
 			return nil, 0, err
 		}
 		name = obj.Name()
-		comment = d.Comment
+		comment = d
 	} else {
 		name = "func"
 	}
-	s := NewSignature(ctx, snapshot, pkg, sig, comment, qf)
+	mq := MetadataQualifierForFile(snapshot, pgf.File, pkg.Metadata())
+	s, err := NewSignature(ctx, snapshot, pkg, pgf.File, sig, comment, qf, mq)
+	if err != nil {
+		return nil, 0, err
+	}
 	paramInfo := make([]protocol.ParameterInformation, 0, len(s.params))
 	for _, p := range s.params {
 		paramInfo = append(paramInfo, protocol.ParameterInformation{Label: p})
