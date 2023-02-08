@@ -702,6 +702,19 @@ func (e *Editor) BufferText(name string) (string, bool) {
 	return buf.text(), true
 }
 
+// Mapper returns the protocol.Mapper for the given buffer name.
+//
+// If there is no open buffer with that name, it returns nil.
+func (e *Editor) Mapper(name string) *protocol.Mapper {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	buf, ok := e.buffers[name]
+	if !ok {
+		return nil
+	}
+	return buf.mapper
+}
+
 // BufferVersion returns the current version of the buffer corresponding to
 // name (or 0 if it is not being edited).
 func (e *Editor) BufferVersion(name string) int {
@@ -761,6 +774,9 @@ func (e *Editor) setBufferContentLocked(ctx context.Context, path string, dirty 
 
 // GoToDefinition jumps to the definition of the symbol at the given position
 // in an open buffer. It returns the location of the resulting jump.
+//
+// TODO(rfindley): rename to "Definition", to be consistent with LSP
+// terminology.
 func (e *Editor) GoToDefinition(ctx context.Context, loc protocol.Location) (protocol.Location, error) {
 	if err := e.checkBufferLocation(loc); err != nil {
 		return protocol.Location{}, err
