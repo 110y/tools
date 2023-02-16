@@ -175,7 +175,7 @@ type Snapshot interface {
 	AllMetadata(ctx context.Context) ([]*Metadata, error)
 
 	// Symbols returns all symbols in the snapshot.
-	Symbols(ctx context.Context) map[span.URI][]Symbol
+	Symbols(ctx context.Context) (map[span.URI][]Symbol, error)
 
 	// Metadata returns the metadata for the specified package,
 	// or nil if it was not found.
@@ -468,7 +468,8 @@ type Metadata struct {
 	DepsByPkgPath   map[PackagePath]PackageID // values are unique and non-empty
 	Module          *packages.Module
 	DepsErrors      []*packagesinternal.PackageError
-	LoadDir         string // directory from which go/packages was run
+	Diagnostics     []*Diagnostic // processed diagnostics from 'go list'
+	LoadDir         string        // directory from which go/packages was run
 }
 
 func (m *Metadata) String() string { return string(m.ID) }

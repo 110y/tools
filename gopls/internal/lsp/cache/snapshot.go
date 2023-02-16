@@ -669,7 +669,7 @@ func (s *snapshot) TypeCheck(ctx context.Context, mode source.TypecheckMode, ids
 			}
 			continue
 		}
-		pkgs[i] = newPackage(ph.m, p)
+		pkgs[i] = &Package{ph.m, p}
 	}
 
 	return pkgs, firstErr
@@ -1022,17 +1022,29 @@ func (s *snapshot) ActiveMetadata(ctx context.Context) ([]*source.Metadata, erro
 	return active, nil
 }
 
-// Symbols extracts and returns the symbols for each file in all the snapshot's views.
-func (s *snapshot) Symbols(ctx context.Context) map[span.URI][]source.Symbol {
-	// Read the set of Go files out of the snapshot.
-	var goFiles []source.FileHandle
+// Symbols extracts and returns symbol information for every file contained in
+// a loaded package. It awaits snapshot loading.
+//
+// TODO(rfindley): move this to the top of cache/symbols.go
+func (s *snapshot) Symbols(ctx context.Context) (map[span.URI][]source.Symbol, error) {
+	if err := s.awaitLoaded(ctx); err != nil {
+		return nil, err
+	}
+
+	// Build symbols for all loaded Go files.
 	s.mu.Lock()
-	s.files.Range(func(uri span.URI, f source.FileHandle) {
-		if s.View().FileKind(f) == source.Go {
-			goFiles = append(goFiles, f)
-		}
-	})
+	meta := s.meta
 	s.mu.Unlock()
+
+	goFiles := make(map[span.URI]struct{})
+	for _, m := range meta.metadata {
+		for _, uri := range m.GoFiles {
+			goFiles[uri] = struct{}{}
+		}
+		for _, uri := range m.CompiledGoFiles {
+			goFiles[uri] = struct{}{}
+		}
+	}
 
 	// Symbolize them in parallel.
 	var (
@@ -1042,15 +1054,15 @@ func (s *snapshot) Symbols(ctx context.Context) map[span.URI][]source.Symbol {
 		result   = make(map[span.URI][]source.Symbol)
 	)
 	group.SetLimit(nprocs)
-	for _, f := range goFiles {
-		f := f
+	for uri := range goFiles {
+		uri := uri
 		group.Go(func() error {
-			symbols, err := s.symbolize(ctx, f)
+			symbols, err := s.symbolize(ctx, uri)
 			if err != nil {
 				return err
 			}
 			resultMu.Lock()
-			result[f.URI()] = symbols
+			result[uri] = symbols
 			resultMu.Unlock()
 			return nil
 		})
@@ -1060,7 +1072,7 @@ func (s *snapshot) Symbols(ctx context.Context) map[span.URI][]source.Symbol {
 	if err := group.Wait(); err != nil {
 		event.Error(ctx, "getting snapshot symbols", err)
 	}
-	return result
+	return result, nil
 }
 
 func (s *snapshot) AllMetadata(ctx context.Context) ([]*source.Metadata, error) {
@@ -1144,6 +1156,20 @@ func moduleForURI(modFiles map[span.URI]struct{}, uri span.URI) span.URI {
 	return match
 }
 
+// nearestModFile finds the nearest go.mod file contained in the directory
+// containing uri, or a parent of that directory.
+//
+// The given uri must be a file, not a directory.
+func nearestModFile(ctx context.Context, uri span.URI, fs source.FileSource) (span.URI, error) {
+	// TODO(rfindley)
+	dir := filepath.Dir(uri.Filename())
+	mod, err := findRootPattern(ctx, dir, "go.mod", fs)
+	if err != nil {
+		return "", err
+	}
+	return span.URIFromPath(mod), nil
+}
+
 func (s *snapshot) Metadata(id PackageID) *source.Metadata {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1216,20 +1242,27 @@ func (s *snapshot) FindFile(uri span.URI) source.FileHandle {
 // GetFile succeeds even if the file does not exist. A non-nil error return
 // indicates some type of internal error, for example if ctx is cancelled.
 func (s *snapshot) GetFile(ctx context.Context, uri span.URI) (source.FileHandle, error) {
-	s.view.markKnown(uri)
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if fh, ok := s.files.Get(uri); ok {
+	return lockedSnapshot{s}.GetFile(ctx, uri)
+}
+
+// A lockedSnapshot implements the source.FileSource interface while holding
+// the lock for the wrapped snapshot.
+type lockedSnapshot struct{ wrapped *snapshot }
+
+func (s lockedSnapshot) GetFile(ctx context.Context, uri span.URI) (source.FileHandle, error) {
+	s.wrapped.view.markKnown(uri)
+	if fh, ok := s.wrapped.files.Get(uri); ok {
 		return fh, nil
 	}
 
-	fh, err := s.view.fs.GetFile(ctx, uri) // read the file
+	fh, err := s.wrapped.view.fs.GetFile(ctx, uri) // read the file
 	if err != nil {
 		return nil, err
 	}
-	s.files.Set(uri, fh)
+	s.wrapped.files.Set(uri, fh)
 	return fh, nil
 }
 
