@@ -29,7 +29,7 @@ import (
 // methods of the concrete type that is assigned to an interface type
 // at the cursor position.
 func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh FileHandle, rng protocol.Range) (*token.FileSet, *analysis.SuggestedFix, error) {
-	pkg, pgf, err := PackageForFile(ctx, snapshot, fh.URI(), TypecheckFull, NarrowestPackage)
+	pkg, pgf, err := PackageForFile(ctx, snapshot, fh.URI(), NarrowestPackage)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetTypedFile: %w", err)
 	}
@@ -232,7 +232,7 @@ func (%s%s%s) %s%s {
 			NewText: []byte(edit.New),
 		})
 	}
-	return SingletonFileSet(declPGF.Tok), // edits use declPGF.Tok
+	return FileSetFor(declPGF.Tok), // edits use declPGF.Tok
 		&analysis.SuggestedFix{TextEdits: edits},
 		nil
 }

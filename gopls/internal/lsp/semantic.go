@@ -93,7 +93,7 @@ func (s *Server) computeSemanticTokens(ctx context.Context, td protocol.TextDocu
 	if kind != source.Go {
 		return nil, nil
 	}
-	pkg, pgf, err := source.PackageForFile(ctx, snapshot, fh.URI(), source.TypecheckFull, source.NarrowestPackage)
+	pkg, pgf, err := source.PackageForFile(ctx, snapshot, fh.URI(), source.NarrowestPackage)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +524,7 @@ func (e *encoded) ident(x *ast.Ident) {
 	default:
 		// can't happen
 		if use == nil {
-			msg := fmt.Sprintf("%#v/%#v %#v %#v", x, x.Obj, e.ti.Defs[x], e.ti.Uses[x])
+			msg := fmt.Sprintf("%#v %#v %#v", x, e.ti.Defs[x], e.ti.Uses[x])
 			e.unexpected(msg)
 		}
 		if use.Type() != nil {
