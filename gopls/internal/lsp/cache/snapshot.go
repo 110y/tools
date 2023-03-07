@@ -535,7 +535,7 @@ func (s *snapshot) goCommandInvocation(ctx context.Context, flags source.Invocat
 		if err != nil {
 			return "", nil, cleanup, err
 		}
-		modContent, err = modFH.Read()
+		modContent, err = modFH.Content()
 		if err != nil {
 			return "", nil, cleanup, err
 		}
@@ -1111,14 +1111,6 @@ func (s *snapshot) AllMetadata(ctx context.Context) ([]*source.Metadata, error) 
 		meta = append(meta, m)
 	}
 	return meta, nil
-}
-
-func (s *snapshot) CachedPackages(ctx context.Context) []source.Package {
-	// Cached packages do not make sense with incremental gopls.
-	//
-	// TODO(golang/go#58663): re-implement unimported completions to not depend
-	// on cached import paths.
-	return nil
 }
 
 // TODO(rfindley): clarify that this is only active modules. Or update to just

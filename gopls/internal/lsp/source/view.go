@@ -156,14 +156,6 @@ type Snapshot interface {
 	// excluding id itself.
 	ReverseDependencies(ctx context.Context, id PackageID, transitive bool) (map[PackageID]*Metadata, error)
 
-	// CachedPackages returns a new, unordered array of all
-	// packages currently cached in this snapshot, which is a
-	// poorly defined set that depends on the history of
-	// operations up to this point. Do not use it.
-	//
-	// TODO(adonovan): get rid of the last call from completions.
-	CachedPackages(ctx context.Context) []Package
-
 	// ActiveMetadata returns a new, unordered slice containing
 	// metadata for all packages considered 'active' in the workspace.
 	//
@@ -634,9 +626,9 @@ type FileHandle interface {
 	// Version returns the file version, as defined by the LSP client.
 	// For on-disk file handles, Version returns 0.
 	Version() int32
-	// Read reads the contents of a file.
+	// Content returns the contents of a file.
 	// If the file is not available, returns a nil slice and an error.
-	Read() ([]byte, error)
+	Content() ([]byte, error)
 }
 
 // A Hash is a cryptographic digest of the contents of a file.
