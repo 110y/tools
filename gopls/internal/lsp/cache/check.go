@@ -13,6 +13,7 @@ import (
 	"go/types"
 	"log"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +45,8 @@ import (
 type typeCheckBatch struct {
 	meta *metadataGraph
 
+	cpulimit    chan struct{}                     // concurrency limiter for CPU-bound operations
+	needSyntax  map[PackageID]bool                // packages that need type-checked syntax
 	parsedFiles map[span.URI]*source.ParsedGoFile // parsed files necessary for type-checking
 	fset        *token.FileSet                    // FileSet describing all parsed files
 
@@ -76,6 +79,20 @@ type pkgOrErr struct {
 // indicates context cancellation or otherwise significant failure to perform
 // the type-checking operation.
 func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Package, error) {
+	// Build up shared state for efficient type-checking.
+	b := &typeCheckBatch{
+		cpulimit:    make(chan struct{}, runtime.GOMAXPROCS(0)),
+		needSyntax:  make(map[PackageID]bool),
+		parsedFiles: make(map[span.URI]*source.ParsedGoFile),
+		// fset is built during the parsing pass.
+
+		needFiles:  make(map[span.URI]source.FileHandle),
+		promises:   make(map[PackageID]*memoize.Promise),
+		imports:    make(map[PackageID]pkgOrErr),
+		exportData: make(map[PackageID][]byte),
+		packages:   make(map[PackageID]*Package),
+	}
+
 	// Check for existing active packages.
 	//
 	// Since gopls can't depend on package identity, any instance of the
@@ -86,29 +103,16 @@ func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Pa
 	// requests for package information for the modified package (semantic
 	// tokens, code lens, inlay hints, etc.)
 	pkgs := make([]source.Package, len(ids))
-	needSyntax := make(map[PackageID]bool)
 	for i, id := range ids {
 		if pkg := s.getActivePackage(id); pkg != nil {
 			pkgs[i] = pkg
 		} else {
-			needSyntax[id] = true
+			b.needSyntax[id] = true
 		}
 	}
 
-	if len(needSyntax) == 0 {
+	if len(b.needSyntax) == 0 {
 		return pkgs, nil
-	}
-
-	// Build up shared state for efficient type-checking.
-	b := &typeCheckBatch{
-		parsedFiles: make(map[span.URI]*source.ParsedGoFile),
-		// fset is built during the parsing pass.
-		needFiles: make(map[span.URI]source.FileHandle),
-
-		promises:   make(map[PackageID]*memoize.Promise),
-		imports:    make(map[PackageID]pkgOrErr),
-		exportData: make(map[PackageID][]byte),
-		packages:   make(map[PackageID]*Package),
 	}
 
 	// Capture metadata once to ensure a consistent view.
@@ -117,7 +121,6 @@ func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Pa
 	s.mu.Unlock()
 
 	//  -- Step 1: assemble the promises graph --
-
 	var (
 		needExportData = make(map[PackageID]packageHandleKey)
 		packageHandles = make(map[PackageID]*packageHandle)
@@ -151,7 +154,7 @@ func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Pa
 		}
 		packageHandles[id] = ph
 
-		if needSyntax[id] {
+		if b.needSyntax[id] {
 			// We will need to parse and type-check this package.
 			//
 			// We may also need to parse and type-check if export data is missing,
@@ -163,42 +166,15 @@ func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Pa
 
 		debugName := fmt.Sprintf("check(%s)", id)
 		b.promises[id] = memoize.NewPromise(debugName, func(ctx context.Context, _ interface{}) interface{} {
-			var res pkgOrErr
-			if err := b.awaitPredecessors(ctx, ph.m); err != nil {
-				res.err = err
-			} else {
-				b.mu.Lock()
-				data, ok := b.exportData[id]
-				b.mu.Unlock()
-
-				if ok {
-					// We need export data, and have it.
-					res.pkg, res.err = b.importPackage(ctx, m, data)
-				} else if !needSyntax[id] {
-					// We need only a types.Package, but don't have export data.
-					// Type-check as fast as possible (skipping function bodies).
-					res.pkg, res.err = b.checkPackageForImport(ctx, ph)
-				} else {
-					// We need a syntax package.
-					var pkg *Package
-					pkg, res.err = b.checkPackage(ctx, ph)
-					if res.err == nil {
-						res.pkg = pkg.pkg.types
-						b.mu.Lock()
-						b.packages[id] = pkg
-						b.mu.Unlock()
-					}
-				}
-			}
-
+			pkg, err := b.processPackage(ctx, ph)
 			b.mu.Lock()
-			b.imports[m.ID] = res
+			b.imports[m.ID] = pkgOrErr{pkg, err}
 			b.mu.Unlock()
 			return nil
 		})
 		return nil
 	}
-	for id := range needSyntax {
+	for id := range b.needSyntax {
 		collectPromises(id)
 	}
 
@@ -252,7 +228,7 @@ func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Pa
 		b.fset = fset
 	}
 
-	// -- Step 4: await type-checking. --
+	// -- Step 4: await results --
 	//
 	// Start a single goroutine for each promise.
 	{
@@ -315,6 +291,55 @@ func (b *typeCheckBatch) addNeededFiles(ph *packageHandle) {
 	for _, fh := range ph.inputs.compiledGoFiles {
 		b.needFiles[fh.URI()] = fh
 	}
+}
+
+// processPackage processes the package handle for the type checking batch,
+// which may involve any one of importing, type-checking for import, or
+// type-checking for syntax, depending on the requested syntax packages and
+// available export data.
+func (b *typeCheckBatch) processPackage(ctx context.Context, ph *packageHandle) (*types.Package, error) {
+	if err := b.awaitPredecessors(ctx, ph.m); err != nil {
+		return nil, err
+	}
+
+	// Wait to acquire CPU token.
+	//
+	// Note: it is important to acquire this token only after awaiting
+	// predecessors, to avoid a starvation lock.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case b.cpulimit <- struct{}{}:
+		defer func() {
+			<-b.cpulimit // release CPU token
+		}()
+	}
+
+	b.mu.Lock()
+	data, ok := b.exportData[ph.m.ID]
+	b.mu.Unlock()
+
+	if ok {
+		// We need export data, and have it.
+		return b.importPackage(ctx, ph.m, data)
+	}
+
+	if !b.needSyntax[ph.m.ID] {
+		// We need only a types.Package, but don't have export data.
+		// Type-check as fast as possible (skipping function bodies).
+		return b.checkPackageForImport(ctx, ph)
+	}
+
+	// We need a syntax package.
+	syntaxPkg, err := b.checkPackage(ctx, ph)
+	if err != nil {
+		return nil, err
+	}
+
+	b.mu.Lock()
+	b.packages[ph.m.ID] = syntaxPkg
+	b.mu.Unlock()
+	return syntaxPkg.pkg.types, nil
 }
 
 // importPackage loads the given package from its export data in p.exportData
@@ -693,14 +718,21 @@ func (s *snapshot) typeCheckInputs(ctx context.Context, m *source.Metadata) (typ
 		deps[depID] = depHandle
 	}
 
-	// Read both lists of files of this package, in parallel.
+	// Read both lists of files of this package.
+	//
+	// Parallelism is not necessary here as the files will have already been
+	// pre-read at load time.
 	//
 	// goFiles aren't presented to the type checker--nor
 	// are they included in the key, unsoundly--but their
 	// syntax trees are available from (*pkg).File(URI).
 	// TODO(adonovan): consider parsing them on demand?
 	// The need should be rare.
-	goFiles, compiledGoFiles, err := readGoFiles(ctx, s, m)
+	goFiles, err := readFiles(ctx, s, m.GoFiles)
+	if err != nil {
+		return typeCheckInputs{}, err
+	}
+	compiledGoFiles, err := readFiles(ctx, s, m.CompiledGoFiles)
 	if err != nil {
 		return typeCheckInputs{}, err
 	}
@@ -727,24 +759,17 @@ func (s *snapshot) typeCheckInputs(ctx context.Context, m *source.Metadata) (typ
 	}, nil
 }
 
-// readGoFiles reads the content of Metadata.GoFiles and
-// Metadata.CompiledGoFiles, in parallel.
-func readGoFiles(ctx context.Context, s *snapshot, m *source.Metadata) (goFiles, compiledGoFiles []source.FileHandle, err error) {
-	var group errgroup.Group
-	getFileHandles := func(files []span.URI) []source.FileHandle {
-		fhs := make([]source.FileHandle, len(files))
-		for i, uri := range files {
-			i, uri := i, uri
-			group.Go(func() (err error) {
-				fhs[i], err = s.GetFile(ctx, uri) // ~25us
-				return
-			})
+// readFiles reads the content of each file URL from the source
+// (e.g. snapshot or cache).
+func readFiles(ctx context.Context, fs source.FileSource, uris []span.URI) (_ []source.FileHandle, err error) {
+	fhs := make([]source.FileHandle, len(uris))
+	for i, uri := range uris {
+		fhs[i], err = fs.GetFile(ctx, uri)
+		if err != nil {
+			return nil, err
 		}
-		return fhs
 	}
-	return getFileHandles(m.GoFiles),
-		getFileHandles(m.CompiledGoFiles),
-		group.Wait()
+	return fhs, nil
 }
 
 // computePackageKey returns a key representing the act of type checking
@@ -855,7 +880,11 @@ func typeCheckImpl(ctx context.Context, b *typeCheckBatch, inputs typeCheckInput
 	for _, e := range expandErrors(unexpanded, inputs.relatedInformation) {
 		diags, err := typeErrorDiagnostics(inputs.moduleMode, inputs.linkTarget, pkg, e)
 		if err != nil {
-			event.Error(ctx, "unable to compute positions for type errors", err, tag.Package.Of(string(inputs.id)))
+			// If we fail here and there are no parse errors, it means we are hiding
+			// a valid type-checking error from the user. This must be a bug.
+			if len(pkg.parseErrors) == 0 {
+				bug.Reportf("failed to compute position for type error %v: %v", e, err)
+			}
 			continue
 		}
 		pkg.typeErrors = append(pkg.typeErrors, e.primary)
