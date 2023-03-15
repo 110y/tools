@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/scanner"
 	"go/token"
 	"go/types"
@@ -93,7 +94,7 @@ type Snapshot interface {
 	// ParseGo returns the parsed AST for the file.
 	// If the file is not available, returns nil and an error.
 	// Position information is added to FileSet().
-	ParseGo(ctx context.Context, fh FileHandle, mode ParseMode) (*ParsedGoFile, error)
+	ParseGo(ctx context.Context, fh FileHandle, mode parser.Mode) (*ParsedGoFile, error)
 
 	// Analyze runs the specified analyzers on the given package at this snapshot.
 	Analyze(ctx context.Context, id PackageID, analyzers []*Analyzer) ([]*Diagnostic, error)
@@ -385,7 +386,7 @@ type MetadataSource interface {
 // A ParsedGoFile contains the results of parsing a Go file.
 type ParsedGoFile struct {
 	URI  span.URI
-	Mode ParseMode
+	Mode parser.Mode
 	File *ast.File
 	Tok  *token.File
 	// Source code used to build the AST. It may be different from the
@@ -598,18 +599,17 @@ func IsNonFatalGoModError(err error) bool {
 	return err == ErrTmpModfileUnsupported || err == ErrNoModOnDisk
 }
 
-// ParseMode controls the content of the AST produced when parsing a source file.
-type ParseMode int
-
+// Common parse modes; these should be reused wherever possible to increase
+// cache hits.
 const (
 	// ParseHeader specifies that the main package declaration and imports are needed.
 	// This is the mode used when attempting to examine the package graph structure.
-	ParseHeader ParseMode = iota
+	ParseHeader = parser.AllErrors | parser.ParseComments | parser.ImportsOnly | SkipObjectResolution
 
 	// ParseFull specifies the full AST is needed.
 	// This is used for files of direct interest where the entire contents must
 	// be considered.
-	ParseFull
+	ParseFull = parser.AllErrors | parser.ParseComments | SkipObjectResolution
 )
 
 // A FileHandle represents the URI, content, hash, and optional
@@ -790,7 +790,6 @@ type Package interface {
 
 	// Results of parsing:
 	FileSet() *token.FileSet
-	ParseMode() ParseMode
 	CompiledGoFiles() []*ParsedGoFile // (borrowed)
 	File(uri span.URI) (*ParsedGoFile, error)
 	GetSyntax() []*ast.File // (borrowed)
@@ -820,7 +819,7 @@ type CriticalError struct {
 // An Diagnostic corresponds to an LSP Diagnostic.
 // https://microsoft.github.io/language-server-protocol/specification#diagnostic
 type Diagnostic struct {
-	URI      span.URI
+	URI      span.URI // of diagnosed file (not diagnostic documentation)
 	Range    protocol.Range
 	Severity protocol.DiagnosticSeverity
 	Code     string

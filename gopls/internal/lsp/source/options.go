@@ -124,7 +124,7 @@ func DefaultOptions() *Options {
 				},
 				UIOptions: UIOptions{
 					DiagnosticOptions: DiagnosticOptions{
-						DiagnosticsDelay: 250 * time.Millisecond,
+						DiagnosticsDelay: 1 * time.Second,
 						Annotations: map[Annotation]bool{
 							Bounds: true,
 							Escape: true,
@@ -1605,6 +1605,7 @@ func (l *LensJSON) Write(w io.Writer) {
 type AnalyzerJSON struct {
 	Name    string
 	Doc     string
+	URL     string
 	Default bool
 }
 

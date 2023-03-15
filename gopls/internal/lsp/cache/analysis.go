@@ -580,7 +580,9 @@ func actuallyAnalyze(ctx context.Context, analyzers []*analysis.Analyzer, m *sou
 			group.Go(func() error {
 				// Call parseGoImpl directly, not the caching wrapper,
 				// as cached ASTs require the global FileSet.
-				pgf, err := parseGoImpl(ctx, fset, fh, source.ParseFull)
+				// ast.Object resolution is unfortunately an implied part of the
+				// go/analysis contract.
+				pgf, err := parseGoImpl(ctx, fset, fh, source.ParseFull&^source.SkipObjectResolution)
 				parsed[i] = pgf
 				return err
 			})
@@ -741,7 +743,7 @@ func typeCheckForAnalysis(fset *token.FileSet, parsed []*source.ParsedGoFile, m 
 			return nil, bug.Errorf("missing export data for %q", pkgPath)
 		}
 		hashExport(pkgPath, export)
-		imported, err := gcimporter.IImportShallow(fset, importMap, export, string(pkgPath), insert)
+		imported, err := gcimporter.IImportShallow(fset, gcimporter.GetPackageFromMap(importMap), export, string(pkgPath), insert)
 		if err != nil {
 			return nil, bug.Errorf("invalid export data for %q: %v", pkgPath, err)
 		}
@@ -1230,7 +1232,7 @@ func toGobDiagnostic(posToLocation func(start, end token.Pos) (protocol.Location
 		// Severity for analysis diagnostics is dynamic, based on user
 		// configuration per analyzer.
 		// Code and CodeHref are unset for Analysis diagnostics,
-		// TODO(rfindley): set Code fields if/when golang/go#57906 is accepted.
+		// TODO(rfindley): derive Code fields from diag.URL.
 		Source:         diag.Category,
 		Message:        diag.Message,
 		SuggestedFixes: fixes,
