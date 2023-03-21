@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/objectpath"
+	"golang.org/x/tools/gopls/internal/lsp/filecache"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/source/methodsets"
@@ -633,34 +634,49 @@ const (
 )
 
 func (s *snapshot) PackageDiagnostics(ctx context.Context, ids ...PackageID) (map[span.URI][]*source.Diagnostic, error) {
-	// TODO(rfindley): opt: avoid unnecessary encode->decode after type-checking.
-	data, err := s.getPackageData(ctx, diagnosticsKind, ids, func(p *syntaxPackage) []byte {
-		return encodeDiagnostics(p.diagnostics)
-	})
+	var mu sync.Mutex
 	perFile := make(map[span.URI][]*source.Diagnostic)
-	for _, data := range data {
-		if data != nil {
-			for _, diag := range data.m.Diagnostics {
-				perFile[diag.URI] = append(perFile[diag.URI], diag)
-			}
-			diags := decodeDiagnostics(data.data)
-			for _, diag := range diags {
-				perFile[diag.URI] = append(perFile[diag.URI], diag)
-			}
+	collect := func(diags []*source.Diagnostic) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, diag := range diags {
+			perFile[diag.URI] = append(perFile[diag.URI], diag)
 		}
 	}
-	return perFile, err
+	pre := func(i int, ph *packageHandle) bool {
+		data, err := filecache.Get(diagnosticsKind, ph.key)
+		if err == nil { // hit
+			collect(ph.m.Diagnostics)
+			collect(decodeDiagnostics(data))
+			return false
+		} else if err != filecache.ErrNotFound {
+			event.Error(ctx, "reading diagnostics from filecache", err)
+		}
+		return true
+	}
+	post := func(_ int, pkg *Package) {
+		collect(pkg.m.Diagnostics)
+		collect(pkg.pkg.diagnostics)
+	}
+	return perFile, s.forEachPackage(ctx, ids, pre, post)
 }
 
 func (s *snapshot) References(ctx context.Context, ids ...PackageID) ([]source.XrefIndex, error) {
-	data, err := s.getPackageData(ctx, xrefsKind, ids, func(p *syntaxPackage) []byte { return p.xrefs })
 	indexes := make([]source.XrefIndex, len(ids))
-	for i, data := range data {
-		if data != nil {
-			indexes[i] = XrefIndex{m: data.m, data: data.data}
+	pre := func(i int, ph *packageHandle) bool {
+		data, err := filecache.Get(xrefsKind, ph.key)
+		if err == nil { // hit
+			indexes[i] = XrefIndex{m: ph.m, data: data}
+			return false
+		} else if err != filecache.ErrNotFound {
+			event.Error(ctx, "reading xrefs from filecache", err)
 		}
+		return true
 	}
-	return indexes, err
+	post := func(i int, pkg *Package) {
+		indexes[i] = XrefIndex{m: pkg.m, data: pkg.pkg.xrefs}
+	}
+	return indexes, s.forEachPackage(ctx, ids, pre, post)
 }
 
 // An XrefIndex is a helper for looking up a package in a given package.
@@ -674,21 +690,21 @@ func (index XrefIndex) Lookup(targets map[PackagePath]map[objectpath.Path]struct
 }
 
 func (s *snapshot) MethodSets(ctx context.Context, ids ...PackageID) ([]*methodsets.Index, error) {
-	// TODO(rfindley): opt: avoid unnecessary encode->decode after type-checking.
-	data, err := s.getPackageData(ctx, methodSetsKind, ids, func(p *syntaxPackage) []byte {
-		return p.methodsets.Encode()
-	})
 	indexes := make([]*methodsets.Index, len(ids))
-	for i, data := range data {
-		if data != nil {
-			indexes[i] = methodsets.Decode(data.data)
-		} else if ids[i] == "unsafe" {
-			indexes[i] = &methodsets.Index{}
-		} else {
-			panic(fmt.Sprintf("nil data for %s", ids[i]))
+	pre := func(i int, ph *packageHandle) bool {
+		data, err := filecache.Get(methodSetsKind, ph.key)
+		if err == nil { // hit
+			indexes[i] = methodsets.Decode(data)
+			return false
+		} else if err != filecache.ErrNotFound {
+			event.Error(ctx, "reading methodsets from filecache", err)
 		}
+		return true
 	}
-	return indexes, err
+	post := func(i int, pkg *Package) {
+		indexes[i] = pkg.pkg.methodsets
+	}
+	return indexes, s.forEachPackage(ctx, ids, pre, post)
 }
 
 func (s *snapshot) MetadataForFile(ctx context.Context, uri span.URI) ([]*source.Metadata, error) {
@@ -1222,6 +1238,42 @@ func (s *snapshot) ReadFile(ctx context.Context, uri span.URI) (source.FileHandl
 	defer s.mu.Unlock()
 
 	return lockedSnapshot{s}.ReadFile(ctx, uri)
+}
+
+// preloadFiles delegates to the view FileSource to read the requested uris in
+// parallel, without holding the snapshot lock.
+func (s *snapshot) preloadFiles(ctx context.Context, uris []span.URI) {
+	files := make([]source.FileHandle, len(uris))
+	var wg sync.WaitGroup
+	iolimit := make(chan struct{}, 20) // I/O concurrency limiting semaphore
+	for i, uri := range uris {
+		wg.Add(1)
+		iolimit <- struct{}{}
+		go func(i int, uri span.URI) {
+			defer wg.Done()
+			fh, err := s.view.fs.ReadFile(ctx, uri)
+			<-iolimit
+			if err != nil && ctx.Err() == nil {
+				event.Error(ctx, fmt.Sprintf("reading %s", uri), err)
+				return
+			}
+			files[i] = fh
+		}(i, uri)
+	}
+	wg.Wait()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, fh := range files {
+		if fh == nil {
+			continue // error logged above
+		}
+		uri := uris[i]
+		if _, ok := s.files.Get(uri); !ok {
+			s.files.Set(uri, fh)
+		}
+	}
 }
 
 // A lockedSnapshot implements the source.FileSource interface while holding
