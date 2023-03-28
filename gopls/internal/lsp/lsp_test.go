@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"golang.org/x/tools/gopls/internal/lsp/cache"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
@@ -25,7 +24,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/tests/compare"
 	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/bug"
-	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/testenv"
 )
@@ -769,35 +767,6 @@ func (r *runner) Definition(t *testing.T, _ span.Span, d tests.Definition) {
 	}
 }
 
-func (r *runner) Implementation(t *testing.T, spn span.Span, wantSpans []span.Span) {
-	sm, err := r.data.Mapper(spn.URI())
-	if err != nil {
-		t.Fatal(err)
-	}
-	loc, err := sm.SpanLocation(spn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotImpls, err := r.server.Implementation(r.ctx, &protocol.ImplementationParams{
-		TextDocumentPositionParams: protocol.LocationTextDocumentPositionParams(loc),
-	})
-	if err != nil {
-		t.Fatalf("Server.Implementation(%s): %v", spn, err)
-	}
-	gotLocs, err := tests.LocationsToSpans(r.data, gotImpls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sanitize := func(s string) string {
-		return strings.ReplaceAll(s, r.data.Config.Dir, "gopls/internal/lsp/testdata")
-	}
-	want := sanitize(tests.SortAndFormatSpans(wantSpans))
-	got := sanitize(tests.SortAndFormatSpans(gotLocs))
-	if got != want {
-		t.Errorf("implementations(%s):\n%s", sanitize(fmt.Sprint(spn)), diff.Unified("want", "got", want, got))
-	}
-}
-
 func (r *runner) Highlight(t *testing.T, src span.Span, spans []span.Span) {
 	m, err := r.data.Mapper(src.URI())
 	if err != nil {
@@ -1020,43 +989,6 @@ func applyTextDocumentEdits(r *runner, edits []protocol.DocumentChanges) (map[sp
 		}
 	}
 	return res, nil
-}
-
-func (r *runner) Symbols(t *testing.T, uri span.URI, expectedSymbols []protocol.DocumentSymbol) {
-	params := &protocol.DocumentSymbolParams{
-		TextDocument: protocol.TextDocumentIdentifier{
-			URI: protocol.URIFromSpanURI(uri),
-		},
-	}
-	got, err := r.server.DocumentSymbol(r.ctx, params)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	symbols := make([]protocol.DocumentSymbol, len(got))
-	for i, s := range got {
-		s, ok := s.(protocol.DocumentSymbol)
-		if !ok {
-			t.Fatalf("%v: wanted []DocumentSymbols but got %v", uri, got)
-		}
-		symbols[i] = s
-	}
-
-	// Sort by position to make it easier to find errors.
-	sortSymbols := func(s []protocol.DocumentSymbol) {
-		sort.Slice(s, func(i, j int) bool {
-			return protocol.CompareRange(s[i].SelectionRange, s[j].SelectionRange) < 0
-		})
-	}
-	sortSymbols(expectedSymbols)
-	sortSymbols(symbols)
-
-	// Ignore 'Range' here as it is difficult (impossible?) to express
-	// multi-line ranges in the packagestest framework.
-	ignoreRange := cmpopts.IgnoreFields(protocol.DocumentSymbol{}, "Range")
-	if diff := cmp.Diff(expectedSymbols, symbols, ignoreRange); diff != "" {
-		t.Errorf("mismatching symbols (-want +got)\n%s", diff)
-	}
 }
 
 func (r *runner) WorkspaceSymbols(t *testing.T, uri span.URI, query string, typ tests.WorkspaceSymbolsTestType) {
