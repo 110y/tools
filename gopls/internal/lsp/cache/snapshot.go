@@ -80,7 +80,10 @@ type snapshot struct {
 	// mu guards all of the maps in the snapshot, as well as the builtin URI.
 	mu sync.Mutex
 
-	// builtin pins the AST and package for builtin.go in memory.
+	// builtin is the location of builtin.go in GOROOT.
+	//
+	// TODO(rfindley): would it make more sense to eagerly parse builtin, and
+	// instead store a *ParsedGoFile here?
 	builtin span.URI
 
 	// meta holds loaded metadata.
@@ -1550,6 +1553,11 @@ func (s *snapshot) reloadWorkspace(ctx context.Context) error {
 	return err
 }
 
+// reloadOrphanedOpenFiles attempts to load a package for each open file that
+// does not yet have an associated package. If loading finishes without being
+// canceled, any files still not contained in a package are marked as unloadable.
+//
+// An error is returned if the load is canceled.
 func (s *snapshot) reloadOrphanedOpenFiles(ctx context.Context) error {
 	// When we load ./... or a package path directly, we may not get packages
 	// that exist only in overlays. As a workaround, we search all of the files
@@ -1583,22 +1591,35 @@ func (s *snapshot) reloadOrphanedOpenFiles(ctx context.Context) error {
 	// mark the failures so we don't bother retrying until the file's
 	// content changes.
 	//
-	// TODO(rstambler): This may be an overestimate if the load stopped
-	// early for an unrelated errors. Add a fallback?
+	// TODO(rfindley): is it possible that the the load stopped early for an
+	// unrelated errors? If so, add a fallback?
 	//
 	// Check for context cancellation so that we don't incorrectly mark files
 	// as unloadable, but don't return before setting all workspace packages.
-	if ctx.Err() == nil && err != nil {
-		event.Error(ctx, "reloadOrphanedFiles: failed to load", err, tag.Query.Of(scopes))
-		s.mu.Lock()
-		for _, scope := range scopes {
-			uri := span.URI(scope.(fileLoadScope))
-			if s.noValidMetadataForURILocked(uri) {
-				s.unloadableFiles[uri] = struct{}{}
-			}
-		}
-		s.mu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
+
+	// If the context was not canceled, we assume that the result of loading
+	// packages is deterministic (though as we saw in golang/go#59318, it may not
+	// be in the presence of bugs). Marking all unloaded files as unloadable here
+	// prevents us from falling into recursive reloading where we only make a bit
+	// of progress each time.
+	s.mu.Lock()
+	for _, scope := range scopes {
+		// TODO(rfindley): instead of locking here, we should have load return the
+		// metadata graph that resulted from loading.
+		uri := span.URI(scope.(fileLoadScope))
+		if s.noValidMetadataForURILocked(uri) {
+			s.unloadableFiles[uri] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+
+	if err != nil && !errors.Is(err, errNoPackages) {
+		event.Error(ctx, "reloadOrphanedFiles: failed to load", err, tag.Query.Of(scopes))
+	}
+
 	return nil
 }
 
@@ -2273,7 +2294,11 @@ func (s *snapshot) BuiltinFile(ctx context.Context) (*source.ParsedGoFile, error
 	// For the builtin file only, we need syntactic object resolution
 	// (since we can't type check).
 	mode := source.ParseFull &^ source.SkipObjectResolution
-	return parseGoImpl(ctx, token.NewFileSet(), fh, mode)
+	pgfs, err := s.parseCache.parseFiles(ctx, token.NewFileSet(), mode, fh)
+	if err != nil {
+		return nil, err
+	}
+	return pgfs[0], nil
 }
 
 func (s *snapshot) IsBuiltin(ctx context.Context, uri span.URI) bool {
