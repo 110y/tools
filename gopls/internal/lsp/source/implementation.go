@@ -88,6 +88,7 @@ func implementations(ctx context.Context, snapshot Snapshot, fh FileHandle, pp p
 	if err != nil {
 		return nil, err
 	}
+	RemoveIntermediateTestVariants(&declMetas)
 	if len(declMetas) == 0 {
 		return nil, fmt.Errorf("no packages for file %s", declURI)
 	}
@@ -163,6 +164,7 @@ func implementations(ctx context.Context, snapshot Snapshot, fh FileHandle, pp p
 	if err != nil {
 		return nil, err
 	}
+	RemoveIntermediateTestVariants(&globalMetas)
 	globalIDs := make([]PackageID, 0, len(globalMetas))
 	for _, m := range globalMetas {
 		if m.PkgPath == declPkg.Metadata().PkgPath {
@@ -244,7 +246,7 @@ func offsetToLocation(ctx context.Context, snapshot Snapshot, filename string, s
 func typeDeclPosition(ctx context.Context, snapshot Snapshot, uri span.URI, ppos protocol.Position) (token.Position, error) {
 	var noPosn token.Position
 
-	pkg, pgf, err := PackageForFile(ctx, snapshot, uri, WidestPackage)
+	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, uri)
 	if err != nil {
 		return noPosn, err
 	}

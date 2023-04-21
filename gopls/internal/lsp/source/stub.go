@@ -30,7 +30,7 @@ import (
 // methods of the concrete type that is assigned to an interface type
 // at the cursor position.
 func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh FileHandle, rng protocol.Range) (*token.FileSet, *analysis.SuggestedFix, error) {
-	pkg, pgf, err := PackageForFile(ctx, snapshot, fh.URI(), NarrowestPackage)
+	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetTypedFile: %w", err)
 	}
@@ -162,7 +162,7 @@ func stub(ctx context.Context, snapshot Snapshot, si *stubmethods.StubInfo) (*to
 	// Format the new methods.
 	var newMethods bytes.Buffer
 	for _, method := range missing {
-		fmt.Fprintf(&newMethods, `// %s implements %s
+		fmt.Fprintf(&newMethods, `// %s implements %s.
 func (%s%s%s) %s%s {
 	panic("unimplemented")
 }

@@ -178,7 +178,8 @@ type Snapshot interface {
 
 	// MetadataForFile returns a new slice containing metadata for each
 	// package containing the Go file identified by uri, ordered by the
-	// number of CompiledGoFiles (i.e. "narrowest" to "widest" package).
+	// number of CompiledGoFiles (i.e. "narrowest" to "widest" package),
+	// and secondarily by IsIntermediateTestVariant (false < true).
 	// The result may include tests and intermediate test variants of
 	// importable packages.
 	// It returns an error if the context was cancelled.
@@ -188,6 +189,12 @@ type Snapshot interface {
 	// and returns them in the same order as the ids.
 	// The resulting packages' types may belong to different importers,
 	// so types from different packages are incommensurable.
+	//
+	// In general, clients should never need to type-checked
+	// syntax for an intermediate test variant (ITV) package.
+	// Callers should apply RemoveIntermediateTestVariants (or
+	// equivalent) before this method, or any of the potentially
+	// type-checking methods below.
 	TypeCheck(ctx context.Context, ids ...PackageID) ([]Package, error)
 
 	// PackageDiagnostics returns diagnostics for files contained in specified
@@ -215,6 +222,21 @@ type Snapshot interface {
 	GetCriticalError(ctx context.Context) *CriticalError
 }
 
+// NarrowestMetadataForFile returns metadata for the narrowest package
+// (the one with the fewest files) that encloses the specified file.
+// The result may be a test variant, but never an intermediate test variant.
+func NarrowestMetadataForFile(ctx context.Context, snapshot Snapshot, uri span.URI) (*Metadata, error) {
+	metas, err := snapshot.MetadataForFile(ctx, uri)
+	if err != nil {
+		return nil, err
+	}
+	RemoveIntermediateTestVariants(&metas)
+	if len(metas) == 0 {
+		return nil, fmt.Errorf("no package metadata for file %s", uri)
+	}
+	return metas[0], nil
+}
+
 type XrefIndex interface {
 	Lookup(targets map[PackagePath]map[objectpath.Path]struct{}) (locs []protocol.Location)
 }
@@ -225,28 +247,34 @@ func SnapshotLabels(snapshot Snapshot) []label.Label {
 	return []label.Label{tag.Snapshot.Of(snapshot.SequenceID()), tag.Directory.Of(snapshot.View().Folder())}
 }
 
-// PackageForFile is a convenience function that selects a package to
-// which this file belongs (narrowest or widest), type-checks it in
-// the requested mode (full or workspace), and returns it, along with
-// the parse tree of that file.
+// NarrowestPackageForFile is a convenience function that selects the
+// narrowest non-ITV package to which this file belongs, type-checks
+// it in the requested mode (full or workspace), and returns it, along
+// with the parse tree of that file.
+//
+// The "narrowest" package is the one with the fewest number of files
+// that includes the given file. This solves the problem of test
+// variants, as the test will have more files than the non-test package.
+// (Historically the preference was a parameter but widest was almost
+// never needed.)
+//
+// An intermediate test variant (ITV) package has identical source
+// to a regular package but resolves imports differently.
+// gopls should never need to type-check them.
 //
 // Type-checking is expensive. Call snapshot.ParseGo if all you need
 // is a parse tree, or snapshot.MetadataForFile if you only need metadata.
-func PackageForFile(ctx context.Context, snapshot Snapshot, uri span.URI, pkgSel PackageSelector) (Package, *ParsedGoFile, error) {
+func NarrowestPackageForFile(ctx context.Context, snapshot Snapshot, uri span.URI) (Package, *ParsedGoFile, error) {
 	metas, err := snapshot.MetadataForFile(ctx, uri)
 	if err != nil {
 		return nil, nil, err
 	}
+	RemoveIntermediateTestVariants(&metas)
 	if len(metas) == 0 {
 		return nil, nil, fmt.Errorf("no package metadata for file %s", uri)
 	}
-	switch pkgSel {
-	case NarrowestPackage:
-		metas = metas[:1]
-	case WidestPackage:
-		metas = metas[len(metas)-1:]
-	}
-	pkgs, err := snapshot.TypeCheck(ctx, metas[0].ID)
+	narrowest := metas[0]
+	pkgs, err := snapshot.TypeCheck(ctx, narrowest.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -257,23 +285,6 @@ func PackageForFile(ctx context.Context, snapshot Snapshot, uri span.URI, pkgSel
 	}
 	return pkg, pgf, err
 }
-
-// PackageSelector sets how a package is selected out from a set of packages
-// containing a given file.
-type PackageSelector int
-
-const (
-	// NarrowestPackage picks the "narrowest" package for a given file.
-	// By "narrowest" package, we mean the package with the fewest number of
-	// files that includes the given file. This solves the problem of test
-	// variants, as the test will have more files than the non-test package.
-	NarrowestPackage PackageSelector = iota
-
-	// WidestPackage returns the Package containing the most files.
-	// This is useful for something like diagnostics, where we'd prefer to
-	// offer diagnostics for as many files as possible.
-	WidestPackage
-)
 
 // InvocationFlags represents the settings of a particular go command invocation.
 // It is a mode, plus a set of flag bits.
@@ -499,6 +510,7 @@ type TidiedModule struct {
 }
 
 // Metadata represents package metadata retrieved from go/packages.
+// The Deps* maps do not contain self-import edges.
 type Metadata struct {
 	ID              PackageID
 	PkgPath         PackagePath
@@ -507,7 +519,7 @@ type Metadata struct {
 	CompiledGoFiles []span.URI
 	ForTest         PackagePath // package path under test, or ""
 	TypesSizes      types.Sizes
-	Errors          []packages.Error
+	Errors          []packages.Error          // must be set for packages in import cycles
 	DepsByImpPath   map[ImportPath]PackageID  // may contain dups; empty ID => missing
 	DepsByPkgPath   map[PackagePath]PackageID // values are unique and non-empty
 	Module          *packages.Module
@@ -519,7 +531,10 @@ type Metadata struct {
 func (m *Metadata) String() string { return string(m.ID) }
 
 // IsIntermediateTestVariant reports whether the given package is an
-// intermediate test variant, e.g. "net/http [net/url.test]".
+// intermediate test variant (ITV), e.g. "net/http [net/url.test]".
+//
+// An ITV has identical syntax to the regular variant, but different
+// import metadata (DepsBy{Imp,Pkg}Path).
 //
 // Such test variants arise when an x_test package (in this case net/url_test)
 // imports a package (in this case net/http) that itself imports the the
@@ -527,7 +542,7 @@ func (m *Metadata) String() string { return string(m.ID) }
 //
 // This is done so that the forward transitive closure of net/url_test has
 // only one package for the "net/url" import.
-// The intermediate test variant exists to hold the test variant import:
+// The ITV exists to hold the test variant import:
 //
 // net/url_test [net/url.test]
 //
@@ -548,19 +563,86 @@ func (m *Metadata) String() string { return string(m.ID) }
 // variants can result in many additional packages that are essentially (but
 // not quite) identical. For this reason, we filter these variants wherever
 // possible.
+//
+// # Why we mostly ignore intermediate test variants
+//
+// In projects with complicated tests, there may be a very large
+// number of ITVs--asymptotically more than the number of ordinary
+// variants. Since they have identical syntax, it is fine in most
+// cases to ignore them since the results of analyzing the ordinary
+// variant suffice. However, this is not entirely sound.
+//
+// Consider this package:
+//
+//	// p/p.go -- in all variants of p
+//	package p
+//	type T struct { io.Closer }
+//
+//	// p/p_test.go -- in test variant of p
+//	package p
+//	func (T) Close() error { ... }
+//
+// The ordinary variant "p" defines T with a Close method promoted
+// from io.Closer. But its test variant "p [p.test]" defines a type T
+// with a Close method from p_test.go.
+//
+// Now consider a package q that imports p, perhaps indirectly. Within
+// it, T.Close will resolve to the first Close method:
+//
+//	// q/q.go -- in all variants of q
+//	package q
+//	import "p"
+//	var _ = new(p.T).Close
+//
+// Let's assume p also contains this file defining an external test (xtest):
+//
+//	// p/p_x_test.go -- external test of p
+//	package p_test
+//	import ( "q"; "testing" )
+//	func Test(t *testing.T) { ... }
+//
+// Note that q imports p, but p's xtest imports q. Now, in "q
+// [p.test]", the intermediate test variant of q built for p's
+// external test, T.Close resolves not to the io.Closer.Close
+// interface method, but to the concrete method of T.Close
+// declared in p_test.go.
+//
+// If we now request all references to the T.Close declaration in
+// p_test.go, the result should include the reference from q's ITV.
+// (It's not just methods that can be affected; fields can too, though
+// it requires bizarre code to achieve.)
+//
+// As a matter of policy, gopls mostly ignores this subtlety,
+// because to account for it would require that we type-check every
+// intermediate test variant of p, of which there could be many.
+// Good code doesn't rely on such trickery.
+//
+// Most callers of MetadataForFile call RemoveIntermediateTestVariants
+// to discard them before requesting type checking, or the products of
+// type-checking such as the cross-reference index or method set index.
+//
+// MetadataForFile doesn't do this filtering itself becaused in some
+// cases we need to make a reverse dependency query on the metadata
+// graph, and it's important to include the rdeps of ITVs in that
+// query. But the filtering of ITVs should be applied after that step,
+// before type checking.
+//
+// In general, we should never type check an ITV.
 func (m *Metadata) IsIntermediateTestVariant() bool {
 	return m.ForTest != "" && m.ForTest != m.PkgPath && m.ForTest+"_test" != m.PkgPath
 }
 
 // RemoveIntermediateTestVariants removes intermediate test variants, modifying the array.
-func RemoveIntermediateTestVariants(metas []*Metadata) []*Metadata {
+// We use a pointer to a slice make it impossible to forget to use the result.
+func RemoveIntermediateTestVariants(pmetas *[]*Metadata) {
+	metas := *pmetas
 	res := metas[:0]
 	for _, m := range metas {
 		if !m.IsIntermediateTestVariant() {
 			res = append(res, m)
 		}
 	}
-	return res
+	*pmetas = res
 }
 
 var ErrViewExists = errors.New("view already exists for session")
