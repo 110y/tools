@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/span"
-	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/gocommand"
@@ -712,8 +712,9 @@ func containsFileInWorkspaceLocked(s *snapshot, m *source.Metadata) bool {
 	return false
 }
 
-// computeWorkspacePackagesLocked computes workspace packages in the snapshot s
-// for the given metadata graph.
+// computeWorkspacePackagesLocked computes workspace packages in the
+// snapshot s for the given metadata graph. The result does not
+// contain intermediate test variants.
 //
 // s.mu must be held while calling this function.
 func computeWorkspacePackagesLocked(s *snapshot, meta *metadataGraph) map[PackageID]PackagePath {
@@ -747,6 +748,7 @@ func computeWorkspacePackagesLocked(s *snapshot, meta *metadataGraph) map[Packag
 			//
 			// Notably, this excludes intermediate test variants from workspace
 			// packages.
+			assert(!m.IsIntermediateTestVariant(), "unexpected ITV")
 			workspacePackages[m.ID] = m.ForTest
 		}
 	}

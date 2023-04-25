@@ -15,13 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/lsp/mod"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/template"
 	"golang.org/x/tools/gopls/internal/lsp/work"
 	"golang.org/x/tools/gopls/internal/span"
-	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 )
@@ -181,24 +181,17 @@ func (s *Server) diagnoseSnapshot(snapshot source.Snapshot, changedURIs []span.U
 		// does not analyze) packages directly affected by
 		// file modifications.
 		//
-		// The second phase runs analysis on the entire snapshot,
-		// and is debounced by the configured delay.
+		// The second phase runs after the delay, and does everything.
 		s.diagnoseChangedFiles(ctx, snapshot, changedURIs, onDisk)
 		s.publishDiagnostics(ctx, false, snapshot)
 
-		// We debounce diagnostics separately for each view, using the snapshot
-		// local ID as logical ordering.
-		//
-		// TODO(rfindley): it would be cleaner to simply put the diagnostic
-		// debouncer on the view, and remove the "key" argument to debouncing.
-		if ok := <-s.diagDebouncer.debounce(ctx, snapshot.View().ID(), uint64(snapshot.GlobalID()), time.After(delay)); ok {
-			s.diagnose(ctx, snapshot, analyzeOpenPackages)
-			s.publishDiagnostics(ctx, true, snapshot)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return
 		}
-		return
 	}
 
-	// Ignore possible workspace configuration warnings in the normal flow.
 	s.diagnose(ctx, snapshot, analyzeOpenPackages)
 	s.publishDiagnostics(ctx, true, snapshot)
 }
@@ -323,8 +316,8 @@ func (s *Server) diagnose(ctx context.Context, snapshot source.Snapshot, analyze
 	}
 	store(modVulncheckSource, "diagnosing vulnerabilities", vulnReports, vulnErr, false)
 
-	activeMetas, activeErr := snapshot.WorkspaceMetadata(ctx)
-	if s.shouldIgnoreError(ctx, snapshot, activeErr) {
+	workspace, err := snapshot.WorkspaceMetadata(ctx)
+	if s.shouldIgnoreError(ctx, snapshot, err) {
 		return
 	}
 	criticalErr := snapshot.CriticalError(ctx)
@@ -346,7 +339,7 @@ func (s *Server) diagnose(ctx context.Context, snapshot source.Snapshot, analyze
 
 	// If there are no workspace packages, there is nothing to diagnose and
 	// there are no orphaned files.
-	if len(activeMetas) == 0 {
+	if len(workspace) == 0 {
 		return
 	}
 
@@ -368,7 +361,7 @@ func (s *Server) diagnose(ctx context.Context, snapshot source.Snapshot, analyze
 		toDiagnose = make(map[source.PackageID]*source.Metadata)
 		toAnalyze  = make(map[source.PackageID]*source.Metadata)
 	)
-	for _, m := range activeMetas {
+	for _, m := range workspace {
 		var hasNonIgnored, hasOpenFile bool
 		for _, uri := range m.CompiledGoFiles {
 			seen[uri] = struct{}{}

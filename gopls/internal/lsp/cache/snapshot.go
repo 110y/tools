@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/objectpath"
+	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/lsp/filecache"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
@@ -36,7 +37,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/source/typerefs"
 	"golang.org/x/tools/gopls/internal/lsp/source/xrefs"
 	"golang.org/x/tools/gopls/internal/span"
-	"golang.org/x/tools/internal/bug"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/gocommand"
@@ -126,7 +126,7 @@ type snapshot struct {
 	analyses *persistent.Map // from analysisKey to analysisPromise
 
 	// workspacePackages contains the workspace's packages, which are loaded
-	// when the view is created.
+	// when the view is created. It contains no intermediate test variants.
 	workspacePackages map[PackageID]PackagePath
 
 	// shouldLoad tracks packages that need to be reloaded, mapping a PackageID
