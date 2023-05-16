@@ -436,6 +436,57 @@ func TestGenericBodies(t *testing.T) {
 			c := *(any(v).(*C)); print(c)  /*@ types("p23.C")*/
 		}
 		`,
+		`
+		package p24
+
+		func a[T any](f func() [4]T) {
+			x := len(f())
+			print(x) /*@ types("int")*/
+		}
+
+		func b[T [4]any](f func() T) {
+			x := len(f())
+			print(x) /*@ types("int")*/
+		}
+
+		func c[T any](f func() *[4]T) {
+			x := len(f())
+			print(x) /*@ types("int")*/
+		}
+
+		func d[T *[4]any](f func() T) {
+			x := len(f())
+			print(x) /*@ types("int")*/
+		}
+		`,
+		`
+		package p25
+
+		func a[T any]() {
+			var f func() [4]T
+			for i, v := range f() {
+				print(i, v) /*@ types("int", "T")*/
+			}
+		}
+
+		func b[T [4]any](f func() T) {
+			for i, v := range f() {
+				print(i, v) /*@ types("int", "any")*/
+			}
+		}
+
+		func c[T any](f func() *[4]T) {
+			for i, v := range f() {
+				print(i, v) /*@ types("int", "T")*/
+			}
+		}
+
+		func d[T *[4]any](f func() T) {
+			for i, v := range f() {
+				print(i, v) /*@ types("int", "any")*/
+			}
+		}
+		`,
 	} {
 		contents := contents
 		pkgname := packageName(t, contents)
@@ -465,7 +516,7 @@ func TestGenericBodies(t *testing.T) {
 			p.Build()
 
 			// Collect calls to the builtin print function.
-			probes := make(map[*ssa.CallCommon]bool)
+			probes := make(map[*ssa.CallCommon]*ssa.Function)
 			for _, mem := range p.Members {
 				if fn, ok := mem.(*ssa.Function); ok {
 					for _, bb := range fn.Blocks {
@@ -473,7 +524,7 @@ func TestGenericBodies(t *testing.T) {
 							if i, ok := i.(ssa.CallInstruction); ok {
 								call := i.Common()
 								if b, ok := call.Value.(*ssa.Builtin); ok && b.Name() == "print" {
-									probes[i.Common()] = true
+									probes[i.Common()] = fn
 								}
 							}
 						}
@@ -517,6 +568,7 @@ func TestGenericBodies(t *testing.T) {
 				}
 				if got, want := fmt.Sprint(args), fmt.Sprint(note.Args); got != want {
 					t.Errorf("Arguments to print() were expected to be %q. got %q", want, got)
+					logFunction(t, probes[call])
 				}
 			}
 		})
@@ -555,6 +607,13 @@ func TestInstructionString(t *testing.T) {
 		return u
 	}
 
+	//@ instrs("f1b", "*ssa.Alloc", "new T (complit)")
+	//@ instrs("f1b", "*ssa.FieldAddr", "&t0.x [#0]")
+	func f1b[T ~struct{ x string }]() *T {
+		u := &T{"lorem"}
+		return u
+	}
+
 	//@ instrs("f2", "*ssa.TypeAssert", "typeassert t0.(interface{})")
 	//@ instrs("f2", "*ssa.Call", "invoke x.foo()")
 	func f2[T interface{ foo() string }](x T) {
@@ -567,6 +626,69 @@ func TestInstructionString(t *testing.T) {
 	func f3[T interface{ foo() string; comparable }](x T) {
 		_ = x.foo
 		_ = x.foo()
+	}
+
+	//@ instrs("f4", "*ssa.BinOp", "t1 + 1:int", "t2 < 4:int")
+	//@ instrs("f4", "*ssa.Call", "f()", "print(t2, t4)")
+	func f4[T [4]string](f func() T) {
+		for i, v := range f() {
+			print(i, v)
+		}
+	}
+
+	//@ instrs("f5", "*ssa.Call", "nil:func()()")
+	func f5() {
+		var f func()
+		f()
+	}
+
+	type S struct{ f int }
+
+	//@ instrs("f6", "*ssa.Alloc", "new [1]P (slicelit)", "new S (complit)")
+	//@ instrs("f6", "*ssa.IndexAddr", "&t0[0:int]")
+	//@ instrs("f6", "*ssa.FieldAddr", "&t2.f [#0]")
+	func f6[P *S]() []P { return []P{{f: 1}} }
+
+	//@ instrs("f7", "*ssa.Alloc", "local S (complit)")
+	//@ instrs("f7", "*ssa.FieldAddr", "&t0.f [#0]")
+	func f7[T any, S struct{f T}](x T) S { return S{f: x} }
+
+	//@ instrs("f8", "*ssa.Alloc", "new [1]P (slicelit)", "new struct{f T} (complit)")
+	//@ instrs("f8", "*ssa.IndexAddr", "&t0[0:int]")
+	//@ instrs("f8", "*ssa.FieldAddr", "&t2.f [#0]")
+	func f8[T any, P *struct{f T}](x T) []P { return []P{{f: x}} }
+
+	//@ instrs("f9", "*ssa.Alloc", "new [1]PS (slicelit)", "new S (complit)")
+	//@ instrs("f9", "*ssa.IndexAddr", "&t0[0:int]")
+	//@ instrs("f9", "*ssa.FieldAddr", "&t2.f [#0]")
+	func f9[T any, S struct{f T}, PS *S](x T) {
+		_ = []PS{{f: x}}
+	}
+
+	//@ instrs("f10", "*ssa.FieldAddr", "&t0.x [#0]")
+	//@ instrs("f10", "*ssa.Store", "*t0 = *new(T):T", "*t1 = 4:int")
+	func f10[T ~struct{ x, y int }]() T {
+		var u T
+		u = T{x: 4}
+		return u
+	}
+
+	//@ instrs("f11", "*ssa.FieldAddr", "&t1.y [#1]")
+	//@ instrs("f11", "*ssa.Store", "*t1 = *new(T):T", "*t2 = 5:int")
+	func f11[T ~struct{ x, y int }, PT *T]() PT {
+		var u PT = new(T)
+		*u = T{y: 5}
+		return u
+	}
+
+	//@ instrs("f12", "*ssa.Alloc", "new struct{f T} (complit)")
+	//@ instrs("f12", "*ssa.MakeMap", "make map[P]bool 1:int")
+	func f12[T any, P *struct{f T}](x T) map[P]bool { return map[P]bool{{}: true} }
+
+	//@ instrs("f13", "&v[0:int]")
+	//@ instrs("f13", "*ssa.Store", "*t0 = 7:int", "*v = *new(A):A")
+	func f13[A [3]int, PA *A](v PA) {
+		*v = A{7}
 	}
 	`
 

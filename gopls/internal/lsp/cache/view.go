@@ -424,7 +424,7 @@ func viewEnv(v *View) string {
 		v.folder.Filename(),
 		v.workingDir().Filename(),
 		strings.TrimRight(v.workspaceInformation.goversionOutput, "\n"),
-		v.snapshot.ValidBuildConfiguration(),
+		v.snapshot.validBuildConfiguration(),
 		buildFlags,
 		v.goEnv,
 	)
@@ -752,16 +752,18 @@ func (s *snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 			// errors.
 			fh, err := s.ReadFile(ctx, modURI)
 			if err != nil {
-				if ctx.Err() == nil {
-					addError(modURI, err)
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
+				addError(modURI, err)
 				continue
 			}
 			parsed, err := s.ParseMod(ctx, fh)
 			if err != nil {
-				if ctx.Err() == nil {
-					addError(modURI, err)
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
+				addError(modURI, err)
 				continue
 			}
 			if parsed.File == nil || parsed.File.Module == nil {
