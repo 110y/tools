@@ -159,10 +159,10 @@ type snapshot struct {
 	modWhyHandles  *persistent.Map // from span.URI to *memoize.Promise[modWhyResult]
 	modVulnHandles *persistent.Map // from span.URI to *memoize.Promise[modVulnResult]
 
-	// knownSubdirs is the set of subdirectories in the workspace, used to
-	// create glob patterns for file watching.
-	knownSubdirs             knownDirsSet
-	knownSubdirsPatternCache string
+	// knownSubdirs is the set of subdirectory URIs in the workspace,
+	// used to create glob patterns for file watching.
+	knownSubdirs      knownDirsSet
+	knownSubdirsCache map[string]struct{} // memo of knownSubdirs as a set of filenames
 	// unprocessedSubdirChanges are any changes that might affect the set of
 	// subdirectories in the workspace. They are not reflected to knownSubdirs
 	// during the snapshot cloning step as it can slow down cloning.
@@ -624,21 +624,11 @@ func (s *snapshot) buildOverlay() map[string][]byte {
 	return overlays
 }
 
-// TODO(rfindley): investigate whether it would be worthwhile to keep track of
-// overlays when we get them via GetFile.
 func (s *snapshot) overlays() []*Overlay {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var overlays []*Overlay
-	s.files.Range(func(uri span.URI, fh source.FileHandle) {
-		overlay, ok := fh.(*Overlay)
-		if !ok {
-			return
-		}
-		overlays = append(overlays, overlay)
-	})
-	return overlays
+	return s.files.overlays()
 }
 
 // Package data kinds, identifying various package data that may be stored in
@@ -946,19 +936,31 @@ func (s *snapshot) fileWatchingGlobPatterns(ctx context.Context) map[string]stru
 		patterns[fmt.Sprintf("%s/**/*.{%s}", dirName, extensions)] = struct{}{}
 	}
 
-	// Some clients do not send notifications for changes to directories that
-	// contain Go code (golang/go#42348). To handle this, explicitly watch all
-	// of the directories in the workspace. We find them by adding the
-	// directories of every file in the snapshot's workspace directories.
-	// There may be thousands.
-	if pattern := s.getKnownSubdirsPattern(dirs); pattern != "" {
-		patterns[pattern] = struct{}{}
-	}
+	// Some clients (e.g. VSCode) do not send notifications for
+	// changes to directories that contain Go code (golang/go#42348).
+	// To handle this, explicitly watch all of the directories in
+	// the workspace. We find them by adding the directories of
+	// every file in the snapshot's workspace directories.
+	// There may be thousands of patterns, each a single directory.
+	//
+	// (A previous iteration created a single glob pattern holding a
+	// union of all the directories, but this was found to cause
+	// VSCode to get stuck for several minutes after a buffer was
+	// saved twice in a workspace that had >8000 watched directories.)
+	//
+	// Some clients (notably coc.nvim, which uses watchman for
+	// globs) perform poorly with a large list of individual
+	// directories, though they work fine with one large
+	// comma-separated element. Sadly no one size fits all, so we
+	// may have to resort to sniffing the client to determine the
+	// best behavior, though that would set a poor precedent.
+	// TODO(adonovan): improve the nvim situation.
+	s.addKnownSubdirs(patterns, dirs)
 
 	return patterns
 }
 
-func (s *snapshot) getKnownSubdirsPattern(wsDirs []span.URI) string {
+func (s *snapshot) addKnownSubdirs(patterns map[string]struct{}, wsDirs []span.URI) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -967,23 +969,18 @@ func (s *snapshot) getKnownSubdirsPattern(wsDirs []span.URI) string {
 	// It may change list of known subdirs and therefore invalidate the cache.
 	s.applyKnownSubdirsChangesLocked(wsDirs)
 
-	if s.knownSubdirsPatternCache == "" {
-		var builder strings.Builder
+	// TODO(adonovan): is it still necessary to memoize the Range
+	// and URI.Filename operations?
+	if s.knownSubdirsCache == nil {
+		s.knownSubdirsCache = make(map[string]struct{})
 		s.knownSubdirs.Range(func(uri span.URI) {
-			if builder.Len() == 0 {
-				builder.WriteString("{")
-			} else {
-				builder.WriteString(",")
-			}
-			builder.WriteString(uri.Filename())
+			s.knownSubdirsCache[uri.Filename()] = struct{}{}
 		})
-		if builder.Len() > 0 {
-			builder.WriteString("}")
-			s.knownSubdirsPatternCache = builder.String()
-		}
 	}
 
-	return s.knownSubdirsPatternCache
+	for pattern := range s.knownSubdirsCache {
+		patterns[pattern] = struct{}{}
+	}
 }
 
 // collectAllKnownSubdirs collects all of the subdirectories within the
@@ -997,7 +994,7 @@ func (s *snapshot) collectAllKnownSubdirs(ctx context.Context) {
 
 	s.knownSubdirs.Destroy()
 	s.knownSubdirs = newKnownDirsSet()
-	s.knownSubdirsPatternCache = ""
+	s.knownSubdirsCache = nil
 	s.files.Range(func(uri span.URI, fh source.FileHandle) {
 		s.addKnownSubdirLocked(uri, dirs)
 	})
@@ -1056,7 +1053,7 @@ func (s *snapshot) addKnownSubdirLocked(uri span.URI, dirs []span.URI) {
 		}
 		s.knownSubdirs.Insert(uri)
 		dir = filepath.Dir(dir)
-		s.knownSubdirsPatternCache = ""
+		s.knownSubdirsCache = nil
 	}
 }
 
@@ -1069,7 +1066,7 @@ func (s *snapshot) removeKnownSubdirLocked(uri span.URI) {
 		}
 		if info, _ := os.Stat(dir); info == nil {
 			s.knownSubdirs.Remove(uri)
-			s.knownSubdirsPatternCache = ""
+			s.knownSubdirsCache = nil
 		}
 		dir = filepath.Dir(dir)
 	}
@@ -2034,7 +2031,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 	// changed files. We need to rebuild the workspace module to know the
 	// true set of known subdirectories, but we don't want to do that in clone.
 	result.knownSubdirs = s.knownSubdirs.Clone()
-	result.knownSubdirsPatternCache = s.knownSubdirsPatternCache
+	result.knownSubdirsCache = s.knownSubdirsCache
 	for _, c := range changes {
 		result.unprocessedSubdirChanges = append(result.unprocessedSubdirChanges, c)
 	}
@@ -2093,10 +2090,36 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		// Invalidate the previous modTidyHandle if any of the files have been
 		// saved or if any of the metadata has been invalidated.
 		if invalidateMetadata || fileWasSaved(originalFH, change.fileHandle) {
-			// TODO(maybe): Only delete mod handles for
-			// which the withoutURI is relevant.
-			// Requires reverse-engineering the go command. (!)
-			result.modTidyHandles.Clear()
+			// Only invalidate mod tidy results for the most relevant modfile in the
+			// workspace. This is a potentially lossy optimization for workspaces
+			// with many modules (such as google-cloud-go, which has 145 modules as
+			// of writing).
+			//
+			// While it is theoretically possible that a change in workspace module A
+			// could affect the mod-tidiness of workspace module B (if B transitively
+			// requires A), such changes are probably unlikely and not worth the
+			// penalty of re-running go mod tidy for everything. Note that mod tidy
+			// ignores GOWORK, so the two modules would have to be related by a chain
+			// of replace directives.
+			//
+			// We could improve accuracy by inspecting replace directives, using
+			// overlays in go mod tidy, and/or checking for metadata changes from the
+			// on-disk content.
+			//
+			// Note that we iterate the modTidyHandles map here, rather than e.g.
+			// using nearestModFile, because we don't have access to an accurate
+			// FileSource at this point in the snapshot clone.
+			const onlyInvalidateMostRelevant = true
+			if onlyInvalidateMostRelevant {
+				deleteMostRelevantModFile(result.modTidyHandles, uri)
+			} else {
+				result.modTidyHandles.Clear()
+			}
+
+			// TODO(rfindley): should we apply the above heuristic to mod vuln
+			// or mod handles as well?
+			//
+			// TODO(rfindley): no tests fail if I delete the below line.
 			result.modWhyHandles.Clear()
 			result.modVulnHandles.Clear()
 		}
@@ -2285,6 +2308,31 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 		result.workspacePackages = map[PackageID]PackagePath{}
 	}
 	return result, release
+}
+
+// deleteMostRelevantModFile deletes the mod file most likely to be the mod
+// file for the changed URI, if it exists.
+//
+// Specifically, this is the longest mod file path in a directory containing
+// changed. This might not be accurate if there is another mod file closer to
+// changed that happens not to be present in the map, but that's OK: the goal
+// of this function is to guarantee that IF the nearest mod file is present in
+// the map, it is invalidated.
+func deleteMostRelevantModFile(m *persistent.Map, changed span.URI) {
+	var mostRelevant span.URI
+	changedFile := changed.Filename()
+
+	m.Range(func(key, value interface{}) {
+		modURI := key.(span.URI)
+		if len(modURI) > len(mostRelevant) {
+			if source.InDir(filepath.Dir(modURI.Filename()), changedFile) {
+				mostRelevant = modURI
+			}
+		}
+	})
+	if mostRelevant != "" {
+		m.Delete(mostRelevant)
+	}
 }
 
 // invalidatedPackageIDs returns all packages invalidated by a change to uri.
