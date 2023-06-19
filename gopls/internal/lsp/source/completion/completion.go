@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
-
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/ast/astutil"
 	goplsastutil "golang.org/x/tools/gopls/internal/astutil"
@@ -41,7 +40,6 @@ import (
 
 // A CompletionItem represents a possible completion suggested by the algorithm.
 type CompletionItem struct {
-
 	// Invariant: CompletionItem does not refer to syntax or types.
 
 	// Label is the primary text the user sees for this completion item.
@@ -571,6 +569,8 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.FileHan
 	if c.opts.budget > 0 {
 		d := start.Add(c.opts.budget)
 		deadline = &d
+
+		ctx, cancel = context.WithTimeout(ctx, time.Until(d))
 	}
 
 	defer cancel()
