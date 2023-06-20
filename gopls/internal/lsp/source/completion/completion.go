@@ -24,7 +24,9 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
 	"golang.org/x/sync/errgroup"
+
 	"golang.org/x/tools/go/ast/astutil"
 	goplsastutil "golang.org/x/tools/gopls/internal/astutil"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
@@ -570,7 +572,7 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.FileHan
 		d := start.Add(c.opts.budget)
 		deadline = &d
 
-		ctx, cancel = context.WithTimeout(ctx, time.Until(d))
+		ctx, cancel = context.WithDeadline(ctx, d)
 	}
 
 	defer cancel()
