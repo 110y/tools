@@ -809,6 +809,9 @@ func TestExportInvalid(t *testing.T) {
 		// It must be possible to export a constant with unknown kind, even if its
 		// type is known.
 		{"issue 60605", `package p; const EPSILON float64 = 1e-`, "EPSILON"},
+
+		// We must not crash when exporting a struct with unknown package.
+		{"issue 60891", `package p; type I[P any] int; const C I[struct{}] = 42`, "C"},
 	}
 
 	for _, test := range tests {
@@ -838,8 +841,7 @@ func TestExportInvalid(t *testing.T) {
 
 			// Re-import it.
 			imports := make(map[string]*types.Package)
-			insert := func(pkg1 *types.Package, name string) { panic("unexpected insert") }
-			pkg2, err := IImportShallow(fset, GetPackageFromMap(imports), data, "p", insert)
+			pkg2, err := IImportShallow(fset, GetPackagesFromMap(imports), data, "p")
 			if err != nil {
 				t.Fatalf("import: %v", err) // any failure of IExport+IImport is a bug.
 			}
