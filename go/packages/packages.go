@@ -221,7 +221,7 @@ type driverResponse struct {
 	NotHandled bool
 
 	// Sizes, if not nil, is the types.Sizes to use when type checking.
-	Sizes *types.StdSizes
+	Sizes types.Sizes
 
 	// Roots is the set of package IDs that make up the root packages.
 	// We have to encode this separately because when we encode a single package
@@ -630,7 +630,7 @@ func newLoader(cfg *Config) *loader {
 	return ld
 }
 
-// refine connects the supplied packages into a graph and then adds type and
+// refine connects the supplied packages into a graph and then adds type
 // and syntax information as requested by the LoadMode.
 func (ld *loader) refine(response *driverResponse) ([]*Package, error) {
 	roots := response.Roots
