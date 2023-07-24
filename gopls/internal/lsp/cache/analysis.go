@@ -20,6 +20,7 @@ import (
 	"log"
 	urlpkg "net/url"
 	"reflect"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/lsp/filecache"
 	"golang.org/x/tools/gopls/internal/lsp/frob"
+	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/internal/event"
@@ -154,14 +156,23 @@ import (
 //        View() *View // for Options
 //   - share cache.{goVersionRx,parseGoImpl}
 
+// AnalysisProgressTitle is the title of the progress report for ongoing
+// analysis. It is sought by regression tests for the progress reporting
+// feature.
+const AnalysisProgressTitle = "Analyzing Dependencies"
+
 // Analyze applies a set of analyzers to the package denoted by id,
 // and returns their diagnostics for that package.
 //
 // The analyzers list must be duplicate free; order does not matter.
 //
+// Notifications of progress may be sent to the optional reporter.
+//
 // Precondition: all analyzers within the process have distinct names.
 // (The names are relied on by the serialization logic.)
-func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, analyzers []*source.Analyzer) ([]*source.Diagnostic, error) {
+func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, analyzers []*source.Analyzer, reporter *progress.Tracker) ([]*source.Diagnostic, error) {
+	start := time.Now() // for progress reporting
+
 	var tagStr string // sorted comma-separated list of PackageIDs
 	{
 		// TODO(adonovan): replace with a generic map[S]any -> string
@@ -280,6 +291,7 @@ func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 			atomic.AddInt32(&from.unfinishedSuccs, 1) // TODO(adonovan): use generics
 			an.preds = append(an.preds, from)
 		}
+		atomic.AddInt32(&an.unfinishedPreds, 1)
 		return an, nil
 	}
 
@@ -296,21 +308,84 @@ func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 
 	// Now that we have read all files,
 	// we no longer need the snapshot.
+	// (but options are needed for progress reporting)
+	options := snapshot.view.Options()
 	snapshot = nil
+
+	// Progress reporting. If supported, gopls reports progress on analysis
+	// passes that are taking a long time.
+	maybeReport := func(completed int64) {}
+
+	// Enable progress reporting if enabled by the user
+	// and we have a capable reporter.
+	if reporter != nil && reporter.SupportsWorkDoneProgress() && options.AnalysisProgressReporting {
+		var reportAfter = options.ReportAnalysisProgressAfter // tests may set this to 0
+		const reportEvery = 1 * time.Second
+
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		var (
+			reportMu   sync.Mutex
+			lastReport time.Time
+			wd         *progress.WorkDone
+		)
+		defer func() {
+			reportMu.Lock()
+			defer reportMu.Unlock()
+
+			if wd != nil {
+				wd.End(ctx, "Done.") // ensure that the progress report exits
+			}
+		}()
+		maybeReport = func(completed int64) {
+			now := time.Now()
+			if now.Sub(start) < reportAfter {
+				return
+			}
+
+			reportMu.Lock()
+			defer reportMu.Unlock()
+
+			if wd == nil {
+				wd = reporter.Start(ctx, AnalysisProgressTitle, "", nil, cancel)
+			}
+
+			if now.Sub(lastReport) > reportEvery {
+				lastReport = now
+				// Trailing space is intentional: some LSP clients strip newlines.
+				msg := fmt.Sprintf(`Constructing index of analysis facts... (%d/%d packages). 
+(Set "analysisProgressReporting" to false to disable notifications.)`,
+					completed, len(nodes))
+				pct := 100 * float64(completed) / float64(len(nodes))
+				wd.Report(ctx, msg, pct)
+			}
+		}
+	}
 
 	// Execute phase: run leaves first, adding
 	// new nodes to the queue as they become leaves.
 	var g errgroup.Group
-	// Avoid g.SetLimit here: it makes g.Go stop accepting work,
-	// which prevents workers from enqeuing, and thus finishing,
-	// and thus allowing the group to make progress: deadlock.
+
+	// Analysis is CPU-bound.
+	//
+	// Note: avoid g.SetLimit here: it makes g.Go stop accepting work, which
+	// prevents workers from enqeuing, and thus finishing, and thus allowing the
+	// group to make progress: deadlock.
+	limiter := make(chan unit, runtime.GOMAXPROCS(0))
+	var completed int64
+
 	var enqueue func(*analysisNode)
 	enqueue = func(an *analysisNode) {
 		g.Go(func() error {
+			limiter <- unit{}
+			defer func() { <-limiter }()
+
 			summary, err := an.runCached(ctx)
 			if err != nil {
 				return err // cancelled, or failed to produce a package
 			}
+			maybeReport(atomic.AddInt64(&completed, 1))
 			an.summary = summary
 
 			// Notify each waiting predecessor,
@@ -319,6 +394,14 @@ func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 				if atomic.AddInt32(&pred.unfinishedSuccs, -1) == 0 {
 					enqueue(pred)
 				}
+			}
+
+			// Notify each successor that we no longer need
+			// its action summaries, which hold Result values.
+			// After the last one, delete it, so that we
+			// free up large results such as SSA.
+			for _, succ := range an.succs {
+				succ.decrefPreds()
 			}
 			return nil
 		})
@@ -377,6 +460,12 @@ func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 	return results, nil
 }
 
+func (an *analysisNode) decrefPreds() {
+	if atomic.AddInt32(&an.unfinishedPreds, -1) == 0 {
+		an.summary.Actions = nil
+	}
+}
+
 // An analysisNode is a node in a doubly-linked DAG isomorphic to the
 // import graph. Each node represents a single package, and the DAG
 // represents a batch of analysis work done at once using a single
@@ -408,6 +497,7 @@ type analysisNode struct {
 	preds           []*analysisNode             // graph edges:
 	succs           map[PackageID]*analysisNode //   (preds -> self -> succs)
 	unfinishedSuccs int32
+	unfinishedPreds int32                         // effectively a summary.Actions refcount
 	allDeps         map[PackagePath]*analysisNode // all dependencies including self
 	exportDeps      map[PackagePath]*analysisNode // subset of allDeps ref'd by export data (+self)
 	summary         *analyzeSummary               // serializable result of analyzing this package
@@ -568,7 +658,14 @@ func (an *analysisNode) runCached(ctx context.Context) (*analyzeSummary, error) 
 		if err != nil {
 			return nil, err
 		}
+
+		atomic.AddInt32(&an.unfinishedPreds, +1) // incref
 		go func() {
+			defer an.decrefPreds() //decref
+
+			cacheLimit <- unit{}            // acquire token
+			defer func() { <-cacheLimit }() // release token
+
 			data := analyzeSummaryCodec.Encode(summary)
 			if false {
 				log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.m.ID)
@@ -581,6 +678,10 @@ func (an *analysisNode) runCached(ctx context.Context) (*analyzeSummary, error) 
 
 	return summary, nil
 }
+
+// cacheLimit reduces parallelism of cache updates.
+// We allow more than typical GOMAXPROCS as it's a mix of CPU and I/O.
+var cacheLimit = make(chan unit, 32)
 
 // analysisCacheKey returns a cache key that is a cryptographic digest
 // of the all the values that might affect type checking and analysis:
@@ -673,6 +774,7 @@ func (an *analysisNode) run(ctx context.Context) (*analyzeSummary, error) {
 	parsed := make([]*source.ParsedGoFile, len(an.files))
 	{
 		var group errgroup.Group
+		group.SetLimit(4) // not too much: run itself is already called in parallel
 		for i, fh := range an.files {
 			i, fh := i, fh
 			group.Go(func() error {
@@ -680,7 +782,7 @@ func (an *analysisNode) run(ctx context.Context) (*analyzeSummary, error) {
 				// as cached ASTs require the global FileSet.
 				// ast.Object resolution is unfortunately an implied part of the
 				// go/analysis contract.
-				pgf, err := parseGoImpl(ctx, an.fset, fh, source.ParseFull&^source.SkipObjectResolution)
+				pgf, err := parseGoImpl(ctx, an.fset, fh, source.ParseFull&^source.SkipObjectResolution, false)
 				parsed[i] = pgf
 				return err
 			})
@@ -1098,7 +1200,7 @@ func (act *action) exec() (interface{}, *actionSummary, error) {
 	// of PkgPaths and objectpaths.)
 
 	// Read and decode analysis facts for each direct import.
-	factset, err := pkg.factsDecoder.Decode(func(pkgPath string) ([]byte, error) {
+	factset, err := pkg.factsDecoder.Decode(true, func(pkgPath string) ([]byte, error) {
 		if !hasFacts {
 			return nil, nil // analyzer doesn't use facts, so no vdeps
 		}
@@ -1240,7 +1342,7 @@ func (act *action) exec() (interface{}, *actionSummary, error) {
 		panic(fmt.Sprintf("%v: Pass.ExportPackageFact(%T) called after Run", act, fact))
 	}
 
-	factsdata := factset.Encode()
+	factsdata := factset.Encode(true)
 	return result, &actionSummary{
 		Diagnostics: diagnostics,
 		Facts:       factsdata,
