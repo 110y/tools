@@ -184,16 +184,6 @@ type snapshot struct {
 	// detect ignored files.
 	ignoreFilterOnce sync.Once
 	ignoreFilter     *ignoreFilter
-
-	// If non-nil, the result of computing orphaned file diagnostics.
-	//
-	// Only the field, not the map itself, is guarded by the mutex. The map must
-	// not be mutated.
-	//
-	// Used to save work across diagnostics+code action passes.
-	// TODO(rfindley): refactor all of this so there's no need to re-evaluate
-	// diagnostics during code-action.
-	orphanedFileDiagnostics map[span.URI]*source.Diagnostic
 }
 
 var globalSnapshotID uint64
@@ -864,26 +854,21 @@ func (s *snapshot) getActivePackage(id PackageID) *Package {
 	return nil
 }
 
-// memoizeActivePackage checks if pkg is active, and if so either records it in
+// setActivePackage checks if pkg is active, and if so either records it in
 // the active packages map or returns the existing memoized active package for id.
-//
-// The resulting package is non-nil if and only if the specified package is open.
-func (s *snapshot) memoizeActivePackage(id PackageID, pkg *Package) (active *Package) {
+func (s *snapshot) setActivePackage(id PackageID, pkg *Package) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if value, ok := s.activePackages.Get(id); ok {
-		return value.(*Package) // possibly nil, if we have already checked this id.
+	if _, ok := s.activePackages.Get(id); ok {
+		return // already memoized
 	}
-
-	defer func() {
-		s.activePackages.Set(id, active, nil) // store the result either way: remember that pkg is not open
-	}()
 
 	if containsOpenFileLocked(s, pkg.Metadata()) {
-		return pkg
+		s.activePackages.Set(id, pkg, nil)
+	} else {
+		s.activePackages.Set(id, (*Package)(nil), nil) // remember that pkg is not open
 	}
-	return nil
 }
 
 func (s *snapshot) resetActivePackagesLocked() {
@@ -1665,22 +1650,6 @@ func (s *snapshot) reloadOrphanedOpenFiles(ctx context.Context) error {
 // reloadOrphanedFiles. The latter does not include files with
 // command-line-arguments packages.
 func (s *snapshot) OrphanedFileDiagnostics(ctx context.Context) (map[span.URI]*source.Diagnostic, error) {
-	// Orphaned file diagnostics are queried from code actions to produce
-	// quick-fixes (and may be queried many times, once for each file).
-	//
-	// Because they are non-trivial to compute, record them optimistically to
-	// avoid most redundant work.
-	//
-	// This is a hacky workaround: in the future we should avoid recomputing
-	// anything when codeActions provide a diagnostic: simply read the published
-	// diagnostic, if it exists.
-	s.mu.Lock()
-	existing := s.orphanedFileDiagnostics
-	s.mu.Unlock()
-	if existing != nil {
-		return existing, nil
-	}
-
 	if err := s.awaitLoaded(ctx); err != nil {
 		return nil, err
 	}
@@ -1857,8 +1826,7 @@ https://github.com/golang/tools/blob/master/gopls/doc/settings.md#buildflags-str
 		}
 
 		if msg != "" {
-			// Only report diagnostics if we detect an actual exclusion.
-			diagnostics[fh.URI()] = &source.Diagnostic{
+			d := &source.Diagnostic{
 				URI:            fh.URI(),
 				Range:          rng,
 				Severity:       protocol.SeverityWarning,
@@ -1866,15 +1834,14 @@ https://github.com/golang/tools/blob/master/gopls/doc/settings.md#buildflags-str
 				Message:        msg,
 				SuggestedFixes: suggestedFixes,
 			}
+			if ok := source.BundleQuickFixes(d); !ok {
+				bug.Reportf("failed to bundle quick fixes for %v", d)
+			}
+			// Only report diagnostics if we detect an actual exclusion.
+			diagnostics[fh.URI()] = d
 		}
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.orphanedFileDiagnostics == nil { // another thread may have won the race
-		s.orphanedFileDiagnostics = diagnostics
-	}
-	return s.orphanedFileDiagnostics, nil
+	return diagnostics, nil
 }
 
 // TODO(golang/go#53756): this function needs to consider more than just the

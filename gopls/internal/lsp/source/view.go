@@ -886,6 +886,10 @@ type Analyzer struct {
 	// Severity is the severity set for diagnostics reported by this
 	// analyzer. If left unset it defaults to Warning.
 	Severity protocol.DiagnosticSeverity
+
+	// Tag is extra tags (unnecessary, deprecated, etc) for diagnostics
+	// reported by this analyzer.
+	Tag []protocol.DiagnosticTag
 }
 
 func (a *Analyzer) String() string { return a.Analyzer.String() }
@@ -933,13 +937,13 @@ type Package interface {
 	CompiledGoFiles() []*ParsedGoFile // (borrowed)
 	File(uri span.URI) (*ParsedGoFile, error)
 	GetSyntax() []*ast.File // (borrowed)
-	HasParseErrors() bool
+	GetParseErrors() []scanner.ErrorList
 
 	// Results of type checking:
 	GetTypes() *types.Package
+	GetTypeErrors() []types.Error
 	GetTypesInfo() *types.Info
 	DependencyTypes(PackagePath) *types.Package // nil for indirect dependency of no consequence
-	HasTypeErrors() bool
 	DiagnosticsForFile(ctx context.Context, s Snapshot, uri span.URI) ([]*Diagnostic, error)
 }
 

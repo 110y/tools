@@ -50,6 +50,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/unsafeptr"
 	"golang.org/x/tools/go/analysis/passes/unusedresult"
 	"golang.org/x/tools/go/analysis/passes/unusedwrite"
+	"golang.org/x/tools/gopls/internal/lsp/analysis/deprecated"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/embeddirective"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/fillreturns"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/fillstruct"
@@ -196,6 +197,22 @@ type Options struct {
 	UserOptions
 	InternalOptions
 	Hooks
+}
+
+// IsAnalyzerEnabled reports whether an analyzer with the given name is
+// enabled.
+//
+// TODO(rfindley): refactor to simplify this function. We no longer need the
+// different categories of analyzer.
+func (opts *Options) IsAnalyzerEnabled(name string) bool {
+	for _, amap := range []map[string]*Analyzer{opts.DefaultAnalyzers, opts.TypeErrorAnalyzers, opts.ConvenienceAnalyzers, opts.StaticcheckAnalyzers} {
+		for _, analyzer := range amap {
+			if analyzer.Analyzer.Name == name && analyzer.IsEnabled(opts) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ClientOptions holds LSP-specific configuration that is provided by the
@@ -1468,7 +1485,8 @@ func (r *OptionResult) setStringSlice(s *[]string) {
 func typeErrorAnalyzers() map[string]*Analyzer {
 	return map[string]*Analyzer{
 		fillreturns.Analyzer.Name: {
-			Analyzer:   fillreturns.Analyzer,
+			Analyzer: fillreturns.Analyzer,
+			// TODO(rfindley): is SourceFixAll even necessary here? Is that not implied?
 			ActionKind: []protocol.CodeActionKind{protocol.SourceFixAll, protocol.QuickFix},
 			Enabled:    true,
 		},
@@ -1492,6 +1510,8 @@ func typeErrorAnalyzers() map[string]*Analyzer {
 	}
 }
 
+// TODO(golang/go#61559): remove convenience analyzers now that they are not
+// used from the analysis framework.
 func convenienceAnalyzers() map[string]*Analyzer {
 	return map[string]*Analyzer{
 		fillstruct.Analyzer.Name: {
@@ -1501,10 +1521,9 @@ func convenienceAnalyzers() map[string]*Analyzer {
 			ActionKind: []protocol.CodeActionKind{protocol.RefactorRewrite},
 		},
 		stubmethods.Analyzer.Name: {
-			Analyzer:   stubmethods.Analyzer,
-			ActionKind: []protocol.CodeActionKind{protocol.RefactorRewrite},
-			Fix:        StubMethods,
-			Enabled:    true,
+			Analyzer: stubmethods.Analyzer,
+			Fix:      StubMethods,
+			Enabled:  true,
 		},
 		infertypeargs.Analyzer.Name: {
 			Analyzer:   infertypeargs.Analyzer,
@@ -1525,6 +1544,7 @@ func defaultAnalyzers() map[string]*Analyzer {
 		cgocall.Analyzer.Name:       {Analyzer: cgocall.Analyzer, Enabled: true},
 		composite.Analyzer.Name:     {Analyzer: composite.Analyzer, Enabled: true},
 		copylock.Analyzer.Name:      {Analyzer: copylock.Analyzer, Enabled: true},
+		deprecated.Analyzer.Name:    {Analyzer: deprecated.Analyzer, Enabled: true, Severity: protocol.SeverityHint, Tag: []protocol.DiagnosticTag{protocol.Deprecated}},
 		directive.Analyzer.Name:     {Analyzer: directive.Analyzer, Enabled: true},
 		errorsas.Analyzer.Name:      {Analyzer: errorsas.Analyzer, Enabled: true},
 		httpresponse.Analyzer.Name:  {Analyzer: httpresponse.Analyzer, Enabled: true},
