@@ -93,10 +93,30 @@ type pkgOrErr struct {
 // the type-checking operation.
 func (s *snapshot) TypeCheck(ctx context.Context, ids ...PackageID) ([]source.Package, error) {
 	pkgs := make([]source.Package, len(ids))
-	post := func(i int, pkg *Package) {
-		pkgs[i] = pkg
+
+	var (
+		needIDs []PackageID // ids to type-check
+		indexes []int       // original index of requested ids
+	)
+
+	// Check for existing active packages, as any package will do.
+	//
+	// This is also done inside forEachPackage, but doing it here avoids
+	// unnecessary set up for type checking (e.g. assembling the package handle
+	// graph).
+	for i, id := range ids {
+		if pkg := s.getActivePackage(id); pkg != nil {
+			pkgs[i] = pkg
+		} else {
+			needIDs = append(needIDs, id)
+			indexes = append(indexes, i)
+		}
 	}
-	return pkgs, s.forEachPackage(ctx, ids, nil, post)
+
+	post := func(i int, pkg *Package) {
+		pkgs[indexes[i]] = pkg
+	}
+	return pkgs, s.forEachPackage(ctx, needIDs, nil, post)
 }
 
 // getImportGraph returns a shared import graph use for this snapshot, or nil.
@@ -169,7 +189,6 @@ func (s *snapshot) resolveImportGraph() (*importGraph, error) {
 	defer done()
 
 	s.mu.Lock()
-	meta := s.meta
 	lastImportGraph := s.importGraph
 	s.mu.Unlock()
 
@@ -211,28 +230,25 @@ func (s *snapshot) resolveImportGraph() (*importGraph, error) {
 	//
 	// TODO(rfindley): this logic could use a unit test.
 	volatileDeps := make(map[PackageID]bool)
-	var isVolatile func(PackageID) bool
-	isVolatile = func(id PackageID) (volatile bool) {
-		if v, ok := volatileDeps[id]; ok {
+	var isVolatile func(*packageHandle) bool
+	isVolatile = func(ph *packageHandle) (volatile bool) {
+		if v, ok := volatileDeps[ph.m.ID]; ok {
 			return v
 		}
 		defer func() {
-			volatileDeps[id] = volatile
+			volatileDeps[ph.m.ID] = volatile
 		}()
-		if openPackages[id] {
+		if openPackages[ph.m.ID] {
 			return true
 		}
-		m := meta.metadata[id]
-		if m != nil {
-			for _, dep := range m.DepsByPkgPath {
-				if isVolatile(dep) {
-					return true
-				}
+		for _, dep := range ph.m.DepsByPkgPath {
+			if isVolatile(handles[dep]) {
+				return true
 			}
 		}
 		return false
 	}
-	for dep := range handles {
+	for _, dep := range handles {
 		isVolatile(dep)
 	}
 	for id, volatile := range volatileDeps {
@@ -687,7 +703,7 @@ func (b *typeCheckBatch) checkPackage(ctx context.Context, ph *packageHandle) (*
 		}()
 	}
 
-	return &Package{ph, pkg}, err
+	return &Package{ph.m, pkg}, err
 }
 
 // awaitPredecessors awaits all packages for m.DepsByPkgPath, returning an
@@ -894,6 +910,7 @@ func (s *snapshot) getPackageHandles(ctx context.Context, ids []PackageID) (map[
 	// Copy handles into the result map.
 	handles := make(map[PackageID]*packageHandle, len(b.nodes))
 	for _, v := range b.nodes {
+		assert(v.ph != nil, "nil handle")
 		handles[v.m.ID] = v.ph
 	}
 
