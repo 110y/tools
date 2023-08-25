@@ -3,10 +3,17 @@
 // license that can be found in the LICENSE file.
 
 // Package frob is a fast restricted object encoder/decoder in the
-// spirit of gob. Restrictions include:
+// spirit of encoding/gob.
 //
-//   - Interface values are not supported. This avoids the need for
+// As with gob, types that recursively contain functions,
+// channels, and unsafe.Pointers cannot encoded, but frob has these
+// additional restrictions:
+//
+//   - Interface values are not supported; this avoids the need for
 //     the encoding to describe types.
+//
+//   - Types that recursively contain private struct fields are not
+//     permitted.
 //
 //   - The encoding is unspecified and subject to change, so the encoder
 //     and decoder must exactly agree on their implementation and on the
@@ -33,37 +40,19 @@ import (
 	"sync"
 )
 
-// Use CodecFor117(new(T)) to create a codec for values of type T.
-// Then call Encode(T) and Decode(data, *T).
-// This is a placeholder for the forthcoming generic API -- see below.
-// CodecFor117 panics if type T is unsuitable.
-func CodecFor117(x any) Codec {
-	frobsMu.Lock()
-	defer frobsMu.Unlock()
-	return Codec{frobFor(reflect.TypeOf(x).Elem())}
-}
-
-type any = interface{}
-
-// A Codec is an immutable encoder and decoder for values of a particular type.
-type Codec struct{ *frob }
-
-// TODO(adonovan): after go1.18, enable this generic interface.
-/*
-
-// CodecFor[T] returns a codec for values of type T.
-//
-// For panics if the type recursively contains members of unsupported
-// types: functions, channels, interfaces, unsafe.Pointer.
-func CodecFor[T any]() Codec[T] { return For117((*T)(nil)) }
-
 // A Codec[T] is an immutable encoder and decoder for values of type T.
 type Codec[T any] struct{ frob *frob }
 
+// CodecFor[T] returns a codec for values of type T.
+// It panics if type T is unsuitable.
+func CodecFor[T any]() Codec[T] {
+	frobsMu.Lock()
+	defer frobsMu.Unlock()
+	return Codec[T]{frobFor(reflect.TypeOf((*T)(nil)).Elem())}
+}
+
 func (codec Codec[T]) Encode(v T) []byte          { return codec.frob.Encode(v) }
 func (codec Codec[T]) Decode(data []byte, ptr *T) { codec.frob.Decode(data, ptr) }
-
-*/
 
 var (
 	frobsMu sync.Mutex
@@ -337,7 +326,7 @@ func (fr *frob) decode(in *reader, addr reflect.Value) {
 			kzero := reflect.Zero(kfrob.t)
 			vzero := reflect.Zero(vfrob.t)
 			for i := 0; i < len; i++ {
-				// TODO(adonovan): after go1.18, use SetZero.
+				// TODO(adonovan): use SetZero from go1.20.
 				// k.SetZero()
 				// v.SetZero()
 				k.Set(kzero)
@@ -414,7 +403,7 @@ func (w *writer) uint32(v uint32) { w.data = appendUint32(w.data, v) }
 func (w *writer) uint64(v uint64) { w.data = appendUint64(w.data, v) }
 func (w *writer) bytes(v []byte)  { w.data = append(w.data, v...) }
 
-// TODO(adonovan): delete these as in go1.18 they are methods on LittleEndian:
+// TODO(adonovan): delete these as in go1.19 they are methods on LittleEndian:
 
 func appendUint16(b []byte, v uint16) []byte {
 	return append(b,
