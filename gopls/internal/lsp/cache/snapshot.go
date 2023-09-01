@@ -14,7 +14,6 @@ import (
 	"go/token"
 	"go/types"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -102,7 +101,7 @@ type snapshot struct {
 
 	// symbolizeHandles maps each file URI to a handle for the future
 	// result of computing the symbols declared in that file.
-	symbolizeHandles *persistent.Map // from span.URI to *memoize.Promise[symbolizeResult]
+	symbolizeHandles *persistent.Map[span.URI, *memoize.Promise] // *memoize.Promise[symbolizeResult]
 
 	// packages maps a packageKey to a *packageHandle.
 	// It may be invalidated when a file's content changes.
@@ -111,13 +110,13 @@ type snapshot struct {
 	//  - packages.Get(id).meta == meta.metadata[id] for all ids
 	//  - if a package is in packages, then all of its dependencies should also
 	//    be in packages, unless there is a missing import
-	packages *persistent.Map // from packageID to *packageHandle
+	packages *persistent.Map[PackageID, *packageHandle]
 
 	// activePackages maps a package ID to a memoized active package, or nil if
 	// the package is known not to be open.
 	//
 	// IDs not contained in the map are not known to be open or not open.
-	activePackages *persistent.Map // from packageID to *Package
+	activePackages *persistent.Map[PackageID, *Package]
 
 	// workspacePackages contains the workspace's packages, which are loaded
 	// when the view is created. It contains no intermediate test variants.
@@ -138,18 +137,18 @@ type snapshot struct {
 
 	// parseModHandles keeps track of any parseModHandles for the snapshot.
 	// The handles need not refer to only the view's go.mod file.
-	parseModHandles *persistent.Map // from span.URI to *memoize.Promise[parseModResult]
+	parseModHandles *persistent.Map[span.URI, *memoize.Promise] // *memoize.Promise[parseModResult]
 
 	// parseWorkHandles keeps track of any parseWorkHandles for the snapshot.
 	// The handles need not refer to only the view's go.work file.
-	parseWorkHandles *persistent.Map // from span.URI to *memoize.Promise[parseWorkResult]
+	parseWorkHandles *persistent.Map[span.URI, *memoize.Promise] // *memoize.Promise[parseWorkResult]
 
 	// Preserve go.mod-related handles to avoid garbage-collecting the results
 	// of various calls to the go command. The handles need not refer to only
 	// the view's go.mod file.
-	modTidyHandles *persistent.Map // from span.URI to *memoize.Promise[modTidyResult]
-	modWhyHandles  *persistent.Map // from span.URI to *memoize.Promise[modWhyResult]
-	modVulnHandles *persistent.Map // from span.URI to *memoize.Promise[modVulnResult]
+	modTidyHandles *persistent.Map[span.URI, *memoize.Promise] // *memoize.Promise[modTidyResult]
+	modWhyHandles  *persistent.Map[span.URI, *memoize.Promise] // *memoize.Promise[modWhyResult]
+	modVulnHandles *persistent.Map[span.URI, *memoize.Promise] // *memoize.Promise[modVulnResult]
 
 	// knownSubdirs is the set of subdirectory URIs in the workspace,
 	// used to create glob patterns for file watching.
@@ -282,6 +281,14 @@ func (s *snapshot) GlobalID() source.GlobalSnapshotID {
 
 func (s *snapshot) View() source.View {
 	return s.view
+}
+
+func (s *snapshot) FileKind(h source.FileHandle) source.FileKind {
+	return s.view.FileKind(h)
+}
+
+func (s *snapshot) Options() *source.Options {
+	return s.view.Options() // temporarily return view options.
 }
 
 func (s *snapshot) BackgroundContext() context.Context {
@@ -456,11 +463,11 @@ func (s *snapshot) RunGoCommands(ctx context.Context, allowNetwork bool, wd stri
 		return false, nil, nil, nil
 	}
 	var modBytes, sumBytes []byte
-	modBytes, err = ioutil.ReadFile(tmpURI.Filename())
+	modBytes, err = os.ReadFile(tmpURI.Filename())
 	if err != nil && !os.IsNotExist(err) {
 		return false, nil, nil, err
 	}
-	sumBytes, err = ioutil.ReadFile(strings.TrimSuffix(tmpURI.Filename(), ".mod") + ".sum")
+	sumBytes, err = os.ReadFile(strings.TrimSuffix(tmpURI.Filename(), ".mod") + ".sum")
 	if err != nil && !os.IsNotExist(err) {
 		return false, nil, nil, err
 	}
@@ -864,7 +871,7 @@ func (s *snapshot) getActivePackage(id PackageID) *Package {
 	defer s.mu.Unlock()
 
 	if value, ok := s.activePackages.Get(id); ok {
-		return value.(*Package) // possibly nil, if we have already checked this id.
+		return value
 	}
 	return nil
 }
@@ -888,14 +895,14 @@ func (s *snapshot) setActivePackage(id PackageID, pkg *Package) {
 
 func (s *snapshot) resetActivePackagesLocked() {
 	s.activePackages.Destroy()
-	s.activePackages = persistent.NewMap(packageIDLessInterface)
+	s.activePackages = new(persistent.Map[PackageID, *Package])
 }
 
 const fileExtensions = "go,mod,sum,work"
 
 func (s *snapshot) fileWatchingGlobPatterns(ctx context.Context) map[string]struct{} {
 	extensions := fileExtensions
-	for _, ext := range s.View().Options().TemplateExtensions {
+	for _, ext := range s.Options().TemplateExtensions {
 		extensions += "," + ext
 	}
 	// Work-around microsoft/vscode#100870 by making sure that we are,
@@ -1867,18 +1874,10 @@ https://github.com/golang/tools/blob/master/gopls/doc/settings.md#buildflags-str
 // Most likely, each call site of inVendor needs to be reconsidered to
 // understand and correctly implement the desired behavior.
 func inVendor(uri span.URI) bool {
-	_, after, found := cut(string(uri), "/vendor/")
+	_, after, found := strings.Cut(string(uri), "/vendor/")
 	// Only subdirectories of /vendor/ are considered vendored
 	// (/vendor/a/foo.go is vendored, /vendor/foo.go is not).
 	return found && strings.Contains(after, "/")
-}
-
-// TODO(adonovan): replace with strings.Cut when we can assume go1.18.
-func cut(s, sep string) (before, after string, found bool) {
-	if i := strings.Index(s, sep); i >= 0 {
-		return s[:i], s[i+len(sep):], true
-	}
-	return s, "", false
 }
 
 // unappliedChanges is a file source that handles an uncloned snapshot.
@@ -2190,7 +2189,7 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 			result.packages.Delete(id)
 		} else {
 			if entry, hit := result.packages.Get(id); hit {
-				ph := entry.(*packageHandle).clone(false)
+				ph := entry.clone(false)
 				result.packages.Set(id, ph, nil)
 			}
 		}
@@ -2292,12 +2291,11 @@ func (s *snapshot) clone(ctx, bgCtx context.Context, changes map[span.URI]*fileC
 // changed that happens not to be present in the map, but that's OK: the goal
 // of this function is to guarantee that IF the nearest mod file is present in
 // the map, it is invalidated.
-func deleteMostRelevantModFile(m *persistent.Map, changed span.URI) {
+func deleteMostRelevantModFile(m *persistent.Map[span.URI, *memoize.Promise], changed span.URI) {
 	var mostRelevant span.URI
 	changedFile := changed.Filename()
 
-	m.Range(func(key, value interface{}) {
-		modURI := key.(span.URI)
+	m.Range(func(modURI span.URI, _ *memoize.Promise) {
 		if len(modURI) > len(mostRelevant) {
 			if source.InDir(filepath.Dir(modURI.Filename()), changedFile) {
 				mostRelevant = modURI
