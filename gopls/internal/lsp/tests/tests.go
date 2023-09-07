@@ -56,8 +56,6 @@ var summaryFile = "summary.txt"
 func init() {
 	if testenv.Go1Point() >= 21 {
 		summaryFile = "summary_go1.21.txt"
-	} else if testenv.Go1Point() >= 18 {
-		summaryFile = "summary_go1.18.txt"
 	}
 }
 
@@ -248,6 +246,14 @@ func DefaultOptions(o *source.Options) {
 	o.HierarchicalDocumentSymbolSupport = true
 	o.SemanticTokens = true
 	o.InternalOptions.NewDiff = "new"
+
+	// Enable all inlay hints.
+	if o.Hints == nil {
+		o.Hints = make(map[string]bool)
+	}
+	for name := range source.AllInlayHints {
+		o.Hints[name] = true
+	}
 }
 
 func RunTests(t *testing.T, dataDir string, includeMultiModule bool, f func(*testing.T, *Data)) {
