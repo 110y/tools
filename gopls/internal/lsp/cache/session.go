@@ -33,12 +33,9 @@ type Session struct {
 	cache       *Cache            // shared cache
 	gocmdRunner *gocommand.Runner // limits go command concurrency
 
-	optionsMu sync.Mutex
-	options   *source.Options
-
 	viewMu  sync.Mutex
 	views   []*View
-	viewMap map[span.URI]*View // map of URI->best view
+	viewMap map[span.URI]*View // file->best view
 
 	parseCache *parseCache
 
@@ -52,20 +49,6 @@ func (s *Session) String() string { return s.id }
 // GoCommandRunner returns the gocommand Runner for this session.
 func (s *Session) GoCommandRunner() *gocommand.Runner {
 	return s.gocmdRunner
-}
-
-// Options returns a copy of the SessionOptions for this session.
-func (s *Session) Options() *source.Options {
-	s.optionsMu.Lock()
-	defer s.optionsMu.Unlock()
-	return s.options
-}
-
-// SetOptions sets the options of this session to new values.
-func (s *Session) SetOptions(options *source.Options) {
-	s.optionsMu.Lock()
-	defer s.optionsMu.Unlock()
-	s.options = options
 }
 
 // Shutdown the session and all views it has created.
@@ -134,9 +117,9 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 	v := &View{
 		id:                   strconv.FormatInt(index, 10),
 		gocmdRunner:          s.gocmdRunner,
+		lastOptions:          options,
 		initialWorkspaceLoad: make(chan struct{}),
 		initializationSema:   make(chan struct{}, 1),
-		options:              options,
 		baseCtx:              baseCtx,
 		name:                 name,
 		moduleUpgrades:       map[span.URI]map[string]string{},
@@ -184,6 +167,7 @@ func (s *Session) createView(ctx context.Context, name string, folder span.URI, 
 		workspaceModFiles:    wsModFiles,
 		workspaceModFilesErr: wsModFilesErr,
 		pkgIndex:             typerefs.NewPackageIndex(),
+		options:              options,
 	}
 	// Save one reference in the view.
 	v.releaseSnapshot = v.snapshot.Acquire()
@@ -272,9 +256,15 @@ func bestViewForURI(uri span.URI, views []*View) *View {
 		}
 		// TODO(rfindley): this should consider the workspace layout (i.e.
 		// go.work).
-		if view.contains(uri) {
+		snapshot, release, err := view.getSnapshot()
+		if err != nil {
+			// view is shutdown
+			continue
+		}
+		if snapshot.contains(uri) {
 			longest = view
 		}
+		release()
 	}
 	if longest != nil {
 		return longest
@@ -293,6 +283,7 @@ func bestViewForURI(uri span.URI, views []*View) *View {
 func (s *Session) RemoveView(view *View) {
 	s.viewMu.Lock()
 	defer s.viewMu.Unlock()
+
 	i := s.dropView(view)
 	if i == -1 { // error reported elsewhere
 		return
@@ -302,18 +293,11 @@ func (s *Session) RemoveView(view *View) {
 	s.views = removeElement(s.views, i)
 }
 
-// updateView recreates the view with the given options.
+// updateViewLocked recreates the view with the given options.
 //
 // If the resulting error is non-nil, the view may or may not have already been
 // dropped from the session.
-func (s *Session) updateView(ctx context.Context, view *View, options *source.Options) (*View, error) {
-	s.viewMu.Lock()
-	defer s.viewMu.Unlock()
-
-	return s.updateViewLocked(ctx, view, options)
-}
-
-func (s *Session) updateViewLocked(ctx context.Context, view *View, options *source.Options) (*View, error) {
+func (s *Session) updateViewLocked(ctx context.Context, view *View, options *source.Options) error {
 	// Preserve the snapshot ID if we are recreating the view.
 	view.snapshotMu.Lock()
 	if view.snapshot == nil {
@@ -325,7 +309,7 @@ func (s *Session) updateViewLocked(ctx context.Context, view *View, options *sou
 
 	i := s.dropView(view)
 	if i == -1 {
-		return nil, fmt.Errorf("view %q not found", view.id)
+		return fmt.Errorf("view %q not found", view.id)
 	}
 
 	v, snapshot, release, err := s.createView(ctx, view.name, view.folder, options, seqID)
@@ -334,7 +318,7 @@ func (s *Session) updateViewLocked(ctx context.Context, view *View, options *sou
 		// this should not happen and is very bad, but we still need to clean
 		// up the view array if it happens
 		s.views = removeElement(s.views, i)
-		return nil, err
+		return err
 	}
 	defer release()
 
@@ -350,7 +334,7 @@ func (s *Session) updateViewLocked(ctx context.Context, view *View, options *sou
 
 	// substitute the new view into the array where the old view was
 	s.views[i] = v
-	return v, nil
+	return nil
 }
 
 // removeElement removes the ith element from the slice replacing it with the last element.
@@ -443,7 +427,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 			// synchronously to change processing? Can we assume that the env did not
 			// change, and derive go.work using a combination of the configured
 			// GOWORK value and filesystem?
-			info, err := s.getWorkspaceInformation(ctx, view.folder, view.Options())
+			info, err := s.getWorkspaceInformation(ctx, view.folder, view.lastOptions)
 			if err != nil {
 				// Catastrophic failure, equivalent to a failure of session
 				// initialization and therefore should almost never happen. One
@@ -457,8 +441,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 			}
 
 			if info != view.workspaceInformation {
-				_, err := s.updateViewLocked(ctx, view, view.Options())
-				if err != nil {
+				if err := s.updateViewLocked(ctx, view, view.lastOptions); err != nil {
 					// More catastrophic failure. The view may or may not still exist.
 					// The best we can do is log and move on.
 					event.Error(ctx, "recreating view", err)
@@ -516,7 +499,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 	var releases []func()
 	viewToSnapshot := map[*View]*snapshot{}
 	for view, changed := range views {
-		snapshot, release := view.invalidateContent(ctx, changed, forceReloadMetadata)
+		snapshot, release := view.invalidateContent(ctx, changed, nil, forceReloadMetadata)
 		releases = append(releases, release)
 		viewToSnapshot[view] = snapshot
 	}
