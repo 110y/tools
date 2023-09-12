@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build go1.20
+
 package analyzer
 
 import (
@@ -124,7 +126,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				Call:    call,
 				Content: content,
 			}
-			got, err := inline.Inline(caller, callee)
+			got, err := inline.Inline(nil, caller, callee)
 			if err != nil {
 				pass.Reportf(call.Lparen, "%v", err)
 				return

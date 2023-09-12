@@ -13,7 +13,6 @@ import (
 	"go/ast"
 	"go/token"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,7 +26,6 @@ import (
 	"golang.org/x/tools/go/expect"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/packages/packagestest"
-	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source"
@@ -64,7 +62,6 @@ var UpdateGolden = flag.Bool("golden", false, "Update golden files")
 // These type names apparently avoid the need to repeat the
 // type in the field name and the make() expression.
 type CallHierarchy = map[span.Span]*CallHierarchyResult
-type CodeLens = map[span.URI][]protocol.CodeLens
 type Diagnostics = map[span.URI][]*source.Diagnostic
 type CompletionItems = map[token.Pos]*completion.CompletionItem
 type Completions = map[span.Span][]Completion
@@ -78,7 +75,6 @@ type SemanticTokens = []span.Span
 type SuggestedFixes = map[span.Span][]SuggestedFix
 type MethodExtractions = map[span.Span]span.Span
 type Definitions = map[span.Span]Definition
-type Highlights = map[span.Span][]span.Span
 type Renames = map[span.Span]string
 type PrepareRenames = map[span.Span]*source.PrepareItem
 type InlayHints = []span.Span
@@ -91,7 +87,6 @@ type Data struct {
 	Config                   packages.Config
 	Exported                 *packagestest.Exported
 	CallHierarchy            CallHierarchy
-	CodeLens                 CodeLens
 	Diagnostics              Diagnostics
 	CompletionItems          CompletionItems
 	Completions              Completions
@@ -105,7 +100,6 @@ type Data struct {
 	SuggestedFixes           SuggestedFixes
 	MethodExtractions        MethodExtractions
 	Definitions              Definitions
-	Highlights               Highlights
 	Renames                  Renames
 	InlayHints               InlayHints
 	PrepareRenames           PrepareRenames
@@ -126,14 +120,13 @@ type Data struct {
 }
 
 // The Tests interface abstracts the LSP-based implementation of the marker
-// test operators (such as @codelens) appearing in files beneath ../testdata/.
+// test operators appearing in files beneath ../testdata/.
 //
 // TODO(adonovan): reduce duplication; see https://github.com/golang/go/issues/54845.
 // There is only one implementation (*runner in ../lsp_test.go), so
 // we can abolish the interface now.
 type Tests interface {
 	CallHierarchy(*testing.T, span.Span, *CallHierarchyResult)
-	CodeLens(*testing.T, span.URI, []protocol.CodeLens)
 	Diagnostics(*testing.T, span.URI, []*source.Diagnostic)
 	Completion(*testing.T, span.Span, Completion, CompletionItems)
 	CompletionSnippet(*testing.T, span.Span, CompletionSnippet, bool, CompletionItems)
@@ -146,7 +139,6 @@ type Tests interface {
 	SuggestedFix(*testing.T, span.Span, []SuggestedFix, int)
 	MethodExtraction(*testing.T, span.Span, span.Span)
 	Definition(*testing.T, span.Span, Definition)
-	Highlight(*testing.T, span.Span, []span.Span)
 	InlayHints(*testing.T, span.Span)
 	Rename(*testing.T, span.Span, string)
 	PrepareRename(*testing.T, span.Span, *source.PrepareItem)
@@ -236,7 +228,6 @@ func DefaultOptions(o *source.Options) {
 		source.Work: {},
 		source.Tmpl: {},
 	}
-	o.UserOptions.Codelenses[string(command.Test)] = true
 	o.HoverKind = source.SynopsisDocumentation
 	o.InsertTextFormat = protocol.SnippetTextFormat
 	o.CompletionBudget = time.Minute
@@ -271,7 +262,6 @@ func RunTests(t *testing.T, dataDir string, includeMultiModule bool, f func(*tes
 func load(t testing.TB, mode string, dir string) *Data {
 	datum := &Data{
 		CallHierarchy:            make(CallHierarchy),
-		CodeLens:                 make(CodeLens),
 		Diagnostics:              make(Diagnostics),
 		CompletionItems:          make(CompletionItems),
 		Completions:              make(Completions),
@@ -282,7 +272,6 @@ func load(t testing.TB, mode string, dir string) *Data {
 		RankCompletions:          make(RankCompletions),
 		CaseSensitiveCompletions: make(CaseSensitiveCompletions),
 		Definitions:              make(Definitions),
-		Highlights:               make(Highlights),
 		Renames:                  make(Renames),
 		PrepareRenames:           make(PrepareRenames),
 		SuggestedFixes:           make(SuggestedFixes),
@@ -341,7 +330,7 @@ func load(t testing.TB, mode string, dir string) *Data {
 		} else if index := strings.Index(fragment, overlayFileSuffix); index >= 0 {
 			delete(files, fragment)
 			partial := fragment[:index] + fragment[index+len(overlayFileSuffix):]
-			contents, err := ioutil.ReadFile(filepath.Join(dir, fragment))
+			contents, err := os.ReadFile(filepath.Join(dir, fragment))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -422,7 +411,6 @@ func load(t testing.TB, mode string, dir string) *Data {
 
 	// Collect any data that needs to be used by subsequent tests.
 	if err := datum.Exported.Expect(map[string]interface{}{
-		"codelens":       datum.collectCodeLens,
 		"diag":           datum.collectDiagnostics,
 		"item":           datum.collectCompletionItems,
 		"complete":       datum.collectCompletions(CompletionDefault),
@@ -436,7 +424,6 @@ func load(t testing.TB, mode string, dir string) *Data {
 		"godef":          datum.collectDefinitions,
 		"typdef":         datum.collectTypeDefinitions,
 		"hoverdef":       datum.collectHoverDefinitions,
-		"highlight":      datum.collectHighlights,
 		"inlayHint":      datum.collectInlayHints,
 		"rename":         datum.collectRenames,
 		"prepare":        datum.collectPrepareRenames,
@@ -585,20 +572,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 		eachCompletion(t, data.RankCompletions, tests.RankCompletion)
 	})
 
-	t.Run("CodeLens", func(t *testing.T) {
-		t.Helper()
-		for uri, want := range data.CodeLens {
-			// Check if we should skip this URI if the -modfile flag is not available.
-			if shouldSkip(data, uri) {
-				continue
-			}
-			t.Run(uriName(uri), func(t *testing.T) {
-				t.Helper()
-				tests.CodeLens(t, uri, want)
-			})
-		}
-	})
-
 	t.Run("Diagnostics", func(t *testing.T) {
 		t.Helper()
 		for uri, want := range data.Diagnostics {
@@ -660,16 +633,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 					testenv.NeedsTool(t, "cgo")
 				}
 				tests.Definition(t, spn, d)
-			})
-		}
-	})
-
-	t.Run("Highlight", func(t *testing.T) {
-		t.Helper()
-		for pos, locations := range data.Highlights {
-			t.Run(SpanName(pos), func(t *testing.T) {
-				t.Helper()
-				tests.Highlight(t, pos, locations)
 			})
 		}
 	})
@@ -762,7 +725,7 @@ func Run(t *testing.T, tests Tests, data *Data) {
 			sort.Slice(golden.Archive.Files, func(i, j int) bool {
 				return golden.Archive.Files[i].Name < golden.Archive.Files[j].Name
 			})
-			if err := ioutil.WriteFile(golden.Filename, txtar.Format(golden.Archive), 0666); err != nil {
+			if err := os.WriteFile(golden.Filename, txtar.Format(golden.Archive), 0666); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -801,15 +764,7 @@ func checkData(t *testing.T, data *Data) {
 		return count
 	}
 
-	countCodeLens := func(c map[span.URI][]protocol.CodeLens) (count int) {
-		for _, want := range c {
-			count += len(want)
-		}
-		return count
-	}
-
 	fmt.Fprintf(buf, "CallHierarchyCount = %v\n", len(data.CallHierarchy))
-	fmt.Fprintf(buf, "CodeLensCount = %v\n", countCodeLens(data.CodeLens))
 	fmt.Fprintf(buf, "CompletionsCount = %v\n", countCompletions(data.Completions))
 	fmt.Fprintf(buf, "CompletionSnippetCount = %v\n", snippetCount)
 	fmt.Fprintf(buf, "UnimportedCompletionsCount = %v\n", countCompletions(data.UnimportedCompletions))
@@ -823,7 +778,6 @@ func checkData(t *testing.T, data *Data) {
 	fmt.Fprintf(buf, "MethodExtractionCount = %v\n", len(data.MethodExtractions))
 	fmt.Fprintf(buf, "DefinitionsCount = %v\n", definitionCount)
 	fmt.Fprintf(buf, "TypeDefinitionsCount = %v\n", typeDefinitionCount)
-	fmt.Fprintf(buf, "HighlightsCount = %v\n", len(data.Highlights))
 	fmt.Fprintf(buf, "InlayHintsCount = %v\n", len(data.InlayHints))
 	fmt.Fprintf(buf, "RenamesCount = %v\n", len(data.Renames))
 	fmt.Fprintf(buf, "PrepareRenamesCount = %v\n", len(data.PrepareRenames))
@@ -908,16 +862,6 @@ func (data *Data) Golden(t *testing.T, tag, target string, update func() ([]byte
 		return file.Data
 	}
 	return file.Data[:len(file.Data)-1] // drop the trailing \n
-}
-
-func (data *Data) collectCodeLens(spn span.Span, title, cmd string) {
-	data.CodeLens[spn.URI()] = append(data.CodeLens[spn.URI()], protocol.CodeLens{
-		Range: data.mustRange(spn),
-		Command: &protocol.Command{
-			Title:   title,
-			Command: cmd,
-		},
-	})
 }
 
 func (data *Data) collectDiagnostics(spn span.Span, msgSource, msgPattern, msgSeverity string) {
@@ -1071,11 +1015,6 @@ func (data *Data) collectDefinitionNames(src span.Span, name string) {
 	d := data.Definitions[src]
 	d.Name = name
 	data.Definitions[src] = d
-}
-
-func (data *Data) collectHighlights(src span.Span, expected []span.Span) {
-	// Declaring a highlight in a test file: @highlight(src, expected1, expected2)
-	data.Highlights[src] = append(data.Highlights[src], expected...)
 }
 
 func (data *Data) collectInlayHints(src span.Span) {

@@ -269,8 +269,8 @@ var GeneratedAPIJSON = &APIJSON{
 							Default: "true",
 						},
 						{
-							Name:    "\"defer\"",
-							Doc:     "report common mistakes in defer statements\n\nThe defer analyzer reports a diagnostic when a defer statement would\nresult in a non-deferred call to time.Since, as experience has shown\nthat this is nearly always a mistake.\n\nFor example:\n\n\tstart := time.Now()\n\t...\n\tdefer recordLatency(time.Since(start)) // error: call to time.Since is not deferred\n\nThe correct code is:\n\n\tdefer func() { recordLatency(time.Since(start)) }()",
+							Name:    "\"defers\"",
+							Doc:     "report common mistakes in defer statements\n\nThe defers analyzer reports a diagnostic when a defer statement would\nresult in a non-deferred call to time.Since, as experience has shown\nthat this is nearly always a mistake.\n\nFor example:\n\n\tstart := time.Now()\n\t...\n\tdefer recordLatency(time.Since(start)) // error: call to time.Since is not deferred\n\nThe correct code is:\n\n\tdefer func() { recordLatency(time.Since(start)) }()",
 							Default: "true",
 						},
 						{
@@ -732,7 +732,7 @@ var GeneratedAPIJSON = &APIJSON{
 			Title:     "Get known vulncheck result",
 			Doc:       "Fetch the result of latest vulnerability check (`govulncheck`).",
 			ArgDoc:    "{\n\t// The file URI.\n\t\"URI\": string,\n}",
-			ResultDoc: "map[golang.org/x/tools/gopls/internal/lsp/protocol.DocumentURI]*golang.org/x/tools/gopls/internal/govulncheck.Result",
+			ResultDoc: "map[golang.org/x/tools/gopls/internal/lsp/protocol.DocumentURI]*golang.org/x/tools/gopls/internal/vulncheck.Result",
 		},
 		{
 			Command: "gopls.gc_details",
@@ -798,7 +798,7 @@ var GeneratedAPIJSON = &APIJSON{
 		},
 		{
 			Command:   "gopls.run_govulncheck",
-			Title:     "Run govulncheck.",
+			Title:     "Run vulncheck.",
 			Doc:       "Run vulnerability check (`govulncheck`).",
 			ArgDoc:    "{\n\t// Any document in the directory from which govulncheck will run.\n\t\"URI\": string,\n\t// Package pattern. E.g. \"\", \".\", \"./...\".\n\t\"Pattern\": string,\n}",
 			ResultDoc: "{\n\t// Token holds the progress token for LSP workDone reporting of the vulncheck\n\t// invocation.\n\t\"Token\": interface{},\n}",
@@ -891,7 +891,7 @@ var GeneratedAPIJSON = &APIJSON{
 		},
 		{
 			Lens:  "run_govulncheck",
-			Title: "Run govulncheck.",
+			Title: "Run vulncheck.",
 			Doc:   "Run vulnerability check (`govulncheck`).",
 		},
 		{
@@ -977,8 +977,9 @@ var GeneratedAPIJSON = &APIJSON{
 			Default: true,
 		},
 		{
-			Name:    "defer",
-			Doc:     "report common mistakes in defer statements\n\nThe defer analyzer reports a diagnostic when a defer statement would\nresult in a non-deferred call to time.Since, as experience has shown\nthat this is nearly always a mistake.\n\nFor example:\n\n\tstart := time.Now()\n\t...\n\tdefer recordLatency(time.Since(start)) // error: call to time.Since is not deferred\n\nThe correct code is:\n\n\tdefer func() { recordLatency(time.Since(start)) }()",
+			Name:    "defers",
+			Doc:     "report common mistakes in defer statements\n\nThe defers analyzer reports a diagnostic when a defer statement would\nresult in a non-deferred call to time.Since, as experience has shown\nthat this is nearly always a mistake.\n\nFor example:\n\n\tstart := time.Now()\n\t...\n\tdefer recordLatency(time.Since(start)) // error: call to time.Since is not deferred\n\nThe correct code is:\n\n\tdefer func() { recordLatency(time.Since(start)) }()",
+			URL:     "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/defers",
 			Default: true,
 		},
 		{

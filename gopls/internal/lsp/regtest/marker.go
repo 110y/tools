@@ -148,6 +148,14 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //   - codeactionerr(kind, start, end, wantError): specifies a codeaction that
 //     fails with an error that matches the expectation.
 //
+//   - codelens(location, title): specifies that a codelens is expected at the
+//     given location, with given title. Must be used in conjunction with
+//     @codelenses.
+//
+//   - codelenses(): specifies that textDocument/codeLens should be run for the
+//     current document, with results compared to the @codelens annotations in
+//     the current document.
+//
 //   - complete(location, ...labels): specifies expected completion results at
 //     the given location.
 //
@@ -175,6 +183,10 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //     request succeeds, the golden file must contain the resulting formatted
 //     source. If the formatting request fails, the golden file must contain
 //     the error message.
+//
+//   - highlight(src location, dsts ...location): makes a
+//     textDocument/highlight request at the given src location, which should
+//     highlight the provided dst locations.
 //
 //   - hover(src, dst location, g Golden): perform a textDocument/hover at the
 //     src location, and checks that the result is the dst location, with hover
@@ -309,7 +321,7 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 // internal/lsp/tests.
 //
 // Remaining TODO:
-//   - parallelize/optimize test execution
+//   - optimize test execution
 //   - reorganize regtest packages (and rename to just 'test'?)
 //   - Rename the files .txtar.
 //   - Provide some means by which locations in the standard library
@@ -318,7 +330,6 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //
 // Existing marker tests (in ../testdata) to port:
 //   - CallHierarchy
-//   - CodeLens
 //   - Diagnostics
 //   - CompletionItems
 //   - Completions
@@ -333,7 +344,6 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //   - SemanticTokens
 //   - FunctionExtractions
 //   - MethodExtractions
-//   - Highlights
 //   - Renames
 //   - PrepareRenames
 //   - InlayHints
@@ -356,7 +366,9 @@ func RunMarkerTests(t *testing.T, dir string) {
 	cache := cache.New(nil)
 
 	for _, test := range tests {
+		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if test.skipReason != "" {
 				t.Skip(test.skipReason)
 			}
@@ -579,11 +591,13 @@ var markerFuncs = map[string]markerFunc{
 	"acceptcompletion": makeMarkerFunc(acceptCompletionMarker),
 	"codeaction":       makeMarkerFunc(codeActionMarker),
 	"codeactionerr":    makeMarkerFunc(codeActionErrMarker),
+	"codelenses":       makeMarkerFunc(codeLensesMarker),
 	"complete":         makeMarkerFunc(completeMarker),
 	"def":              makeMarkerFunc(defMarker),
 	"diag":             makeMarkerFunc(diagMarker),
 	"foldingrange":     makeMarkerFunc(foldingRangeMarker),
 	"format":           makeMarkerFunc(formatMarker),
+	"highlight":        makeMarkerFunc(highlightMarker),
 	"hover":            makeMarkerFunc(hoverMarker),
 	"implementation":   makeMarkerFunc(implementationMarker),
 	"loc":              makeMarkerFunc(locMarker),
@@ -943,8 +957,9 @@ type markerTestRun struct {
 	locations map[expect.Identifier]protocol.Location
 	diags     map[protocol.Location][]protocol.Diagnostic // diagnostics by position; location end == start
 
-	// Notes that weren't consumed by a marker.
-	// TODO(rfindley): use this for markers that must collect related notes, or delete it.
+	// Notes that weren't associated with a top-level marker func. They may be
+	// consumed by another marker (e.g. @codelenses collects @codelens markers).
+	// Any notes that aren't consumed are flagged as an error.
 	extraNotes map[protocol.DocumentURI]map[string][]*expect.Note
 }
 
@@ -973,6 +988,11 @@ func (c *marker) sprintf(format string, args ...interface{}) string {
 // uri returns the URI of the file containing the marker.
 func (mark marker) uri() protocol.DocumentURI {
 	return mark.run.env.Sandbox.Workdir.URI(mark.run.test.fset.File(mark.note.Pos).Name())
+}
+
+// path returns the relative path to the file containing the marker.
+func (mark marker) path() string {
+	return mark.run.env.Sandbox.Workdir.RelPath(mark.run.test.fset.File(mark.note.Pos).Name())
 }
 
 // fmtLoc formats the given pos in the context of the test, using
@@ -1341,7 +1361,7 @@ func acceptCompletionMarker(mark marker, src protocol.Location, label string, go
 		mark.errorf("Completion(...) did not return an item labeled %q", label)
 		return
 	}
-	filename := mark.run.env.Sandbox.Workdir.URIToPath(mark.uri())
+	filename := mark.path()
 	mapper, err := mark.run.env.Editor.Mapper(filename)
 	if err != nil {
 		mark.errorf("Editor.Mapper(%s) failed: %v", filename, err)
@@ -1398,7 +1418,7 @@ func foldingRangeMarker(mark marker, g *Golden) {
 		insert(rng.StartLine, rng.StartCharacter, fmt.Sprintf("<%d kind=%q>", i, rng.Kind))
 		insert(rng.EndLine, rng.EndCharacter, fmt.Sprintf("</%d>", i))
 	}
-	filename := env.Sandbox.Workdir.URIToPath(mark.uri())
+	filename := mark.path()
 	mapper, err := env.Editor.Mapper(filename)
 	if err != nil {
 		mark.errorf("Editor.Mapper(%s) failed: %v", filename, err)
@@ -1425,7 +1445,7 @@ func formatMarker(mark marker, golden *Golden) {
 		got = []byte(err.Error() + "\n") // all golden content is newline terminated
 	} else {
 		env := mark.run.env
-		filename := env.Sandbox.Workdir.URIToPath(mark.uri())
+		filename := mark.path()
 		mapper, err := env.Editor.Mapper(filename)
 		if err != nil {
 			mark.errorf("Editor.Mapper(%s) failed: %v", filename, err)
@@ -1446,6 +1466,32 @@ func formatMarker(mark marker, golden *Golden) {
 
 	if diff := compare.Bytes(want, got); diff != "" {
 		mark.errorf("golden file @%s does not match format results:\n%s", golden.id, diff)
+	}
+}
+
+func highlightMarker(mark marker, src protocol.Location, dsts ...protocol.Location) {
+	highlights := mark.run.env.DocumentHighlight(src)
+	var got []protocol.Range
+	for _, h := range highlights {
+		got = append(got, h.Range)
+	}
+
+	var want []protocol.Range
+	for _, d := range dsts {
+		want = append(want, d.Range)
+	}
+
+	sortRanges := func(s []protocol.Range) {
+		sort.Slice(s, func(i, j int) bool {
+			return protocol.CompareRange(s[i], s[j]) < 0
+		})
+	}
+
+	sortRanges(got)
+	sortRanges(want)
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		mark.errorf("DocumentHighlight(%v) mismatch (-want +got):\n%s", src, diff)
 	}
 }
 
@@ -1616,6 +1662,58 @@ func codeActionErrMarker(mark marker, actionKind string, start, end protocol.Loc
 	loc.Range.End = end.Range.End
 	_, err := codeAction(mark.run.env, loc.URI, loc.Range, actionKind, nil)
 	wantErr.check(mark, err)
+}
+
+// codeLensesMarker runs the @codelenses() marker, collecting @codelens marks
+// in the current file and comparing with the result of the
+// textDocument/codeLens RPC.
+func codeLensesMarker(mark marker) {
+	type codeLens struct {
+		Range protocol.Range
+		Title string
+	}
+
+	lenses := mark.run.env.CodeLens(mark.path())
+	var got []codeLens
+	for _, lens := range lenses {
+		title := ""
+		if lens.Command != nil {
+			title = lens.Command.Title
+		}
+		got = append(got, codeLens{lens.Range, title})
+	}
+
+	var want []codeLens
+	mark.collectExtraNotes("codelens", makeMarkerFunc(func(mark marker, loc protocol.Location, title string) {
+		want = append(want, codeLens{loc.Range, title})
+	}))
+
+	for _, s := range [][]codeLens{got, want} {
+		sort.Slice(s, func(i, j int) bool {
+			li, lj := s[i], s[j]
+			if c := protocol.CompareRange(li.Range, lj.Range); c != 0 {
+				return c < 0
+			}
+			return li.Title < lj.Title
+		})
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		mark.errorf("codelenses: unexpected diff (-want +got):\n%s", diff)
+	}
+}
+
+// collectExtraNotes runs the provided markerFunc for each extra note with the
+// given name, and marks all matching notes as used.
+func (mark marker) collectExtraNotes(name string, f markerFunc) {
+	uri := mark.uri()
+	notes := mark.run.extraNotes[uri][name]
+	delete(mark.run.extraNotes[uri], name)
+
+	for _, note := range notes {
+		mark := marker{run: mark.run, note: note, fn: f}
+		mark.execute()
+	}
 }
 
 // suggestedfixMarker implements the @suggestedfix(location, regexp,

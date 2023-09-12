@@ -6,14 +6,21 @@ package inline_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/expect"
@@ -25,8 +32,8 @@ import (
 	"golang.org/x/tools/txtar"
 )
 
-// Test executes test scenarios specified by files in testdata/*.txtar.
-func Test(t *testing.T) {
+// TestData executes test scenarios specified by files in testdata/*.txtar.
+func TestData(t *testing.T) {
 	testenv.NeedsGoPackages(t)
 
 	files, err := filepath.Glob("testdata/*.txtar")
@@ -121,8 +128,7 @@ func Test(t *testing.T) {
 							t.Errorf("%s: @inline(rx, want): want file name (to assert success) or error message regexp (to assert failure)", posn)
 							continue
 						}
-						t.Log("doInlineNote", posn)
-						if err := doInlineNote(pkg, file, content, pattern, posn, want); err != nil {
+						if err := doInlineNote(t.Logf, pkg, file, content, pattern, posn, want); err != nil {
 							t.Errorf("%s: @inline(%v, %v): %v", posn, note.Args[0], note.Args[1], err)
 							continue
 						}
@@ -141,7 +147,7 @@ func Test(t *testing.T) {
 // Finally it checks that, on success, the transformed file is equal
 // to want (a []byte), or on failure that the error message matches
 // want (a *Regexp).
-func doInlineNote(pkg *packages.Package, file *ast.File, content []byte, pattern *regexp.Regexp, posn token.Position, want any) error {
+func doInlineNote(logf func(string, ...any), pkg *packages.Package, file *ast.File, content []byte, pattern *regexp.Regexp, posn token.Position, want any) error {
 	// Find extent of pattern match within commented line.
 	var startPos, endPos token.Pos
 	{
@@ -274,17 +280,13 @@ func doInlineNote(pkg *packages.Package, file *ast.File, content []byte, pattern
 			return nil, err
 		}
 
-		// Perform Gob transcoding so that it is exercised by the test.
-		var enc bytes.Buffer
-		if err := gob.NewEncoder(&enc).Encode(callee); err != nil {
-			return nil, fmt.Errorf("internal error: gob encoding failed: %v", err)
-		}
-		*callee = inline.Callee{}
-		if err := gob.NewDecoder(&enc).Decode(callee); err != nil {
-			return nil, fmt.Errorf("internal error: gob decoding failed: %v", err)
+		if err := checkTranscode(callee); err != nil {
+			return nil, err
 		}
 
-		return inline.Inline(caller, callee)
+		check := checkNoMutation(caller.File)
+		defer check()
+		return inline.Inline(logf, caller, callee)
 	}()
 	if err != nil {
 		if wantRE, ok := want.(*regexp.Regexp); ok {
@@ -310,6 +312,237 @@ func doInlineNote(pkg *packages.Package, file *ast.File, content []byte, pattern
 
 }
 
+// TestTable is a table driven test, enabling more compact expression
+// of single-package test cases than is possible with the txtar notation.
+func TestTable(t *testing.T) {
+	// Each callee must declare a function or method named f,
+	// and each caller must call it.
+	const funcName = "f"
+
+	var tests = []struct {
+		descr          string
+		callee, caller string // Go source files (sans package decl) of caller, callee
+		want           string // expected new portion of caller file, or "error: regexp"
+	}{
+		{
+			"Basic",
+			`func f(x int) int { return x }`,
+			`var _ = f(0)`,
+			`var _ = (0)`,
+		},
+		{
+			"Empty body, no arg effects.",
+			`func f(x, y int) {}`,
+			`func _() { f(1, 2) }`,
+			`func _() {}`,
+		},
+		{
+			"Empty body, some arg effects.",
+			`func f(x, y, z int) {}`,
+			`func _() { f(1, recover().(int), 3) }`,
+			`func _() { _ = recover().(int) }`,
+		},
+		{
+			"Tail call.",
+			`func f() int { return 1 }`,
+			`func _() int { return f() }`,
+			`func _() int { return (1) }`,
+		},
+		{
+			"Void tail call.",
+			`func f() { println() }`,
+			`func _() { f() }`,
+			`func _() { println() }`,
+		},
+		{
+			"Void tail call with defer.", // => literalized
+			`func f() { defer f(); println() }`,
+			`func _() { f() }`,
+			`func _() { func() { defer f(); println() }() }`,
+		},
+		{
+			"Edge case: cannot literalize spread method call.",
+			`type I int
+ 			func g() (I, I)
+			func (r I) f(x, y I) I {
+				defer g() // force literalization
+				return x + y + r
+			}`,
+			`func _() I { return recover().(I).f(g()) }`,
+			`error: can't yet inline spread call to method`,
+		},
+		// TODO(adonovan): improve coverage of the cross
+		// product of each strategy with the checklist of
+		// concerns enumerated in the package doc comment.
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.descr, func(t *testing.T) {
+			fset := token.NewFileSet()
+			mustParse := func(filename string, content any) *ast.File {
+				f, err := parser.ParseFile(fset, filename, content, parser.ParseComments|parser.SkipObjectResolution)
+				if err != nil {
+					t.Fatalf("ParseFile: %v", err)
+				}
+				return f
+			}
+
+			// Parse callee file and find first func decl named f.
+			calleeContent := "package p\n" + test.callee
+			calleeFile := mustParse("callee.go", calleeContent)
+			var decl *ast.FuncDecl
+			for _, d := range calleeFile.Decls {
+				if d, ok := d.(*ast.FuncDecl); ok && d.Name.Name == funcName {
+					decl = d
+					break
+				}
+			}
+			if decl == nil {
+				t.Fatalf("declaration of func %s not found: %s", funcName, test.callee)
+			}
+
+			// Parse caller file and find first call to f().
+			callerContent := "package p\n" + test.caller
+			callerFile := mustParse("caller.go", callerContent)
+			var call *ast.CallExpr
+			ast.Inspect(callerFile, func(n ast.Node) bool {
+				if n, ok := n.(*ast.CallExpr); ok {
+					switch fun := n.Fun.(type) {
+					case *ast.SelectorExpr:
+						if fun.Sel.Name == funcName {
+							call = n
+						}
+					case *ast.Ident:
+						if fun.Name == funcName {
+							call = n
+						}
+					}
+				}
+				return call == nil
+			})
+			if call == nil {
+				t.Fatalf("call to %s not found: %s", funcName, test.caller)
+			}
+
+			// Type check both files as one package.
+			info := &types.Info{
+				Defs:       make(map[*ast.Ident]types.Object),
+				Uses:       make(map[*ast.Ident]types.Object),
+				Types:      make(map[ast.Expr]types.TypeAndValue),
+				Implicits:  make(map[ast.Node]types.Object),
+				Selections: make(map[*ast.SelectorExpr]*types.Selection),
+				Scopes:     make(map[ast.Node]*types.Scope),
+			}
+			conf := &types.Config{Error: func(err error) { t.Error(err) }}
+			pkg, err := conf.Check("p", fset, []*ast.File{callerFile, calleeFile}, info)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Analyze callee and inline call.
+			doIt := func() ([]byte, error) {
+				callee, err := inline.AnalyzeCallee(fset, pkg, info, decl, []byte(calleeContent))
+				if err != nil {
+					return nil, err
+				}
+				if err := checkTranscode(callee); err != nil {
+					t.Fatal(err)
+				}
+
+				caller := &inline.Caller{
+					Fset:    fset,
+					Types:   pkg,
+					Info:    info,
+					File:    callerFile,
+					Call:    call,
+					Content: []byte(callerContent),
+				}
+				check := checkNoMutation(caller.File)
+				defer check()
+				return inline.Inline(t.Logf, caller, callee)
+			}
+			gotContent, err := doIt()
+
+			// Want error?
+			if rest := strings.TrimPrefix(test.want, "error: "); rest != test.want {
+				if err == nil {
+					t.Fatalf("unexpected sucess: want error matching %q", rest)
+				}
+				msg := err.Error()
+				if ok, err := regexp.MatchString(rest, msg); err != nil {
+					t.Fatalf("invalid regexp: %v", err)
+				} else if !ok {
+					t.Fatalf("wrong error: %s (want match for %q)", msg, rest)
+				}
+				return
+			}
+
+			// Want success.
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Compute a single-hunk line-based diff.
+			srcLines := strings.Split(callerContent, "\n")
+			gotLines := strings.Split(string(gotContent), "\n")
+			for len(srcLines) > 0 && len(gotLines) > 0 &&
+				srcLines[0] == gotLines[0] {
+				srcLines = srcLines[1:]
+				gotLines = gotLines[1:]
+			}
+			for len(srcLines) > 0 && len(gotLines) > 0 &&
+				srcLines[len(srcLines)-1] == gotLines[len(gotLines)-1] {
+				srcLines = srcLines[:len(srcLines)-1]
+				gotLines = gotLines[:len(gotLines)-1]
+			}
+			got := strings.Join(gotLines, "\n")
+
+			if strings.TrimSpace(got) != strings.TrimSpace(test.want) {
+				t.Errorf("\nInlining this call:\t%s\nof this callee:    \t%s\nproduced:\n%s\nWant:\n\n%s",
+					test.caller,
+					test.callee,
+					got,
+					test.want)
+			}
+
+			// Check that resulting code type-checks.
+			newCallerFile := mustParse("newcaller.go", gotContent)
+			if _, err := conf.Check("p", fset, []*ast.File{newCallerFile, calleeFile}, nil); err != nil {
+				t.Fatalf("modified source failed to typecheck: <<%s>>", gotContent)
+			}
+		})
+	}
+}
+
+// -- helpers --
+
+// checkNoMutation returns a function that, when called,
+// asserts that file was not modified since the checkNoMutation call.
+func checkNoMutation(file *ast.File) func() {
+	pre := deepHash(file)
+	return func() {
+		post := deepHash(file)
+		if pre != post {
+			panic("Inline mutated caller.File")
+		}
+	}
+}
+
+// checkTranscode replaces *callee by the results of gob-encoding and
+// then decoding it, to test that these operations are lossless.
+func checkTranscode(callee *inline.Callee) error {
+	// Perform Gob transcoding so that it is exercised by the test.
+	var enc bytes.Buffer
+	if err := gob.NewEncoder(&enc).Encode(callee); err != nil {
+		return fmt.Errorf("internal error: gob encoding failed: %v", err)
+	}
+	*callee = inline.Callee{}
+	if err := gob.NewDecoder(&enc).Decode(callee); err != nil {
+		return fmt.Errorf("internal error: gob decoding failed: %v", err)
+	}
+	return nil
+}
+
 // TODO(adonovan): publish this a helper (#61386).
 func extractTxtar(ar *txtar.Archive, dir string) error {
 	for _, file := range ar.Files {
@@ -322,4 +555,84 @@ func extractTxtar(ar *txtar.Archive, dir string) error {
 		}
 	}
 	return nil
+}
+
+// deepHash computes a cryptographic hash of an ast.Node so that
+// if the data structure is mutated, the hash changes.
+// It assumes Go variables do not change address.
+//
+// TODO(adonovan): consider publishing this in the astutil package.
+//
+// TODO(adonovan): consider a variant that reports where in the tree
+// the mutation occurred (obviously at a cost in space).
+func deepHash(n ast.Node) any {
+	seen := make(map[unsafe.Pointer]bool) // to break cycles
+
+	hasher := sha256.New()
+	le := binary.LittleEndian
+	writeUint64 := func(v uint64) {
+		var bs [8]byte
+		le.PutUint64(bs[:], v)
+		hasher.Write(bs[:])
+	}
+
+	var visit func(reflect.Value)
+	visit = func(v reflect.Value) {
+		switch v.Kind() {
+		case reflect.Ptr:
+			ptr := v.UnsafePointer()
+			writeUint64(uint64(uintptr(ptr)))
+			if !v.IsNil() {
+				if !seen[ptr] {
+					seen[ptr] = true
+					// Skip types we don't handle yet, but don't care about.
+					switch v.Interface().(type) {
+					case *ast.Scope:
+						return // involves a map
+					}
+
+					visit(v.Elem())
+				}
+			}
+
+		case reflect.Struct:
+			for i := 0; i < v.Type().NumField(); i++ {
+				visit(v.Field(i))
+			}
+
+		case reflect.Slice:
+			ptr := v.UnsafePointer()
+			// We may encounter different slices at the same address,
+			// so don't mark ptr as "seen".
+			writeUint64(uint64(uintptr(ptr)))
+			writeUint64(uint64(v.Len()))
+			writeUint64(uint64(v.Cap()))
+			for i := 0; i < v.Len(); i++ {
+				visit(v.Index(i))
+			}
+
+		case reflect.Interface:
+			if v.IsNil() {
+				writeUint64(0)
+			} else {
+				rtype := reflect.ValueOf(v.Type()).UnsafePointer()
+				writeUint64(uint64(uintptr(rtype)))
+				visit(v.Elem())
+			}
+
+		case reflect.Array, reflect.Chan, reflect.Func, reflect.Map, reflect.UnsafePointer:
+			panic(v) // unreachable in AST
+
+		default: // bool, string, number
+			if v.Kind() == reflect.String { // proper framing
+				writeUint64(uint64(v.Len()))
+			}
+			binary.Write(hasher, le, v.Interface())
+		}
+	}
+	visit(reflect.ValueOf(n))
+
+	var hash [sha256.Size]byte
+	hasher.Sum(hash[:0])
+	return hash
 }
