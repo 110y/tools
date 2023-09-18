@@ -93,7 +93,7 @@ func TestData(t *testing.T) {
 						continue
 					}
 					for _, note := range notes {
-						posn := pkg.Fset.Position(note.Pos)
+						posn := pkg.Fset.PositionFor(note.Pos, false)
 						if note.Name != "inline" {
 							t.Errorf("%s: invalid marker @%s", posn, note.Name)
 							continue
@@ -325,6 +325,18 @@ func TestTable(t *testing.T) {
 		want           string // expected new portion of caller file, or "error: regexp"
 	}{
 		{
+			"Generic functions are not yet supported.",
+			`func f[T any](x T) T { return x }`,
+			`var _ = f(0)`,
+			`error: type parameters are not yet supported`,
+		},
+		{
+			"Methods on generic types are not yet supported.",
+			`type G[T any] struct{}; func (G[T]) f(x T) T { return x }`,
+			`var _ = G[int]{}.f(0)`,
+			`error: type parameters are not yet supported`,
+		},
+		{
 			"Basic",
 			`func f(x int) int { return x }`,
 			`var _ = f(0)`,
@@ -451,6 +463,45 @@ func TestTable(t *testing.T) {
 			`func _() { func(int, y any, z int) { defer println(int, y, z) }(g(), g(), g()) }
 `,
 		},
+		// Embedded fields:
+		{
+			"Embedded fields in x.f method selection (direct).",
+			`type T int; func (t T) f() { print(t) }; type U struct{ T }`,
+			`func _(u U) { u.f() }`,
+			`func _(u U) { print(u.T) }`,
+		},
+		{
+			"Embedded fields in x.f method selection (implicit *).",
+			`type ( T int; U struct{*T}; V struct {U} ); func (t T) f() { print(t) }`,
+			`func _(v V) { v.f() }`,
+			`func _(v V) { print(*v.U.T) }`,
+		},
+		{
+			"Embedded fields in x.f method selection (implicit &).",
+			`type ( T int; U struct{T}; V struct {U} ); func (t *T) f() { print(t) }`,
+			`func _(v V) { v.f() }`,
+			`func _(v V) { print(&v.U.T) }`,
+		},
+		// Now the same tests again with T.f(recv).
+		{
+			"Embedded fields in T.f method selection.",
+			`type T int; func (t T) f() { print(t) }; type U struct{ T }`,
+			`func _(u U) { U.f(u) }`,
+			`func _(u U) { print(u.T) }`,
+		},
+		{
+			"Embedded fields in T.f method selection (implicit *).",
+			`type ( T int; U struct{*T}; V struct {U} ); func (t T) f() { print(t) }`,
+			`func _(v V) { V.f(v) }`,
+			`func _(v V) { print(*v.U.T) }`,
+		},
+		{
+			"Embedded fields in (*T).f method selection.",
+			`type ( T int; U struct{T}; V struct {U} ); func (t *T) f() { print(t) }`,
+			`func _(v V) { (*V).f(&v) }`,
+			`func _(v V) { print(&(&v).U.T) }`,
+		},
+
 		// TODO(adonovan): improve coverage of the cross
 		// product of each strategy with the checklist of
 		// concerns enumerated in the package doc comment.

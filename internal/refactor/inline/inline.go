@@ -82,6 +82,31 @@
 //     with effects, but with further analysis of the sequence of
 //     strict effects within the callee we could relax this constraint.
 //
+//   - When not all parameters can be substituted by their arguments
+//     (e.g. due to possible effects), if the call appears in a
+//     statement context, the inliner may introduce a var declaration
+//     that declares the parameter variables (with the correct types)
+//     and assigns them to their corresponding argument values.
+//     The rest of the function body may then follow.
+//     For example, the call
+//
+//     f(1, 2)
+//
+//     to the function
+//
+//     func f(x, y int32) { stmts }
+//
+//     may be reduced to
+//
+//     { var x, y int32 = 1, 2; stmts }.
+//
+//     There are many reasons why this is not always possible. For
+//     example, true parameters are statically resolved in the same
+//     scope, and are dynamically assigned their arguments in
+//     parallel; but each spec in a var declaration is statically
+//     resolved in sequence and dynamically executed in sequence, so
+//     earlier parameters may shadow references in later ones.
+//
 //   - Even an argument expression as simple as ptr.x may not be
 //     referentially transparent, because another argument may have the
 //     effect of changing the value of ptr.
@@ -221,47 +246,10 @@
 //     panics? Can we avoid evaluating an argument x.f
 //     or a[i] when the corresponding parameter is unused?
 //
-//   - When caller syntax permits a block, replace argument-to-parameter
-//     assignment by a set of local var decls, e.g. f(1, 2) would
-//     become { var x, y = 1, 2; body... }.
-//
-//     But even this is complicated: a single var decl initializer
-//     cannot declare all the parameters and initialize them to their
-//     arguments in one go if they have varied types. Instead,
-//     one must use multiple specs such as:
-//
-//     { var x int = 1; var y int32 = 2; body ...}
-//
-//     but this means that the initializer expression for y is
-//     within the scope of x, so it may require α-renaming.
-//
-//     It is tempting to use a short var decl { x, y := 1, 2; body ...}
-//     as it permits simultaneous declaration and initialization
-//     of many variables of varied type. However, one must take care
-//     to convert each argument expression to the correct parameter
-//     variable type, perhaps explicitly. (Consider "x := 1 << 64".)
-//
-//     Also, as a matter of style, having all parameter declarations
-//     and argument expressions in a single statement is potentially
-//     unwieldy.
-//
 //   - Support inlining of generic functions, replacing type parameters
 //     by their instantiations.
 //
-//   - Support inlining of calls to function literals such as:
-//
-//     f := func(...) { ... }
-//
-//     f()
-//
-//     including recursive ones:
-//
-//     var f func(...)
-//
-//     f = func(...) { ...f...}
-//
-//     f()
-//
+//   - Support inlining of calls to function literals ("closures").
 //     But note that the existing algorithm makes widespread assumptions
 //     that the callee is a package-level function or method.
 //
@@ -305,6 +293,7 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/types/typeutil"
 	"golang.org/x/tools/imports"
+	"golang.org/x/tools/internal/typeparams"
 )
 
 // A Caller describes the function call and its enclosing context.
@@ -316,7 +305,7 @@ type Caller struct {
 	Info    *types.Info
 	File    *ast.File
 	Call    *ast.CallExpr
-	Content []byte
+	Content []byte // source of file containing
 }
 
 // Inline inlines the called function (callee) into the function call (caller)
@@ -336,7 +325,11 @@ func Inline(logf func(string, ...any), caller *Caller, callee *Callee) ([]byte, 
 	}
 	logf("inline %s @ %v",
 		debugFormatNode(caller.Fset, caller.Call),
-		caller.Fset.Position(caller.Call.Lparen))
+		caller.Fset.PositionFor(caller.Call.Lparen, false))
+
+	if !consistentOffsets(caller) {
+		return nil, fmt.Errorf("internal error: caller syntax positions are inconsistent with file content (did you forget to use FileSet.PositionFor when computing the file name?)")
+	}
 
 	res, err := inline(logf, caller, &callee.impl)
 	if err != nil {
@@ -389,15 +382,10 @@ func Inline(logf func(string, ...any), caller *Caller, callee *Callee) ([]byte, 
 			f.Decls = prepend[ast.Decl](importDecl, f.Decls...)
 		}
 		for _, spec := range res.newImports {
-			// Check that all imports (in particular, the new ones) are accessible.
-			// TODO(adonovan): allow customization of the accessibility relation
-			// (e.g. for Bazel).
+			// Check that the new imports are accessible.
 			path, _ := strconv.Unquote(spec.Path.Value)
-			// TODO(adonovan): better segment hygiene.
-			if i := strings.Index(path, "/internal/"); i >= 0 {
-				if !strings.HasPrefix(caller.Types.Path(), path[:i]) {
-					return nil, fmt.Errorf("can't inline function %v as its body refers to inaccessible package %q", callee, path)
-				}
+			if !canImport(caller.Types.Path(), path) {
+				return nil, fmt.Errorf("can't inline function %v as its body refers to inaccessible package %q", callee, path)
 			}
 			importDecl.Specs = append(importDecl.Specs, spec)
 		}
@@ -541,47 +529,58 @@ func inline(logf func(string, ...any), caller *Caller, callee *gobCallee) (*resu
 	// qualified identifier (QI) in the callee is always
 	// represented by a QI in the caller, allowing us to treat a
 	// QI like a selection on a package name.
-	importMap := make(map[string]string) // maps package path to local name
+	importMap := make(map[string][]string) // maps package path to local name(s)
 	for _, imp := range caller.File.Imports {
-		if pkgname, ok := importedPkgName(caller.Info, imp); ok && pkgname.Name() != "." {
-			importMap[pkgname.Imported().Path()] = pkgname.Name()
+		if pkgname, ok := importedPkgName(caller.Info, imp); ok &&
+			pkgname.Name() != "." &&
+			pkgname.Name() != "_" {
+			path := pkgname.Imported().Path()
+			importMap[path] = append(importMap[path], pkgname.Name())
 		}
 	}
 
 	// localImportName returns the local name for a given imported package path.
 	var newImports []*ast.ImportSpec
 	localImportName := func(path string) string {
-		name, ok := importMap[path]
-		if !ok {
-			// import added by callee
-			//
-			// Choose local PkgName based on last segment of
-			// package path plus, if needed, a numeric suffix to
-			// ensure uniqueness.
-			//
-			// TODO(adonovan): preserve the PkgName used
-			// in the original source, or, for a dot import,
-			// use the package's declared name.
-			base := pathpkg.Base(path)
-			name = base
-			for n := 0; callerLookup(name) != nil; n++ {
-				name = fmt.Sprintf("%s%d", base, n)
+		// Does an import exist?
+		for _, name := range importMap[path] {
+			// Check that either the import preexisted,
+			// or that it was newly added (no PkgName) but is not shadowed.
+			found := callerLookup(name)
+			if is[*types.PkgName](found) || found == nil {
+				return name
 			}
-
-			// TODO(adonovan): don't use a renaming import
-			// unless the local name differs from either
-			// the package name or the last segment of path.
-			// This requires that we tabulate (path, declared name, local name)
-			// triples for each package referenced by the callee.
-			newImports = append(newImports, &ast.ImportSpec{
-				Name: makeIdent(name),
-				Path: &ast.BasicLit{
-					Kind:  token.STRING,
-					Value: strconv.Quote(path),
-				},
-			})
-			importMap[path] = name
 		}
+
+		// import added by callee
+		//
+		// Choose local PkgName based on last segment of
+		// package path plus, if needed, a numeric suffix to
+		// ensure uniqueness.
+		//
+		// TODO(adonovan): preserve the PkgName used
+		// in the original source, or, for a dot import,
+		// use the package's declared name.
+		base := pathpkg.Base(path)
+		name := base
+		for n := 0; callerLookup(name) != nil; n++ {
+			name = fmt.Sprintf("%s%d", base, n)
+		}
+
+		// TODO(adonovan): don't use a renaming import
+		// unless the local name differs from either
+		// the package name or the last segment of path.
+		// This requires that we tabulate (path, declared name, local name)
+		// triples for each package referenced by the callee.
+		logf("adding import %s %q", name, path)
+		newImports = append(newImports, &ast.ImportSpec{
+			Name: makeIdent(name),
+			Path: &ast.BasicLit{
+				Kind:  token.STRING,
+				Value: strconv.Quote(path),
+			},
+		})
+		importMap[path] = append(importMap[path], name)
 		return name
 	}
 
@@ -616,7 +615,7 @@ func inline(logf func(string, ...any), caller *Caller, callee *gobCallee) (*resu
 			if found.Pos().IsValid() {
 				return nil, fmt.Errorf("cannot inline because built-in %q is shadowed in caller by a %s (line %d)",
 					obj.Name, objectKind(found),
-					caller.Fset.Position(found.Pos()).Line)
+					caller.Fset.PositionFor(found.Pos(), false).Line)
 			}
 
 		} else {
@@ -632,7 +631,7 @@ func inline(logf func(string, ...any), caller *Caller, callee *gobCallee) (*resu
 					if !isPkgLevel(found) {
 						return nil, fmt.Errorf("cannot inline because %q is shadowed in caller by a %s (line %d)",
 							obj.Name, objectKind(found),
-							caller.Fset.Position(found.Pos()).Line)
+							caller.Fset.PositionFor(found.Pos(), false).Line)
 					}
 				} else {
 					// Cross-package reference.
@@ -719,63 +718,97 @@ func inline(logf func(string, ...any), caller *Caller, callee *gobCallee) (*resu
 		freevars   map[string]bool // free names of expr
 	}
 	var args []*argument // effective arguments; nil => eliminated
-	if calleeDecl.Recv != nil {
-		sel := astutil.Unparen(caller.Call.Fun).(*ast.SelectorExpr)
-		if caller.Info.Selections[sel].Kind() == types.MethodVal {
-			// Move receiver argument recv.f(args) to argument list f(&recv, args).
-			arg := &argument{
-				expr:       sel.X,
-				typ:        caller.Info.TypeOf(sel.X),
-				pure:       pure(caller.Info, sel.X),
-				duplicable: duplicable(caller.Info, sel.X),
-				freevars:   freeVars(caller.Info, sel.X),
+	{
+		// TODO(adonovan): extract to a function (in a separate CL).
+		callArgs := caller.Call.Args
+		if calleeDecl.Recv != nil {
+			sel := astutil.Unparen(caller.Call.Fun).(*ast.SelectorExpr)
+			seln := caller.Info.Selections[sel]
+			var recvArg ast.Expr
+			switch seln.Kind() {
+			case types.MethodVal: // recv.f(callArgs)
+				recvArg = sel.X
+			case types.MethodExpr: // T.f(recv, callArgs)
+				recvArg = callArgs[0]
+				callArgs = callArgs[1:]
 			}
-			args = append(args, arg)
+			if recvArg != nil {
+				// Compute all the type-based predicates now,
+				// before we start meddling with the syntax;
+				// the meddling will update them.
+				arg := &argument{
+					expr:       recvArg,
+					typ:        caller.Info.TypeOf(recvArg),
+					pure:       pure(caller.Info, recvArg),
+					duplicable: duplicable(caller.Info, recvArg),
+					freevars:   freeVars(caller.Info, recvArg),
+				}
+				recvArg = nil // prevent accidental use
 
-			// Make * or & explicit.
-			//
-			// We do this after we've computed the type-based
-			// predicates (pure et al) above, as they won't
-			// work on synthetic syntax.
-			argIsPtr := arg.typ != deref(arg.typ)
-			paramIsPtr := is[*types.Pointer](calleeSymbol.Type().(*types.Signature).Recv().Type())
-			if !argIsPtr && paramIsPtr {
-				// &recv
-				arg.expr = &ast.UnaryExpr{Op: token.AND, X: arg.expr}
-				arg.typ = types.NewPointer(arg.typ)
-			} else if argIsPtr && !paramIsPtr {
-				// *recv
-				arg.expr = &ast.StarExpr{X: arg.expr}
-				arg.typ = deref(arg.typ)
+				// Move receiver argument recv.f(args) to argument list f(&recv, args).
+				args = append(args, arg)
 
-				// Technically *recv is non-pure and
-				// non-duplicable, as side effects
-				// could change the pointer between
-				// multiple reads. But unfortunately
-				// this really degrades many of our tests.
-				//
-				// TODO(adonovan): improve the precision
-				// purity and duplicability.
-				// For example, *new(T) is actually pure.
-				// And *ptr, where ptr doesn't escape and
-				// has no assignments other than its decl,
-				// is also pure; this is very common.
-				//
-				// arg.pure = false
-				// arg.duplicable = false
+				// Make field selections explicit (recv.f -> recv.y.f),
+				// updating arg.{expr,typ}.
+				indices := seln.Index()
+				for _, index := range indices[:len(indices)-1] {
+					t := deref(arg.typ)
+					fld := typeparams.CoreType(t).(*types.Struct).Field(index)
+					if fld.Pkg() != caller.Types && !fld.Exported() {
+						return nil, fmt.Errorf("in %s, implicit reference to unexported field .%s cannot be made explicit",
+							debugFormatNode(caller.Fset, caller.Call.Fun),
+							fld.Name())
+					}
+					arg.expr = &ast.SelectorExpr{
+						X:   arg.expr,
+						Sel: makeIdent(fld.Name()),
+					}
+					arg.typ = fld.Type()
+				}
+
+				// Make * or & explicit.
+				argIsPtr := arg.typ != deref(arg.typ)
+				paramIsPtr := is[*types.Pointer](seln.Obj().Type().(*types.Signature).Recv().Type())
+				if !argIsPtr && paramIsPtr {
+					// &recv
+					arg.expr = &ast.UnaryExpr{Op: token.AND, X: arg.expr}
+					arg.typ = types.NewPointer(arg.typ)
+				} else if argIsPtr && !paramIsPtr {
+					// *recv
+					arg.expr = &ast.StarExpr{X: arg.expr}
+					arg.typ = deref(arg.typ)
+
+					// Technically *recv is non-pure and
+					// non-duplicable, as side effects
+					// could change the pointer between
+					// multiple reads. But unfortunately
+					// this really degrades many of our tests.
+					// (The indices loop above should similarly
+					// update these flags when traversing pointers.)
+					//
+					// TODO(adonovan): improve the precision of
+					// purity and duplicability.
+					// For example, *new(T) is actually pure.
+					// And *ptr, where ptr doesn't escape and
+					// has no assignments other than its decl,
+					// is also pure; this is very common.
+					//
+					// arg.pure = false
+					// arg.duplicable = false
+				}
 			}
 		}
-	}
-	for _, expr := range caller.Call.Args {
-		typ := caller.Info.TypeOf(expr)
-		args = append(args, &argument{
-			expr:       expr,
-			typ:        typ,
-			spread:     is[*types.Tuple](typ), // => last
-			pure:       pure(caller.Info, expr),
-			duplicable: duplicable(caller.Info, expr),
-			freevars:   freeVars(caller.Info, expr),
-		})
+		for _, expr := range callArgs {
+			typ := caller.Info.TypeOf(expr)
+			args = append(args, &argument{
+				expr:       expr,
+				typ:        typ,
+				spread:     is[*types.Tuple](typ), // => last
+				pure:       pure(caller.Info, expr),
+				duplicable: duplicable(caller.Info, expr),
+				freevars:   freeVars(caller.Info, expr),
+			})
+		}
 	}
 
 	// Gather effective parameter tuple, including the receiver if any.
@@ -928,7 +961,7 @@ func inline(logf func(string, ...any), caller *Caller, callee *gobCallee) (*resu
 						// function (if any) and is indeed referenced
 						// only by the call.
 						logf("keeping param %q: arg contains perhaps the last reference to possible caller local %v @ %v",
-							param.info.Name, v, caller.Fset.Position(v.Pos()))
+							param.info.Name, v, caller.Fset.PositionFor(v.Pos(), false))
 						continue next
 					}
 				}
@@ -2001,4 +2034,47 @@ func last[T any](slice []T) T {
 		return slice[n-1]
 	}
 	return *new(T)
+}
+
+// canImport reports whether one package is allowed to import another.
+//
+// TODO(adonovan): allow customization of the accessibility relation
+// (e.g. for Bazel).
+func canImport(from, to string) bool {
+	// TODO(adonovan): better segment hygiene.
+	if strings.HasPrefix(to, "internal/") {
+		// Special case: only std packages may import internal/...
+		// We can't reliably know whether we're in std, so we
+		// use a heuristic on the first segment.
+		first, _, _ := strings.Cut(from, "/")
+		if strings.Contains(first, ".") {
+			return false // example.com/foo ∉ std
+		}
+		if first == "testdata" {
+			return false // testdata/foo ∉ std
+		}
+	}
+	if i := strings.LastIndex(to, "/internal/"); i >= 0 {
+		return strings.HasPrefix(from, to[:i])
+	}
+	return true
+}
+
+// consistentOffsets reports whether the portion of caller.Content
+// that corresponds to caller.Call can be parsed as a call expression.
+// If not, the client has provided inconsistent information, possibly
+// because they forgot to ignore line directives when computing the
+// filename enclosing the call.
+// This is just a heuristic.
+func consistentOffsets(caller *Caller) bool {
+	start := offsetOf(caller.Fset, caller.Call.Pos())
+	end := offsetOf(caller.Fset, caller.Call.End())
+	if !(0 < start && start < end && end <= len(caller.Content)) {
+		return false
+	}
+	expr, err := parser.ParseExpr(string(caller.Content[start:end]))
+	if err != nil {
+		return false
+	}
+	return is[*ast.CallExpr](expr)
 }
