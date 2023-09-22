@@ -28,6 +28,8 @@ const (
 	TelemetryPromptWorkTitle    = "Checking telemetry prompt"     // progress notification title, for awaiting in tests
 	GoplsConfigDirEnvvar        = "GOPLS_CONFIG_DIR"              // overridden for testing
 	FakeTelemetryModefileEnvvar = "GOPLS_FAKE_TELEMETRY_MODEFILE" // overridden for testing
+	TelemetryYes                = "Yes, I'd like to help."
+	TelemetryNo                 = "No, thanks."
 )
 
 // getenv returns the effective environment variable value for the provided
@@ -60,7 +62,7 @@ func (s *Server) telemetryMode() string {
 		if data, err := os.ReadFile(fake); err == nil {
 			return string(data)
 		}
-		return "local"
+		return "off"
 	}
 	return telemetry.Mode()
 }
@@ -81,20 +83,20 @@ func (s *Server) setTelemetryMode(mode string) error {
 //
 // The actual conditions for prompting are defensive, erring on the side of not
 // prompting.
-func (s *Server) maybePromptForTelemetry(ctx context.Context) {
+// If enabled is false, this will not prompt the user in any condition,
+// but will send work progress reports to help testing.
+func (s *Server) maybePromptForTelemetry(ctx context.Context, enabled bool) {
 	if s.Options().VerboseWorkDoneProgress {
 		work := s.progress.Start(ctx, TelemetryPromptWorkTitle, "Checking if gopls should prompt about telemetry...", nil, nil)
 		defer work.End(ctx, "Done.")
 	}
 
-	if !s.Options().TelemetryPrompt {
+	if !enabled { // check this after the work progress message for testing.
 		return // prompt is disabled
 	}
 
-	// Only prompt if telemetry is in the default "local" mode. If it is already
-	// "on" there's nothing to ask about, and if it is explicitly "off" let's
-	// assume the user doesn't want it.
-	if s.telemetryMode() != "local" {
+	if s.telemetryMode() == "on" {
+		// Telemetry is already on -- nothing to ask about.
 		return
 	}
 
@@ -189,22 +191,40 @@ func (s *Server) maybePromptForTelemetry(ctx context.Context) {
 		return
 	}
 
-	const prompt = `Go telemetry helps us improve Go by periodically sending anonymous metrics and crash reports to the Go team. Learn more at https://telemetry.go.dev/privacy.
+	var prompt = `Go telemetry helps us improve Go by periodically sending anonymous metrics and crash reports to the Go team. Learn more at https://telemetry.go.dev/privacy.
 
 Would you like to enable Go telemetry?
 `
+	if s.Options().LinkifyShowMessage {
+		prompt = `Go telemetry helps us improve Go by periodically sending anonymous metrics and crash reports to the Go team. Learn more at [telemetry.go.dev/privacy](https://telemetry.go.dev/privacy).
 
+	Would you like to enable Go telemetry?
+	`
+	}
 	// TODO(rfindley): investigate a "tell me more" action in combination with ShowDocument.
 	params := &protocol.ShowMessageRequestParams{
 		Type:    protocol.Info,
 		Message: prompt,
-		Actions: []protocol.MessageActionItem{{Title: "Yes"}, {Title: "No"}},
+		Actions: []protocol.MessageActionItem{
+			{Title: TelemetryYes},
+			{Title: TelemetryNo},
+		},
 	}
+
 	item, err := s.client.ShowMessageRequest(ctx, params)
 	if err != nil {
 		errorf("ShowMessageRequest failed: %v", err)
 		// Defensive: ensure item == nil for the logic below.
 		item = nil
+	}
+
+	message := func(typ protocol.MessageType, msg string) {
+		if err := s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
+			Type:    typ,
+			Message: msg,
+		}); err != nil {
+			errorf("ShowMessage(unrecognize) failed: %v", err)
+		}
 	}
 
 	result := pFailed
@@ -214,25 +234,38 @@ Would you like to enable Go telemetry?
 	} else {
 		// Response matches MessageActionItem.Title.
 		switch item.Title {
-		case "Yes":
+		case TelemetryYes:
 			result = pYes
-			s.setTelemetryMode("on")
-		case "No":
+			if err := s.setTelemetryMode("on"); err == nil {
+				message(protocol.Info, telemetryOnMessage())
+			} else {
+				errorf("enabling telemetry failed: %v", err)
+				msg := fmt.Sprintf("Failed to enable Go telemetry: %v\nTo enable telemetry manually, please run `go run golang.org/x/telemetry/cmd/gotelemetry@latest on`", err)
+				message(protocol.Error, msg)
+			}
+
+		case TelemetryNo:
 			result = pNo
 		default:
 			errorf("unrecognized response %q", item.Title)
-			if err := s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
-				Type:    protocol.Error,
-				Message: fmt.Sprintf("Unrecognized response %q", item.Title),
-			}); err != nil {
-				errorf("ShowMessage failed: %v", err)
-			}
+			message(protocol.Error, fmt.Sprintf("Unrecognized response %q", item.Title))
 		}
 	}
 	resultContent := []byte(fmt.Sprintf("%s %d", result, attempts))
 	if err := os.WriteFile(promptFile, resultContent, 0666); err != nil {
 		errorf("error writing result state to prompt file: %v", err)
 	}
+}
+
+func telemetryOnMessage() string {
+	reportDate := time.Now().AddDate(0, 0, 7).Format("2006-01-02")
+	return fmt.Sprintf(`Telemetry uploading is now enabled and may be sent to https://telemetry.go.dev/ starting %s. Uploaded data is used to help improve the Go toolchain and related tools, and it will be published as part of a public dataset.
+
+For more details, see https://telemetry.go.dev/privacy.
+This data is collected in accordance with the Google Privacy Policy (https://policies.google.com/privacy).
+
+To disable telemetry uploading, run %s.
+`, reportDate, "`go run golang.org/x/telemetry/cmd/gotelemetry@latest off`")
 }
 
 // acquireLockFile attempts to "acquire a lock" for writing to path.
