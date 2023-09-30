@@ -100,7 +100,7 @@ func TestEverything(t *testing.T) {
 				}
 
 				// Prepare caller info.
-				callPosn := callerPkg.Fset.Position(call.Lparen)
+				callPosn := callerPkg.Fset.PositionFor(call.Lparen, false)
 				callerContent, err := readFile(callPosn.Filename)
 				if err != nil {
 					t.Fatal(err)
@@ -119,7 +119,7 @@ func TestEverything(t *testing.T) {
 				if !ok {
 					t.Fatalf("missing package for callee %v", fn)
 				}
-				calleePosn := callerPkg.Fset.Position(fn.Pos())
+				calleePosn := callerPkg.Fset.PositionFor(fn.Pos(), false)
 				calleeDecl, err := findFuncByPosition(calleePkg, calleePosn)
 				if err != nil {
 					t.Fatal(err)
@@ -153,6 +153,7 @@ func TestEverything(t *testing.T) {
 							"has no body",
 							"type parameters are not yet",
 							"line directives",
+							"cgo-generated",
 						} {
 							if strings.Contains(err.Error(), ignore) {
 								return
