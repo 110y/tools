@@ -399,6 +399,16 @@ func TestBasics(t *testing.T) {
 	var _ = 3
 }`,
 		},
+		{
+			// (a regression test for a missing conversion)
+			"Implicit return conversions are inserted in expr-context reduction.",
+			`func f(x int) error { return nil }`,
+			`func _() { if err := f(0); err != nil {} }`,
+			`func _() {
+	if err := error(nil); err != nil {
+	}
+}`,
+		},
 	})
 }
 
@@ -595,6 +605,36 @@ func TestSubstitution(t *testing.T) {
 			`func _() { var local int; _ = local }`,
 		},
 		{
+			"Arguments that are used are detected",
+			`func f(int) {}`,
+			`func _() { var local int; _ = local; f(local) }`,
+			`func _() { var local int; _ = local }`,
+		},
+		{
+			"Arguments that are used are detected",
+			`func f(x, y int) { print(x) }`,
+			`func _() { var z int; f(z, z) }`,
+			`func _() {
+	var z int
+	var _ int = z
+	print(z)
+}`,
+		},
+		{
+			"Function parameters are always used",
+			`func f(int) {}`,
+			`func _() {
+	func(local int) {
+		f(local)
+	}(1)
+}`,
+			`func _() {
+	func(local int) {
+
+	}(1)
+}`,
+		},
+		{
 			"Regression test for detection of shadowing in nested functions.",
 			`func f(x int) { _ = func() { y := 1; print(y); print(x) } }`,
 			`func _(y int) { f(y) } `,
@@ -643,7 +683,7 @@ func TestTailCallStrategy(t *testing.T) {
 			"Tail call with non-trivial return conversion (caller.sig != callee.sig).",
 			`func f() error { return E{} }; type E struct{error}`,
 			`func _() any { return f() }`,
-			`func _() any { return func() error { return E{} }() }`,
+			`func _() any { return error(E{}) }`,
 		},
 	})
 }
@@ -684,6 +724,12 @@ func TestSpreadCalls(t *testing.T) {
 			`func _() (int, error) { return f() }`,
 			`func _() (int, error) { return 0, nil }`,
 		},
+		{
+			"Implicit return conversions defeat reduction of spread returns, for now.",
+			`func f(x int) (_, _ error) { return nil, nil }`,
+			`func _() { _, _ = f(0) }`,
+			`func _() { _, _ = func() (_, _ error) { return nil, nil }() }`,
+		},
 	})
 }
 
@@ -693,7 +739,7 @@ func TestVariadic(t *testing.T) {
 			"Variadic cancellation (basic).",
 			`func f(args ...any) { defer f(&args); println(args) }`,
 			`func _(slice []any) { f(slice...) }`,
-			`func _(slice []any) { func(args []any) { defer f(&args); println(args) }(slice) }`,
+			`func _(slice []any) { func() { var args []any = slice; defer f(&args); println(args) }() }`,
 		},
 		{
 			"Variadic cancellation (literalization with parameter elimination).",
@@ -796,6 +842,24 @@ func TestParameterBindingDecl(t *testing.T) {
 			`func f(x *T, y any) any { return x.g(y) }; type T struct{}; func (*T) g(x any) any { return x }`,
 			`func _(x *T) { f(x, recover()) }`,
 			`func _(x *T) { x.g(recover()) }`,
+		},
+		{
+			"Literalization can make use of a binding decl (all params).",
+			`func f(x, y int) int { defer println(); return y + x }; func g(int) int`,
+			`func _() { println(f(g(1), g(2))) }`,
+			`func _() { println(func() int { var x, y int = g(1), g(2); defer println(); return y + x }()) }`,
+		},
+		{
+			"Literalization can make use of a binding decl (some params).",
+			`func f(x, y int) int { z := y + x; defer println(); return z }; func g(int) int`,
+			`func _() { println(f(g(1), g(2))) }`,
+			`func _() { println(func() int { var x int = g(1); z := g(2) + x; defer println(); return z }()) }`,
+		},
+		{
+			"Literalization can't yet use of a binding decl if named results.",
+			`func f(x, y int) (z int) { z = y + x; defer println(); return }; func g(int) int`,
+			`func _() { println(f(g(1), g(2))) }`,
+			`func _() { println(func(x int) (z int) { z = g(2) + x; defer println(); return }(g(1))) }`,
 		},
 	})
 }
