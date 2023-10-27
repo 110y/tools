@@ -15,7 +15,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,11 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/tools/go/expect"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/packages/packagestest"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/source/completion"
 	"golang.org/x/tools/gopls/internal/lsp/tests/compare"
@@ -58,9 +55,6 @@ type CallHierarchy = map[span.Span]*CallHierarchyResult
 type CompletionItems = map[token.Pos]*completion.CompletionItem
 type Completions = map[span.Span][]Completion
 type CompletionSnippets = map[span.Span][]CompletionSnippet
-type DeepCompletions = map[span.Span][]Completion
-type FuzzyCompletions = map[span.Span][]Completion
-type CaseSensitiveCompletions = map[span.Span][]Completion
 type RankCompletions = map[span.Span][]Completion
 type SemanticTokens = []span.Span
 type SuggestedFixes = map[span.Span][]SuggestedFix
@@ -68,32 +62,25 @@ type MethodExtractions = map[span.Span]span.Span
 type Renames = map[span.Span]string
 type PrepareRenames = map[span.Span]*source.PrepareItem
 type InlayHints = []span.Span
-type Signatures = map[span.Span]*protocol.SignatureHelp
-type Links = map[span.URI][]Link
 type AddImport = map[span.URI]string
 type SelectionRanges = []span.Span
 
 type Data struct {
-	Config                   packages.Config
-	Exported                 *packagestest.Exported
-	CallHierarchy            CallHierarchy
-	CompletionItems          CompletionItems
-	Completions              Completions
-	CompletionSnippets       CompletionSnippets
-	DeepCompletions          DeepCompletions
-	FuzzyCompletions         FuzzyCompletions
-	CaseSensitiveCompletions CaseSensitiveCompletions
-	RankCompletions          RankCompletions
-	SemanticTokens           SemanticTokens
-	SuggestedFixes           SuggestedFixes
-	MethodExtractions        MethodExtractions
-	Renames                  Renames
-	InlayHints               InlayHints
-	PrepareRenames           PrepareRenames
-	Signatures               Signatures
-	Links                    Links
-	AddImport                AddImport
-	SelectionRanges          SelectionRanges
+	Config             packages.Config
+	Exported           *packagestest.Exported
+	CallHierarchy      CallHierarchy
+	CompletionItems    CompletionItems
+	Completions        Completions
+	CompletionSnippets CompletionSnippets
+	RankCompletions    RankCompletions
+	SemanticTokens     SemanticTokens
+	SuggestedFixes     SuggestedFixes
+	MethodExtractions  MethodExtractions
+	Renames            Renames
+	InlayHints         InlayHints
+	PrepareRenames     PrepareRenames
+	AddImport          AddImport
+	SelectionRanges    SelectionRanges
 
 	fragments map[string]string
 	dir       string
@@ -116,9 +103,6 @@ type Tests interface {
 	CallHierarchy(*testing.T, span.Span, *CallHierarchyResult)
 	Completion(*testing.T, span.Span, Completion, CompletionItems)
 	CompletionSnippet(*testing.T, span.Span, CompletionSnippet, bool, CompletionItems)
-	DeepCompletion(*testing.T, span.Span, Completion, CompletionItems)
-	FuzzyCompletion(*testing.T, span.Span, Completion, CompletionItems)
-	CaseSensitiveCompletion(*testing.T, span.Span, Completion, CompletionItems)
 	RankCompletion(*testing.T, span.Span, Completion, CompletionItems)
 	SemanticTokens(*testing.T, span.Span)
 	SuggestedFix(*testing.T, span.Span, []SuggestedFix, int)
@@ -126,8 +110,6 @@ type Tests interface {
 	InlayHints(*testing.T, span.Span)
 	Rename(*testing.T, span.Span, string)
 	PrepareRename(*testing.T, span.Span, *source.PrepareItem)
-	SignatureHelp(*testing.T, span.Span, *protocol.SignatureHelp)
-	Link(*testing.T, span.URI, []Link)
 	AddImport(*testing.T, span.URI, string)
 	SelectionRanges(*testing.T, span.Span)
 }
@@ -137,15 +119,6 @@ type CompletionTestType int
 const (
 	// Default runs the standard completion tests.
 	CompletionDefault = CompletionTestType(iota)
-
-	// Deep tests deep completion.
-	CompletionDeep
-
-	// Fuzzy tests deep completion and fuzzy matching.
-	CompletionFuzzy
-
-	// CaseSensitive tests case sensitive completion.
-	CompletionCaseSensitive
 
 	// CompletionRank candidates in test must be valid and in the right relative order.
 	CompletionRank
@@ -234,21 +207,16 @@ func RunTests(t *testing.T, dataDir string, includeMultiModule bool, f func(*tes
 
 func load(t testing.TB, mode string, dir string) *Data {
 	datum := &Data{
-		CallHierarchy:            make(CallHierarchy),
-		CompletionItems:          make(CompletionItems),
-		Completions:              make(Completions),
-		CompletionSnippets:       make(CompletionSnippets),
-		DeepCompletions:          make(DeepCompletions),
-		FuzzyCompletions:         make(FuzzyCompletions),
-		RankCompletions:          make(RankCompletions),
-		CaseSensitiveCompletions: make(CaseSensitiveCompletions),
-		Renames:                  make(Renames),
-		PrepareRenames:           make(PrepareRenames),
-		SuggestedFixes:           make(SuggestedFixes),
-		MethodExtractions:        make(MethodExtractions),
-		Signatures:               make(Signatures),
-		Links:                    make(Links),
-		AddImport:                make(AddImport),
+		CallHierarchy:      make(CallHierarchy),
+		CompletionItems:    make(CompletionItems),
+		Completions:        make(Completions),
+		CompletionSnippets: make(CompletionSnippets),
+		RankCompletions:    make(RankCompletions),
+		Renames:            make(Renames),
+		PrepareRenames:     make(PrepareRenames),
+		SuggestedFixes:     make(SuggestedFixes),
+		MethodExtractions:  make(MethodExtractions),
+		AddImport:          make(AddImport),
 
 		dir:       dir,
 		fragments: map[string]string{},
@@ -383,17 +351,12 @@ func load(t testing.TB, mode string, dir string) *Data {
 	if err := datum.Exported.Expect(map[string]interface{}{
 		"item":           datum.collectCompletionItems,
 		"complete":       datum.collectCompletions(CompletionDefault),
-		"deep":           datum.collectCompletions(CompletionDeep),
-		"fuzzy":          datum.collectCompletions(CompletionFuzzy),
-		"casesensitive":  datum.collectCompletions(CompletionCaseSensitive),
 		"rank":           datum.collectCompletions(CompletionRank),
 		"snippet":        datum.collectCompletionSnippets,
 		"semantic":       datum.collectSemanticTokens,
 		"inlayHint":      datum.collectInlayHints,
 		"rename":         datum.collectRenames,
 		"prepare":        datum.collectPrepareRenames,
-		"signature":      datum.collectSignatures,
-		"link":           datum.collectLinks,
 		"suggestedfix":   datum.collectSuggestedFixes,
 		"extractmethod":  datum.collectMethodExtractions,
 		"incomingcalls":  datum.collectIncomingCalls,
@@ -505,21 +468,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 		}
 	})
 
-	t.Run("DeepCompletion", func(t *testing.T) {
-		t.Helper()
-		eachCompletion(t, data.DeepCompletions, tests.DeepCompletion)
-	})
-
-	t.Run("FuzzyCompletion", func(t *testing.T) {
-		t.Helper()
-		eachCompletion(t, data.FuzzyCompletions, tests.FuzzyCompletion)
-	})
-
-	t.Run("CaseSensitiveCompletion", func(t *testing.T) {
-		t.Helper()
-		eachCompletion(t, data.CaseSensitiveCompletions, tests.CaseSensitiveCompletion)
-	})
-
 	t.Run("RankCompletions", func(t *testing.T) {
 		t.Helper()
 		eachCompletion(t, data.RankCompletions, tests.RankCompletion)
@@ -593,38 +541,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 		}
 	})
 
-	t.Run("SignatureHelp", func(t *testing.T) {
-		t.Helper()
-		for spn, expectedSignature := range data.Signatures {
-			t.Run(SpanName(spn), func(t *testing.T) {
-				t.Helper()
-				tests.SignatureHelp(t, spn, expectedSignature)
-			})
-		}
-	})
-
-	t.Run("Link", func(t *testing.T) {
-		t.Helper()
-		for uri, wantLinks := range data.Links {
-			// If we are testing GOPATH, then we do not want links with the versions
-			// attached (pkg.go.dev/repoa/moda@v1.1.0/pkg), unless the file is a
-			// go.mod, then we can skip it altogether.
-			if data.Exported.Exporter == packagestest.GOPATH {
-				if strings.HasSuffix(uri.Filename(), ".mod") {
-					continue
-				}
-				re := regexp.MustCompile(`@v\d+\.\d+\.[\w-]+`)
-				for i, link := range wantLinks {
-					wantLinks[i].Target = re.ReplaceAllString(link.Target, "")
-				}
-			}
-			t.Run(uriName(uri), func(t *testing.T) {
-				t.Helper()
-				tests.Link(t, uri, wantLinks)
-			})
-		}
-	})
-
 	t.Run("AddImport", func(t *testing.T) {
 		t.Helper()
 		for uri, exp := range data.AddImport {
@@ -660,10 +576,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 
 func checkData(t *testing.T, data *Data) {
 	buf := &bytes.Buffer{}
-	linksCount := 0
-	for _, want := range data.Links {
-		linksCount += len(want)
-	}
 
 	snippetCount := 0
 	for _, want := range data.CompletionSnippets {
@@ -680,18 +592,13 @@ func checkData(t *testing.T, data *Data) {
 	fmt.Fprintf(buf, "CallHierarchyCount = %v\n", len(data.CallHierarchy))
 	fmt.Fprintf(buf, "CompletionsCount = %v\n", countCompletions(data.Completions))
 	fmt.Fprintf(buf, "CompletionSnippetCount = %v\n", snippetCount)
-	fmt.Fprintf(buf, "DeepCompletionsCount = %v\n", countCompletions(data.DeepCompletions))
-	fmt.Fprintf(buf, "FuzzyCompletionsCount = %v\n", countCompletions(data.FuzzyCompletions))
 	fmt.Fprintf(buf, "RankedCompletionsCount = %v\n", countCompletions(data.RankCompletions))
-	fmt.Fprintf(buf, "CaseSensitiveCompletionsCount = %v\n", countCompletions(data.CaseSensitiveCompletions))
 	fmt.Fprintf(buf, "SemanticTokenCount = %v\n", len(data.SemanticTokens))
 	fmt.Fprintf(buf, "SuggestedFixCount = %v\n", len(data.SuggestedFixes))
 	fmt.Fprintf(buf, "MethodExtractionCount = %v\n", len(data.MethodExtractions))
 	fmt.Fprintf(buf, "InlayHintsCount = %v\n", len(data.InlayHints))
 	fmt.Fprintf(buf, "RenamesCount = %v\n", len(data.Renames))
 	fmt.Fprintf(buf, "PrepareRenamesCount = %v\n", len(data.PrepareRenames))
-	fmt.Fprintf(buf, "SignaturesCount = %v\n", len(data.Signatures))
-	fmt.Fprintf(buf, "LinksCount = %v\n", linksCount)
 	fmt.Fprintf(buf, "SelectionRangesCount = %v\n", len(data.SelectionRanges))
 
 	want := string(data.Golden(t, "summary", summaryFile, func() ([]byte, error) {
@@ -780,21 +687,9 @@ func (data *Data) collectCompletions(typ CompletionTestType) func(span.Span, []t
 		})
 	}
 	switch typ {
-	case CompletionDeep:
-		return func(src span.Span, expected []token.Pos) {
-			result(data.DeepCompletions, src, expected)
-		}
-	case CompletionFuzzy:
-		return func(src span.Span, expected []token.Pos) {
-			result(data.FuzzyCompletions, src, expected)
-		}
 	case CompletionRank:
 		return func(src span.Span, expected []token.Pos) {
 			result(data.RankCompletions, src, expected)
-		}
-	case CompletionCaseSensitive:
-		return func(src span.Span, expected []token.Pos) {
-			result(data.CaseSensitiveCompletions, src, expected)
 		}
 	default:
 		return func(src span.Span, expected []token.Pos) {
@@ -897,36 +792,11 @@ func (data *Data) mustRange(spn span.Span) protocol.Range {
 	return rng
 }
 
-func (data *Data) collectSignatures(spn span.Span, signature string, activeParam int64) {
-	data.Signatures[spn] = &protocol.SignatureHelp{
-		Signatures: []protocol.SignatureInformation{
-			{
-				Label: signature,
-			},
-		},
-		ActiveParameter: uint32(activeParam),
-	}
-	// Hardcode special case to test the lack of a signature.
-	if signature == "" && activeParam == 0 {
-		data.Signatures[spn] = nil
-	}
-}
-
 func (data *Data) collectCompletionSnippets(spn span.Span, item token.Pos, plain, placeholder string) {
 	data.CompletionSnippets[spn] = append(data.CompletionSnippets[spn], CompletionSnippet{
 		CompletionItem:     item,
 		PlainSnippet:       plain,
 		PlaceholderSnippet: placeholder,
-	})
-}
-
-func (data *Data) collectLinks(spn span.Span, link string, note *expect.Note, fset *token.FileSet) {
-	position := safetoken.StartPosition(fset, note.Pos)
-	uri := spn.URI()
-	data.Links[uri] = append(data.Links[uri], Link{
-		Src:          spn,
-		Target:       link,
-		NotePosition: position,
 	})
 }
 

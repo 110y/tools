@@ -181,6 +181,9 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //   - def(src, dst location): perform a textDocument/definition request at
 //     the src location, and check the result points to the dst location.
 //
+//   - documentLink(golden): asserts that textDocument/documentLink returns
+//     links as described by the golden file.
+//
 //   - foldingrange(golden): perform a textDocument/foldingRange for the
 //     current document, and compare with the golden content, which is the
 //     original source annotated with numbered tags delimiting the resulting
@@ -221,6 +224,10 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //
 //   - renameerr(location, new, wantError): specifies a renaming that
 //     fails with an error that matches the expectation.
+//
+//   - signature(location, label, active): specifies that
+//     signatureHelp at the given location should match the provided string, with
+//     the active parameter (an index) highlighted.
 //
 //   - suggestedfix(location, regexp, kind, golden): like diag, the location and
 //     regexp identify an expected diagnostic. This diagnostic must
@@ -354,7 +361,6 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 // internal/lsp/tests.
 //
 // Remaining TODO:
-//   - optimize test execution
 //   - reorganize regtest packages (and rename to just 'test'?)
 //   - Rename the files .txtar.
 //   - Provide some means by which locations in the standard library
@@ -363,7 +369,6 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //
 // Existing marker tests (in ../testdata) to port:
 //   - CallHierarchy
-//   - Diagnostics
 //   - CompletionItems
 //   - Completions
 //   - CompletionSnippets
@@ -371,18 +376,14 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //   - FuzzyCompletions
 //   - CaseSensitiveCompletions
 //   - RankCompletions
-//   - Formats
-//   - Imports
 //   - SemanticTokens
 //   - FunctionExtractions
 //   - MethodExtractions
 //   - Renames
 //   - PrepareRenames
 //   - InlayHints
-//   - WorkspaceSymbols
 //   - Signatures
 //   - Links
-//   - AddImport
 //   - SelectionRanges
 func RunMarkerTests(t *testing.T, dir string) {
 	// The marker tests must be able to run go/packages.Load.
@@ -709,6 +710,7 @@ var actionMarkerFuncs = map[string]func(marker){
 	"complete":         actionMarkerFunc(completeMarker),
 	"def":              actionMarkerFunc(defMarker),
 	"diag":             actionMarkerFunc(diagMarker),
+	"documentlink":     actionMarkerFunc(documentLinkMarker),
 	"foldingrange":     actionMarkerFunc(foldingRangeMarker),
 	"format":           actionMarkerFunc(formatMarker),
 	"highlight":        actionMarkerFunc(highlightMarker),
@@ -850,7 +852,7 @@ func (g *Golden) Get(t testing.TB, name string, updated []byte) ([]byte, bool) {
 // archive.
 func loadMarkerTests(dir string) ([]*markerTest, error) {
 	var tests []*markerTest
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
 		if strings.HasSuffix(path, ".txt") {
 			content, err := os.ReadFile(path)
 			if err != nil {
@@ -864,7 +866,7 @@ func loadMarkerTests(dir string) ([]*markerTest, error) {
 			}
 			tests = append(tests, test)
 		}
-		return nil
+		return err
 	})
 	return tests, err
 }
@@ -1222,7 +1224,7 @@ func convert(mark marker, arg any, paramType reflect.Type) (any, error) {
 	if id, ok := arg.(expect.Identifier); ok {
 		if arg, ok := mark.run.values[id]; ok {
 			if !reflect.TypeOf(arg).AssignableTo(paramType) {
-				return nil, fmt.Errorf("cannot convert %v to %s", arg, paramType)
+				return nil, fmt.Errorf("cannot convert %v (%T) to %s", arg, arg, paramType)
 			}
 			return arg, nil
 		}
@@ -1236,7 +1238,7 @@ func convert(mark marker, arg any, paramType reflect.Type) (any, error) {
 	case wantErrorType:
 		return convertWantError(mark, arg)
 	default:
-		return nil, fmt.Errorf("cannot convert %v to %s", arg, paramType)
+		return nil, fmt.Errorf("cannot convert %v (%T) to %s", arg, arg, paramType)
 	}
 }
 
@@ -1682,15 +1684,7 @@ func formatMarker(mark marker, golden *Golden) {
 		}
 	}
 
-	want, ok := golden.Get(mark.run.env.T, "", got)
-	if !ok {
-		mark.errorf("missing golden file @%s", golden.id)
-		return
-	}
-
-	if diff := compare.Bytes(want, got); diff != "" {
-		mark.errorf("golden file @%s does not match format results:\n%s", golden.id, diff)
-	}
+	compareGolden(mark, "format", got, golden)
 }
 
 func highlightMarker(mark marker, src protocol.Location, dsts ...protocol.Location) {
@@ -1793,14 +1787,23 @@ func renameErrMarker(mark marker, loc protocol.Location, newName string, wantErr
 	wantErr.check(mark, err)
 }
 
-func signatureMarker(mark marker, src protocol.Location, want string) {
+func signatureMarker(mark marker, src protocol.Location, label string, active int64) {
 	got := mark.run.env.SignatureHelp(src)
+	if label == "" {
+		if got != nil && len(got.Signatures) > 0 {
+			mark.errorf("signatureHelp = %v, want 0 signatures", got)
+		}
+		return
+	}
 	if got == nil || len(got.Signatures) != 1 {
 		mark.errorf("signatureHelp = %v, want exactly 1 signature", got)
 		return
 	}
-	if got := got.Signatures[0].Label; got != want {
-		mark.errorf("signatureHelp: got %q, want %q", got, want)
+	if got := got.Signatures[0].Label; got != label {
+		mark.errorf("signatureHelp: got label %q, want %q", got, label)
+	}
+	if got := int64(got.ActiveParameter); got != active {
+		mark.errorf("signatureHelp: got active parameter %d, want %d", got, active)
 	}
 }
 
@@ -1912,7 +1915,7 @@ func codeLensesMarker(mark marker) {
 	}
 
 	var want []codeLens
-	mark.consumeExtraNotes("codelens", actionMarkerFunc(func(mark marker, loc protocol.Location, title string) {
+	mark.consumeExtraNotes("codelens", actionMarkerFunc(func(_ marker, loc protocol.Location, title string) {
 		want = append(want, codeLens{loc.Range, title})
 	}))
 
@@ -1929,6 +1932,21 @@ func codeLensesMarker(mark marker) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		mark.errorf("codelenses: unexpected diff (-want +got):\n%s", diff)
 	}
+}
+
+func documentLinkMarker(mark marker, g *Golden) {
+	var b bytes.Buffer
+	links := mark.run.env.DocumentLink(mark.path())
+	for _, l := range links {
+		if l.Target == nil {
+			mark.errorf("%s: nil link target", l.Range)
+			continue
+		}
+		loc := protocol.Location{URI: mark.uri(), Range: l.Range}
+		fmt.Fprintln(&b, mark.run.fmtLocDetails(loc, false), *l.Target)
+	}
+
+	compareGolden(mark, "documentLink", b.Bytes(), g)
 }
 
 // consumeExtraNotes runs the provided func for each extra note with the given
@@ -2218,13 +2236,20 @@ func workspaceSymbolMarker(mark marker, query string, golden *Golden) {
 		fmt.Fprintf(&got, "%s %s %s\n", loc, s.Name, s.Kind)
 	}
 
-	want, ok := golden.Get(mark.run.env.T, "", got.Bytes())
+	compareGolden(mark, fmt.Sprintf("Symbol(%q)", query), got.Bytes(), golden)
+}
+
+// compareGolden compares the content of got with that of g.Get(""), reporting
+// errors on any mismatch.
+//
+// TODO(rfindley): use this helper in more places.
+func compareGolden(mark marker, op string, got []byte, g *Golden) {
+	want, ok := g.Get(mark.run.env.T, "", got)
 	if !ok {
-		mark.errorf("missing golden file @%s", golden.id)
+		mark.errorf("missing golden file @%s", g.id)
 		return
 	}
-
-	if diff := compare.Bytes(want, got.Bytes()); diff != "" {
-		mark.errorf("Symbol(%q) mismatch:\n%s", query, diff)
+	if diff := compare.Bytes(want, got); diff != "" {
+		mark.errorf("%s mismatch:\n%s", op, diff)
 	}
 }
