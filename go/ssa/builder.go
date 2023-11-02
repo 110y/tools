@@ -157,7 +157,6 @@ type builder struct {
 	// Invariant: 0 <= rtypes <= finished <= created.Len()
 	created  *creator // functions created during building
 	finished int      // Invariant: create[i].built holds for i in [0,finished)
-	rtypes   int      // Invariant: all of the runtime types for create[i] have been added for i in [0,rtypes)
 }
 
 // cond emits to fn code to evaluate boolean condition e and jump
@@ -2508,23 +2507,13 @@ start:
 // A buildFunc is a strategy for building the SSA body for a function.
 type buildFunc = func(*builder, *Function)
 
-// iterate causes all created but unbuilt functions to be built.
-//
-// Since building may visit new types, and gathering methods for new
-// types may create functions, this process must be iterated until it
+// iterate causes all created but unbuilt functions to be built. As
+// this may create new methods, the process is iterated until it
 // converges.
 func (b *builder) iterate() {
-	for b.rtypes < b.created.Len() {
-		// Build any created but unbuilt functions.
-		// May visit new runtime types.
-		for ; b.finished < b.created.Len(); b.finished++ {
-			fn := b.created.At(b.finished)
-			b.buildFunction(fn)
-		}
-
-		// Gather methods for new runtime types.
-		// May create new functions.
-		b.needsRuntimeTypes()
+	for ; b.finished < b.created.Len(); b.finished++ {
+		fn := b.created.At(b.finished)
+		b.buildFunction(fn)
 	}
 }
 
@@ -2597,30 +2586,17 @@ func (b *builder) buildFromSyntax(fn *Function) {
 	fn.finishBody()
 }
 
-// Adds any needed runtime type information for the created functions.
+// addRuntimeType records t as a runtime type,
+// along with all types derivable from it using reflection.
 //
-// May add newly CREATEd functions that may need to be built or runtime type information.
-//
-// EXCLUSIVE_LOCKS_ACQUIRED(prog.methodsMu)
-func (b *builder) needsRuntimeTypes() {
-	if b.created.Len() == 0 {
-		return
-	}
-	prog := b.created.At(0).Prog
-
-	var rtypes []types.Type
-	for ; b.rtypes < b.finished; b.rtypes++ {
-		fn := b.created.At(b.rtypes)
-		rtypes = append(rtypes, mayNeedRuntimeTypes(fn)...)
-	}
-
-	// Calling prog.needMethodsOf(T) on a basic type T is a no-op.
-	// Filter out the basic types to reduce acquiring prog.methodsMu.
-	rtypes = nonbasicTypes(rtypes)
-
-	for _, T := range rtypes {
-		prog.needMethodsOf(T, b.created)
-	}
+// Acquires prog.runtimeTypesMu.
+func addRuntimeType(prog *Program, t types.Type) {
+	prog.runtimeTypesMu.Lock()
+	forEachReachable(&prog.MethodSets, t, func(t types.Type) bool {
+		prev, _ := prog.runtimeTypes.Set(t, true).(bool)
+		return !prev // already seen?
+	})
+	prog.runtimeTypesMu.Unlock()
 }
 
 // Build calls Package.Build for each package in prog.
@@ -2658,26 +2634,6 @@ func (p *Package) Build() { p.buildOnce.Do(p.build) }
 func (p *Package) build() {
 	if p.info == nil {
 		return // synthetic package, e.g. "testmain"
-	}
-
-	// Gather runtime types for exported members with ground types.
-	//
-	// (We can't do this in memberFromObject because it would
-	// require package creation in topological order.)
-	for name, mem := range p.Members {
-		isGround := func(m Member) bool {
-			switch m := m.(type) {
-			case *Type:
-				named, _ := m.Type().(*types.Named)
-				return named == nil || typeparams.ForNamed(named) == nil
-			case *Function:
-				return m.typeparams.Len() == 0
-			}
-			return true // *NamedConst, *Global
-		}
-		if ast.IsExported(name) && isGround(mem) {
-			p.Prog.needMethodsOf(mem.Type(), &p.created)
-		}
 	}
 	if p.Prog.mode&LogSource != 0 {
 		defer logStack("build %s", p)()

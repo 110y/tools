@@ -31,11 +31,14 @@ type Program struct {
 	ctxt  *typeparams.Context // cache for type checking instantiations
 
 	// TODO(adonovan): split this mutex.
-	methodsMu     sync.Mutex                 // guards the following maps:
-	methodSets    typeutil.Map               // maps type to its concrete methodSet
-	runtimeTypes  typeutil.Map               // types for which rtypes are needed
-	instances     map[*Function]*instanceSet // instances of generic functions
-	parameterized tpWalker                   // determines whether a type reaches a type parameter.
+	methodsMu  sync.Mutex                 // guards the following maps:
+	methodSets typeutil.Map               // maps type to its concrete methodSet
+	instances  map[*Function]*instanceSet // instances of generic functions
+
+	parameterized tpWalker // memoization of whether a type refers to type parameters
+
+	runtimeTypesMu sync.Mutex
+	runtimeTypes   typeutil.Map // set of runtime types (from MakeInterface)
 }
 
 // A Package is a single analyzed Go package containing Members for
@@ -53,6 +56,7 @@ type Package struct {
 	objects map[types.Object]Member // mapping of package objects to members (incl. methods). Contains *NamedConst, *Global, *Function.
 	init    *Function               // Func("init"); the package's init function
 	debug   bool                    // include full debug info in this package
+	syntax  bool                    // package was loaded from syntax
 
 	// The following fields are set transiently, then cleared
 	// after building.
