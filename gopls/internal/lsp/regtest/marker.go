@@ -36,6 +36,7 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/tests"
 	"golang.org/x/tools/gopls/internal/lsp/tests/compare"
+	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/jsonrpc2/servertest"
 	"golang.org/x/tools/internal/testenv"
@@ -114,6 +115,10 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //     -ignore_extra_diags suppresses errors for unmatched diagnostics
 //     TODO(rfindley): using build constraint expressions for -skip_goos would
 //     be clearer.
+//     -filter_builtins=false disables the filtering of builtins from
+//     completion results.
+//     -filter_keywords=false disables the filtering of keywords from
+//     completion results.
 //     TODO(rfindley): support flag values containing whitespace.
 //   - "settings.json": this file is parsed as JSON, and used as the
 //     session configuration (see gopls/doc/settings.md)
@@ -148,12 +153,17 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //     completion candidate produced at the given location with provided label
 //     results in the given golden state.
 //
-//   - codeaction(kind, start, end, golden): specifies a codeaction to request
+//   - codeaction(start, end, kind, golden): specifies a code action to request
 //     for the given range. To support multi-line ranges, the range is defined
 //     to be between start.Start and end.End. The golden directory contains
 //     changed file content after the code action is applied.
 //
-//   - codeactionerr(kind, start, end, wantError): specifies a codeaction that
+//   - codeactionedit(range, kind, golden): a shorter form of codeaction.
+//     Invokes a code action of the given kind for the given in-line range, and
+//     compares the resulting formatted unified *edits* (notably, not the full
+//     file content) with the golden directory.
+//
+//   - codeactionerr(start, end, kind, wantError): specifies a codeaction that
 //     fails with an error that matches the expectation.
 //
 //   - codelens(location, title): specifies that a codelens is expected at the
@@ -239,6 +249,9 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 //     to have exactly one associated code action of the specified kind.
 //     This action is executed for its editing effects on the source files.
 //     Like rename, the golden directory contains the expected transformed files.
+//     TODO(rfindley): we probably only need 'suggestedfix' for quick-fixes. All
+//     other actions should use codeaction markers. In that case, we can remove
+//     the 'kind' parameter.
 //
 //   - rank(location, ...completionItem): executes a textDocument/completion
 //     request at the given location, and verifies that each expected
@@ -704,6 +717,7 @@ var valueMarkerFuncs = map[string]func(marker){
 var actionMarkerFuncs = map[string]func(marker){
 	"acceptcompletion": actionMarkerFunc(acceptCompletionMarker),
 	"codeaction":       actionMarkerFunc(codeActionMarker),
+	"codeactionedit":   actionMarkerFunc(codeActionEditMarker),
 	"codeactionerr":    actionMarkerFunc(codeActionErrMarker),
 	"codelenses":       actionMarkerFunc(codeLensesMarker),
 	"complete":         actionMarkerFunc(completeMarker),
@@ -755,6 +769,8 @@ type markerTest struct {
 	writeGoSum       []string // comma separated dirs to write go sum for
 	skipGOOS         []string // comma separated GOOS values to skip
 	ignoreExtraDiags bool
+	filterBuiltins   bool
+	filterKeywords   bool
 }
 
 // flagSet returns the flagset used for parsing the special "flags" file in the
@@ -766,6 +782,8 @@ func (t *markerTest) flagSet() *flag.FlagSet {
 	flags.Var((*stringListValue)(&t.writeGoSum), "write_sumfile", "if set, write the sumfile for these directories")
 	flags.Var((*stringListValue)(&t.skipGOOS), "skip_goos", "if set, skip this test on these GOOS values")
 	flags.BoolVar(&t.ignoreExtraDiags, "ignore_extra_diags", false, "if set, suppress errors for unmatched diagnostics")
+	flags.BoolVar(&t.filterBuiltins, "filter_builtins", true, "if set, filter builtins from completion results")
+	flags.BoolVar(&t.filterKeywords, "filter_keywords", true, "if set, filter keywords from completion results")
 	return flags
 }
 
@@ -897,9 +915,6 @@ func loadMarkerTest(name string, content []byte) (*markerTest, error) {
 
 		case file.Name == "flags":
 			test.flags = strings.Fields(string(file.Data))
-			if err := test.flagSet().Parse(test.flags); err != nil {
-				return nil, fmt.Errorf("parsing flags: %v", err)
-			}
 
 		case file.Name == "settings.json":
 			if err := json.Unmarshal(file.Data, &test.settings); err != nil {
@@ -962,6 +977,12 @@ func loadMarkerTest(name string, content []byte) (*markerTest, error) {
 		if bytes.Contains(file.Data, []byte("\n-- ")) {
 			log.Printf("ill-formed '-- filename --' header in %s?", file.Name)
 		}
+	}
+
+	// Parse flags after loading files, as they may have been set by the "flags"
+	// file.
+	if err := test.flagSet().Parse(test.flags); err != nil {
+		return nil, fmt.Errorf("parsing flags: %v", err)
 	}
 
 	return test, nil
@@ -1409,6 +1430,41 @@ func checkChangedFiles(mark marker, changed map[string][]byte, golden *Golden) {
 	}
 }
 
+// checkDiffs computes unified diffs for each changed file, and compares with
+// the diff content stored in the given golden directory.
+func checkDiffs(mark marker, changed map[string][]byte, golden *Golden) {
+	diffs := make(map[string]string)
+	for name, after := range changed {
+		before := mark.run.env.FileContent(name)
+		edits := diff.Strings(before, string(after))
+		d, err := diff.ToUnified("before", "after", before, edits, 0)
+		if err != nil {
+			// Can't happen: edits are consistent.
+			log.Fatalf("internal error in diff.ToUnified: %v", err)
+		}
+		diffs[name] = d
+	}
+	// Check changed files match expectations.
+	for filename, got := range diffs {
+		if want, ok := golden.Get(mark.run.env.T, filename, []byte(got)); !ok {
+			mark.errorf("%s: unexpected change to file %s; got diff:\n%s",
+				mark.note.Name, filename, got)
+
+		} else if got != string(want) {
+			mark.errorf("%s: wrong diff for %s:\n\ngot:\n%s\n\nwant:\n%s\n",
+				mark.note.Name, filename, got, want)
+		}
+	}
+	// Report unmet expectations.
+	for filename := range golden.data {
+		if _, ok := changed[filename]; !ok {
+			want, _ := golden.Get(mark.run.env.T, filename, nil)
+			mark.errorf("%s: missing change to file %s; want:\n%s",
+				mark.note.Name, filename, want)
+		}
+	}
+}
+
 // ---- marker functions ----
 
 // TODO(rfindley): consolidate documentation of these markers. They are already
@@ -1483,7 +1539,7 @@ func snippetMarker(mark marker, src protocol.Location, item completionItem, want
 		got   string
 		all   []string // for errors
 	)
-	items := filterBuiltinsAndKeywords(list.Items)
+	items := filterBuiltinsAndKeywords(mark, list.Items)
 	for _, i := range items {
 		all = append(all, i.Label)
 		if i.Label == item.Label {
@@ -1508,7 +1564,7 @@ func snippetMarker(mark marker, src protocol.Location, item completionItem, want
 // results match the expected results.
 func completeMarker(mark marker, src protocol.Location, want ...completionItem) {
 	list := mark.run.env.Completion(src)
-	items := filterBuiltinsAndKeywords(list.Items)
+	items := filterBuiltinsAndKeywords(mark, list.Items)
 	var got []completionItem
 	for i, item := range items {
 		simplified := completionItem{
@@ -1551,13 +1607,17 @@ func completeMarker(mark marker, src protocol.Location, want ...completionItem) 
 // results.
 //
 // It over-approximates, and does not detect if builtins are shadowed.
-func filterBuiltinsAndKeywords(items []protocol.CompletionItem) []protocol.CompletionItem {
+func filterBuiltinsAndKeywords(mark marker, items []protocol.CompletionItem) []protocol.CompletionItem {
 	keep := 0
 	for _, item := range items {
-		if types.Universe.Lookup(item.Label) == nil && token.Lookup(item.Label) == token.IDENT {
-			items[keep] = item
-			keep++
+		if mark.run.test.filterKeywords && item.Kind == protocol.KeywordCompletion {
+			continue
 		}
+		if mark.run.test.filterBuiltins && types.Universe.Lookup(item.Label) != nil {
+			continue
+		}
+		items[keep] = item
+		keep++
 	}
 	return items[:keep]
 }
@@ -1872,7 +1932,7 @@ func applyDocumentChanges(env *Env, changes []protocol.DocumentChanges, fileChan
 	return nil
 }
 
-func codeActionMarker(mark marker, actionKind string, start, end protocol.Location, golden *Golden) {
+func codeActionMarker(mark marker, start, end protocol.Location, actionKind string, g *Golden) {
 	// Request the range from start.Start to end.End.
 	loc := start
 	loc.Range.End = end.Range.End
@@ -1885,10 +1945,20 @@ func codeActionMarker(mark marker, actionKind string, start, end protocol.Locati
 	}
 
 	// Check the file state.
-	checkChangedFiles(mark, changed, golden)
+	checkChangedFiles(mark, changed, g)
 }
 
-func codeActionErrMarker(mark marker, actionKind string, start, end protocol.Location, wantErr wantError) {
+func codeActionEditMarker(mark marker, loc protocol.Location, actionKind string, g *Golden) {
+	changed, err := codeAction(mark.run.env, loc.URI, loc.Range, actionKind, nil)
+	if err != nil {
+		mark.errorf("codeAction failed: %v", err)
+		return
+	}
+
+	checkDiffs(mark, changed, g)
+}
+
+func codeActionErrMarker(mark marker, start, end protocol.Location, actionKind string, wantErr wantError) {
 	loc := start
 	loc.Range.End = end.Range.End
 	_, err := codeAction(mark.run.env, loc.URI, loc.Range, actionKind, nil)
@@ -1993,6 +2063,21 @@ func suggestedfixMarker(mark marker, loc protocol.Location, re *regexp.Regexp, a
 // applied. Currently, this function does not support code actions that return
 // edits directly; it only supports code action commands.
 func codeAction(env *Env, uri protocol.DocumentURI, rng protocol.Range, actionKind string, diag *protocol.Diagnostic) (map[string][]byte, error) {
+	changes, err := codeActionChanges(env, uri, rng, actionKind, diag)
+	if err != nil {
+		return nil, err
+	}
+	fileChanges := make(map[string][]byte)
+	if err := applyDocumentChanges(env, changes, fileChanges); err != nil {
+		return nil, fmt.Errorf("applying document changes: %v", err)
+	}
+	return fileChanges, nil
+}
+
+// codeActionChanges executes a textDocument/codeAction request for the
+// specified location and kind, and captures the resulting document changes.
+// If diag is non-nil, it is used as the code action context.
+func codeActionChanges(env *Env, uri protocol.DocumentURI, rng protocol.Range, actionKind string, diag *protocol.Diagnostic) ([]protocol.DocumentChanges, error) {
 	// Request all code actions that apply to the diagnostic.
 	// (The protocol supports filtering using Context.Only={actionKind}
 	// but we can give a better error if we don't filter.)
@@ -2032,20 +2117,19 @@ func codeAction(env *Env, uri protocol.DocumentURI, rng protocol.Range, actionKi
 	// Spec:
 	//  "If a code action provides an edit and a command, first the edit is
 	//  executed and then the command."
-	fileChanges := make(map[string][]byte)
 	// An action may specify an edit and/or a command, to be
 	// applied in that order. But since applyDocumentChanges(env,
 	// action.Edit.DocumentChanges) doesn't compose, for now we
-	// assert that all commands used in the @suggestedfix tests
-	// return only a command.
+	// assert that actions return one or the other.
 	if action.Edit != nil {
 		if action.Edit.Changes != nil {
 			env.T.Errorf("internal error: discarding unexpected CodeAction{Kind=%s, Title=%q}.Edit.Changes", action.Kind, action.Title)
 		}
 		if action.Edit.DocumentChanges != nil {
-			if err := applyDocumentChanges(env, action.Edit.DocumentChanges, fileChanges); err != nil {
-				return nil, fmt.Errorf("applying document changes: %v", err)
+			if action.Command != nil {
+				env.T.Errorf("internal error: discarding unexpected CodeAction{Kind=%s, Title=%q}.Command", action.Kind, action.Title)
 			}
+			return action.Edit.DocumentChanges, nil
 		}
 	}
 
@@ -2070,13 +2154,10 @@ func codeAction(env *Env, uri protocol.DocumentURI, rng protocol.Range, actionKi
 		}); err != nil {
 			return nil, err
 		}
-
-		if err := applyDocumentChanges(env, env.Awaiter.takeDocumentChanges(), fileChanges); err != nil {
-			return nil, fmt.Errorf("applying document changes from command: %v", err)
-		}
+		return env.Awaiter.takeDocumentChanges(), nil
 	}
 
-	return fileChanges, nil
+	return nil, nil
 }
 
 // TODO(adonovan): suggestedfixerr
