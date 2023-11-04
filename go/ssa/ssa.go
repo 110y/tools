@@ -37,6 +37,11 @@ type Program struct {
 
 	runtimeTypesMu sync.Mutex
 	runtimeTypes   typeutil.Map // set of runtime types (from MakeInterface)
+
+	// objectMethods is a memoization of objectMethod
+	// to avoid creation of duplicate methods from type information.
+	objectMethodsMu sync.Mutex
+	objectMethods   map[*types.Func]*Function
 }
 
 // A Package is a single analyzed Go package containing Members for
@@ -51,7 +56,7 @@ type Package struct {
 	Prog    *Program                // the owning program
 	Pkg     *types.Package          // the corresponding go/types.Package
 	Members map[string]Member       // all package members keyed by name (incl. init and init#%d)
-	objects map[types.Object]Member // mapping of package objects to members (incl. methods). Contains *NamedConst, *Global, *Function.
+	objects map[types.Object]Member // mapping of package objects to members (incl. methods). Contains *NamedConst, *Global, *Function (values but not types)
 	init    *Function               // Func("init"); the package's init function
 	debug   bool                    // include full debug info in this package
 	syntax  bool                    // package was loaded from syntax
@@ -298,8 +303,8 @@ type Node interface {
 //
 // A generic function is a function or method that has uninstantiated type
 // parameters (TypeParams() != nil). Consider a hypothetical generic
-// method, (*Map[K,V]).Get. It may be instantiated with all ground
-// (non-parameterized) types as (*Map[string,int]).Get or with
+// method, (*Map[K,V]).Get. It may be instantiated with all
+// non-parameterized types as (*Map[string,int]).Get or with
 // parameterized types as (*Map[string,U]).Get, where U is a type parameter.
 // In both instantiations, Origin() refers to the instantiated generic
 // method, (*Map[K,V]).Get, TypeParams() refers to the parameters [K,V] of
@@ -312,12 +317,16 @@ type Function struct {
 	Signature *types.Signature
 	pos       token.Pos
 
-	Synthetic string    // provenance of synthetic function; "" for true source functions
-	syntax    ast.Node  // *ast.Func{Decl,Lit}; replaced with simple ast.Node after build, unless debug mode
-	build     buildFunc // algorithm to build function body (nil => built)
-	parent    *Function // enclosing function if anon; nil if global
-	Pkg       *Package  // enclosing package; nil for shared funcs (wrappers and error.Error)
-	Prog      *Program  // enclosing program
+	// source information
+	Synthetic string      // provenance of synthetic function; "" for true source functions
+	syntax    ast.Node    // *ast.Func{Decl,Lit}, if from syntax (incl. generic instances)
+	info      *types.Info // type annotations (iff syntax != nil)
+	goversion string      // Go version of syntax (NB: init is special)
+
+	build  buildFunc // algorithm to build function body (nil => built)
+	parent *Function // enclosing function if anon; nil if global
+	Pkg    *Package  // enclosing package; nil for shared funcs (wrappers and error.Error)
+	Prog   *Program  // enclosing program
 
 	// These fields are populated only when the function body is built:
 
@@ -335,16 +344,13 @@ type Function struct {
 	topLevelOrigin *Function                 // the origin function if this is an instance of a source function. nil if Parent()!=nil.
 	generic        *generic                  // instances of this function, if generic
 
-	// The following fields are set transiently during building,
-	// then cleared.
+	// The following fields are cleared after building.
 	currentBlock *BasicBlock              // where to emit code
 	vars         map[*types.Var]Value     // addresses of local variables
 	namedResults []*Alloc                 // tuple of named results
 	targets      *targets                 // linked stack of branch targets
 	lblocks      map[*types.Label]*lblock // labelled blocks
-	info         *types.Info              // *types.Info to build from. nil for wrappers.
-	subst        *subster                 // non-nil => expand generic body using this type substitution of ground types
-	goversion    string                   // Go version of syntax (NB: init is special)
+	subst        *subster                 // type parameter substitutions (if non-nil)
 }
 
 // BasicBlock represents an SSA basic block.
@@ -1393,7 +1399,7 @@ type anInstruction struct {
 // represents a dynamically dispatched call to an interface method.
 // In this mode, Value is the interface value and Method is the
 // interface's abstract method. The interface value may be a type
-// parameter. Note: an abstract method may be shared by multiple
+// parameter. Note: an interface method may be shared by multiple
 // interfaces due to embedding; Value.Type() provides the specific
 // interface used for this call.
 //
@@ -1411,7 +1417,7 @@ type anInstruction struct {
 // the last element of Args is a slice.
 type CallCommon struct {
 	Value  Value       // receiver (invoke mode) or func value (call mode)
-	Method *types.Func // abstract method (invoke mode)
+	Method *types.Func // interface method (invoke mode)
 	Args   []Value     // actual parameters (in static method call, includes receiver)
 	pos    token.Pos   // position of CallExpr.Lparen, iff explicit in source
 }

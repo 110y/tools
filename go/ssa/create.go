@@ -21,6 +21,17 @@ import (
 // NewProgram returns a new SSA Program.
 //
 // mode controls diagnostics and checking during SSA construction.
+//
+// To construct an SSA program:
+//
+//   - Call NewProgram to create an empty Program.
+//   - Call CreatePackage providing typed syntax for each package
+//     you want to build, and call it with types but not
+//     syntax for each of those package's direct dependencies.
+//   - Call [Package.Build] on each syntax package you wish to build,
+//     or [Program.Build] to build all of them.
+//
+// See the Example tests for simple examples.
 func NewProgram(fset *token.FileSet, mode BuilderMode) *Program {
 	return &Program{
 		Fset:          fset,
@@ -49,9 +60,11 @@ func memberFromObject(pkg *Package, obj types.Object, syntax ast.Node, goversion
 		}
 
 	case *types.TypeName:
-		pkg.Members[name] = &Type{
-			object: obj,
-			pkg:    pkg,
+		if name != "_" {
+			pkg.Members[name] = &Type{
+				object: obj,
+				pkg:    pkg,
+			}
 		}
 
 	case *types.Const:
@@ -61,7 +74,9 @@ func memberFromObject(pkg *Package, obj types.Object, syntax ast.Node, goversion
 			pkg:    pkg,
 		}
 		pkg.objects[obj] = c
-		pkg.Members[name] = c
+		if name != "_" {
+			pkg.Members[name] = c
+		}
 
 	case *types.Var:
 		g := &Global{
@@ -72,7 +87,9 @@ func memberFromObject(pkg *Package, obj types.Object, syntax ast.Node, goversion
 			pos:    obj.Pos(),
 		}
 		pkg.objects[obj] = g
-		pkg.Members[name] = g
+		if name != "_" {
+			pkg.Members[name] = g
+		}
 
 	case *types.Func:
 		sig := obj.Type().(*types.Signature)
@@ -83,7 +100,7 @@ func memberFromObject(pkg *Package, obj types.Object, syntax ast.Node, goversion
 		fn := createFunction(pkg.Prog, obj, name, syntax, pkg.info, goversion, &pkg.created)
 		fn.Pkg = pkg
 		pkg.objects[obj] = fn
-		if sig.Recv() == nil {
+		if name != "_" && sig.Recv() == nil {
 			pkg.Members[name] = fn // package-level function
 		}
 
@@ -92,7 +109,9 @@ func memberFromObject(pkg *Package, obj types.Object, syntax ast.Node, goversion
 	}
 }
 
-// createFunction creates a function or method.
+// createFunction creates a function or method. It supports both
+// CreatePackage (with or without syntax) and the on-demand creation
+// of methods in non-created packages based on their types.Func.
 func createFunction(prog *Program, obj *types.Func, name string, syntax ast.Node, info *types.Info, goversion string, cr *creator) *Function {
 	sig := obj.Type().(*types.Signature)
 
@@ -111,30 +130,19 @@ func createFunction(prog *Program, obj *types.Func, name string, syntax ast.Node
 		Signature:  sig,
 		build:      (*builder).buildFromSyntax,
 		syntax:     syntax,
+		info:       info,
+		goversion:  goversion,
 		pos:        obj.Pos(),
 		Pkg:        nil, // may be set by caller
 		Prog:       prog,
 		typeparams: tparams,
-		info:       info,
-		goversion:  goversion,
 	}
 	if fn.syntax == nil {
 		fn.Synthetic = "from type information"
 		fn.build = (*builder).buildParamsOnly
 	}
 	if tparams.Len() > 0 {
-		// TODO(adonovan): retain the syntax/info/goversion fields indefinitely
-		// (i.e. don't clear them after Package.Build). It was a premature
-		// optimization design to avoid keeping typed syntax live, but the
-		// typed syntax is always live for some other reason.
-		// Then 'generic' reduces to a set of instances.
-		fn.generic = &generic{
-			origin: fn,
-			// Syntax fields may all be empty:
-			syntax:    fn.syntax,
-			info:      fn.info,
-			goversion: fn.goversion,
-		}
+		fn.generic = new(generic)
 	}
 	cr.Add(fn)
 	return fn
@@ -150,9 +158,7 @@ func membersFromDecl(pkg *Package, decl ast.Decl, goversion string) {
 		case token.CONST:
 			for _, spec := range decl.Specs {
 				for _, id := range spec.(*ast.ValueSpec).Names {
-					if !isBlankIdent(id) {
-						memberFromObject(pkg, pkg.info.Defs[id], nil, "")
-					}
+					memberFromObject(pkg, pkg.info.Defs[id], nil, "")
 				}
 			}
 
@@ -162,26 +168,20 @@ func membersFromDecl(pkg *Package, decl ast.Decl, goversion string) {
 					pkg.initVersion[rhs] = goversion
 				}
 				for _, id := range spec.(*ast.ValueSpec).Names {
-					if !isBlankIdent(id) {
-						memberFromObject(pkg, pkg.info.Defs[id], spec, goversion)
-					}
+					memberFromObject(pkg, pkg.info.Defs[id], spec, goversion)
 				}
 			}
 
 		case token.TYPE:
 			for _, spec := range decl.Specs {
 				id := spec.(*ast.TypeSpec).Name
-				if !isBlankIdent(id) {
-					memberFromObject(pkg, pkg.info.Defs[id], nil, "")
-				}
+				memberFromObject(pkg, pkg.info.Defs[id], nil, "")
 			}
 		}
 
 	case *ast.FuncDecl:
 		id := decl.Name
-		if !isBlankIdent(id) {
-			memberFromObject(pkg, pkg.info.Defs[id], decl, goversion)
-		}
+		memberFromObject(pkg, pkg.info.Defs[id], decl, goversion)
 	}
 }
 
@@ -198,7 +198,7 @@ func (c *creator) Add(fn *Function) {
 func (c *creator) At(i int) *Function { return (*c)[i] }
 func (c *creator) Len() int           { return len(*c) }
 
-// CreatePackage constructs and returns an SSA Package from the
+// CreatePackage creates and returns an SSA Package from the
 // specified type-checked, error-free file ASTs, and populates its
 // Members mapping.
 //
@@ -207,7 +207,11 @@ func (c *creator) Len() int           { return len(*c) }
 //
 // The real work of building SSA form for each function is not done
 // until a subsequent call to Package.Build.
+//
+// CreatePackage should not be called after building any package in
+// the program.
 func (prog *Program) CreatePackage(pkg *types.Package, files []*ast.File, info *types.Info, importable bool) *Package {
+	// TODO(adonovan): assert that no package has yet been built.
 	if pkg == nil {
 		panic("nil pkg") // otherwise pkg.Scope below returns types.Universe!
 	}
@@ -217,7 +221,7 @@ func (prog *Program) CreatePackage(pkg *types.Package, files []*ast.File, info *
 		objects: make(map[types.Object]Member),
 		Pkg:     pkg,
 		syntax:  info != nil,
-		// transient values (CREATE and BUILD phases)
+		// transient values (cleared after Package.Build)
 		info:        info,
 		files:       files,
 		initVersion: make(map[ast.Expr]string),
@@ -237,7 +241,6 @@ func (prog *Program) CreatePackage(pkg *types.Package, files []*ast.File, info *
 	p.Members[p.init.name] = p.init
 	p.created.Add(p.init)
 
-	// CREATE phase.
 	// Allocate all package members: vars, funcs, consts and types.
 	if len(files) > 0 {
 		// Go source package.
@@ -296,8 +299,8 @@ func (prog *Program) CreatePackage(pkg *types.Package, files []*ast.File, info *
 // printMu serializes printing of Packages/Functions to stdout.
 var printMu sync.Mutex
 
-// AllPackages returns a new slice containing all packages in the
-// program prog in unspecified order.
+// AllPackages returns a new slice containing all packages created by
+// prog.CreatePackage in in unspecified order.
 func (prog *Program) AllPackages() []*Package {
 	pkgs := make([]*Package, 0, len(prog.packages))
 	for _, pkg := range prog.packages {

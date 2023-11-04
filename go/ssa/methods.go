@@ -15,8 +15,8 @@ import (
 )
 
 // MethodValue returns the Function implementing method sel, building
-// wrapper methods on demand.  It returns nil if sel denotes an
-// abstract (interface or parameterized) method.
+// wrapper methods on demand. It returns nil if sel denotes an
+// interface or generic method.
 //
 // Precondition: sel.Kind() == MethodVal.
 //
@@ -29,11 +29,11 @@ func (prog *Program) MethodValue(sel *types.Selection) *Function {
 	}
 	T := sel.Recv()
 	if types.IsInterface(T) {
-		return nil // abstract method (interface, possibly type param)
+		return nil // interface method or type parameter
 	}
 
 	if prog.parameterized.isParameterized(T) {
-		return nil // abstract method (generic)
+		return nil // generic method
 	}
 
 	if prog.mode&LogSource != 0 {
@@ -52,9 +52,52 @@ func (prog *Program) MethodValue(sel *types.Selection) *Function {
 	return m
 }
 
+// objectMethod returns the Function for a given method symbol.
+// The symbol may be an instance of a generic function. It need not
+// belong to an existing SSA package created by a call to
+// prog.CreatePackage.
+//
+// objectMethod panics if the function is not a method.
+//
+// Acquires prog.objectMethodsMu.
+func (prog *Program) objectMethod(obj *types.Func, cr *creator) *Function {
+	sig := obj.Type().(*types.Signature)
+	if sig.Recv() == nil {
+		panic("not a method: " + obj.String())
+	}
+
+	// Belongs to a created package?
+	if fn := prog.FuncValue(obj); fn != nil {
+		return fn
+	}
+
+	// Instantiation of generic?
+	if originObj := typeparams.OriginMethod(obj); originObj != obj {
+		origin := prog.objectMethod(originObj, cr)
+		assert(origin.typeparams.Len() > 0, "origin is not generic")
+		targs := receiverTypeArgs(obj)
+		return origin.instance(targs, cr)
+	}
+
+	// Consult/update cache of methods created from types.Func.
+	prog.objectMethodsMu.Lock()
+	defer prog.objectMethodsMu.Unlock()
+	fn, ok := prog.objectMethods[obj]
+	if !ok {
+		fn = createFunction(prog, obj, obj.Name(), nil, nil, "", cr)
+		fn.Synthetic = "from type information (on demand)"
+
+		if prog.objectMethods == nil {
+			prog.objectMethods = make(map[*types.Func]*Function)
+		}
+		prog.objectMethods[obj] = fn
+	}
+	return fn
+}
+
 // LookupMethod returns the implementation of the method of type T
 // identified by (pkg, name).  It returns nil if the method exists but
-// is abstract, and panics if T has no such method.
+// is an interface method or generic method, and panics if T has no such method.
 func (prog *Program) LookupMethod(T types.Type, pkg *types.Package, name string) *Function {
 	sel := prog.MethodSets.MethodSet(T).Lookup(pkg, name)
 	if sel == nil {
@@ -65,8 +108,7 @@ func (prog *Program) LookupMethod(T types.Type, pkg *types.Package, name string)
 
 // methodSet contains the (concrete) methods of a concrete type (non-interface, non-parameterized).
 type methodSet struct {
-	mapping  map[string]*Function // populated lazily
-	complete bool                 // mapping contains all methods
+	mapping map[string]*Function // populated lazily
 }
 
 // Precondition: T is a concrete type, e.g. !isInterface(T) and not parameterized.
@@ -77,6 +119,7 @@ func (prog *Program) createMethodSet(T types.Type) *methodSet {
 			panic("type is interface or parameterized")
 		}
 	}
+
 	mset, ok := prog.methodSets.At(T).(*methodSet)
 	if !ok {
 		mset = &methodSet{mapping: make(map[string]*Function)}
@@ -106,11 +149,7 @@ func (prog *Program) addMethod(mset *methodSet, sel *types.Selection, cr *creato
 		if needsPromotion || needsIndirection {
 			fn = createWrapper(prog, sel, cr)
 		} else {
-			fn = prog.originFunc(obj)
-			if fn.typeparams.Len() > 0 { // instantiate
-				targs := receiverTypeArgs(obj)
-				fn = fn.instance(targs, cr)
-			}
+			fn = prog.objectMethod(obj, cr)
 		}
 		if fn.Signature.Recv() == nil {
 			panic(fn) // missing receiver
@@ -137,15 +176,6 @@ func (prog *Program) RuntimeTypes() []types.Type {
 	prog.runtimeTypesMu.Lock()
 	defer prog.runtimeTypesMu.Unlock()
 	return prog.runtimeTypes.Keys()
-}
-
-// declaredFunc returns the concrete function/method denoted by obj.
-// Panic ensues if there is none.
-func (prog *Program) declaredFunc(obj *types.Func) *Function {
-	if v := prog.packageLevelMember(obj); v != nil {
-		return v.(*Function)
-	}
-	panic("no concrete method: " + obj.String())
 }
 
 // forEachReachable calls f for type T and each type reachable from
@@ -250,7 +280,7 @@ func forEachReachable(msets *typeutil.MethodSetCache, T types.Type, f func(types
 			}
 
 		case *typeparams.TypeParam, *typeparams.Union:
-			// Type parameters cannot be reached from ground types.
+			// forEachReachable must not be called on parameterized types.
 			panic(T)
 
 		default:
