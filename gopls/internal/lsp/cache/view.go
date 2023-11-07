@@ -52,16 +52,12 @@ type View struct {
 
 	gocmdRunner *gocommand.Runner // limits go command concurrency
 
-	// baseCtx is the context handed to NewView. This is the parent of all
-	// background contexts created for this view.
-	baseCtx context.Context
-
 	folder *Folder
 
 	// Workspace information. The fields below are immutable, and together with
 	// options define the build list. Any change to these fields results in a new
 	// View.
-	workspaceInformation // Go environment information
+	*workspaceInformation // Go environment information
 
 	importsState *importsState
 
@@ -122,9 +118,6 @@ type View struct {
 //
 // This type is compared to see if the View needs to be reconstructed.
 type workspaceInformation struct {
-	// folder is the LSP workspace folder.
-	folder span.URI
-
 	// `go env` variables that need to be tracked by gopls.
 	goEnv
 
@@ -434,7 +427,11 @@ func (s *Session) SetFolderOptions(ctx context.Context, uri span.URI, options *s
 		if v.folder.Dir == uri {
 			folder2 := *v.folder
 			folder2.Options = options
-			if err := s.updateViewLocked(ctx, v, &folder2); err != nil {
+			info, err := getWorkspaceInformation(ctx, s.gocmdRunner, s, &folder2)
+			if err != nil {
+				return err
+			}
+			if _, err := s.updateViewLocked(ctx, v, info, &folder2); err != nil {
 				return err
 			}
 		}
@@ -870,7 +867,7 @@ func (s *snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 // a callback which the caller must invoke to release that snapshot.
 //
 // newOptions may be nil, in which case options remain unchanged.
-func (v *View) invalidateContent(ctx context.Context, changes map[span.URI]source.FileHandle, forceReloadMetadata bool) (*snapshot, func()) {
+func (v *View) invalidateContent(ctx context.Context, changes map[span.URI]source.FileHandle) (*snapshot, func()) {
 	// Detach the context so that content invalidation cannot be canceled.
 	ctx = xcontext.Detach(ctx)
 
@@ -892,7 +889,7 @@ func (v *View) invalidateContent(ctx context.Context, changes map[span.URI]sourc
 	prevSnapshot.AwaitInitialized(ctx)
 
 	// Save one lease of the cloned snapshot in the view.
-	v.snapshot, v.releaseSnapshot = prevSnapshot.clone(ctx, v.baseCtx, changes, forceReloadMetadata)
+	v.snapshot, v.releaseSnapshot = prevSnapshot.clone(ctx, changes)
 
 	prevReleaseSnapshot()
 	v.destroy(prevSnapshot, "View.invalidateContent")
@@ -901,27 +898,25 @@ func (v *View) invalidateContent(ctx context.Context, changes map[span.URI]sourc
 	return v.snapshot, v.snapshot.Acquire()
 }
 
-func (s *Session) getWorkspaceInformation(ctx context.Context, folder span.URI, options *source.Options) (workspaceInformation, error) {
-	if err := checkPathCase(folder.Filename()); err != nil {
-		return workspaceInformation{}, fmt.Errorf("invalid workspace folder path: %w; check that the casing of the configured workspace folder path agrees with the casing reported by the operating system", err)
+func getWorkspaceInformation(ctx context.Context, runner *gocommand.Runner, fs source.FileSource, folder *Folder) (*workspaceInformation, error) {
+	if err := checkPathCase(folder.Dir.Filename()); err != nil {
+		return nil, fmt.Errorf("invalid workspace folder path: %w; check that the casing of the configured workspace folder path agrees with the casing reported by the operating system", err)
 	}
+	info := new(workspaceInformation)
 	var err error
-	info := workspaceInformation{
-		folder: folder,
-	}
 	inv := gocommand.Invocation{
-		WorkingDir: folder.Filename(),
-		Env:        options.EnvSlice(),
+		WorkingDir: folder.Dir.Filename(),
+		Env:        folder.Options.EnvSlice(),
 	}
-	info.goversion, err = gocommand.GoVersion(ctx, inv, s.gocmdRunner)
+	info.goversion, err = gocommand.GoVersion(ctx, inv, runner)
 	if err != nil {
 		return info, err
 	}
-	info.goversionOutput, err = gocommand.GoVersionOutput(ctx, inv, s.gocmdRunner)
+	info.goversionOutput, err = gocommand.GoVersionOutput(ctx, inv, runner)
 	if err != nil {
 		return info, err
 	}
-	if err := info.load(ctx, folder.Filename(), options.EnvSlice(), s.gocmdRunner); err != nil {
+	if err := info.load(ctx, folder.Dir.Filename(), folder.Options.EnvSlice(), runner); err != nil {
 		return info, err
 	}
 	// The value of GOPACKAGESDRIVER is not returned through the go command.
@@ -933,15 +928,15 @@ func (s *Session) getWorkspaceInformation(ctx context.Context, folder span.URI, 
 
 	// filterFunc is the path filter function for this workspace folder. Notably,
 	// it is relative to folder (which is specified by the user), not root.
-	filterFunc := pathExcludedByFilterFunc(folder.Filename(), info.gomodcache, options)
-	info.gomod, err = findWorkspaceModFile(ctx, folder, s, filterFunc)
+	filterFunc := pathExcludedByFilterFunc(folder.Dir.Filename(), info.gomodcache, folder.Options)
+	info.gomod, err = findWorkspaceModFile(ctx, folder.Dir, fs, filterFunc)
 	if err != nil {
 		return info, err
 	}
 
 	// Check if the workspace is within any GOPATH directory.
 	for _, gp := range filepath.SplitList(info.gopath) {
-		if source.InDir(filepath.Join(gp, "src"), folder.Filename()) {
+		if source.InDir(filepath.Join(gp, "src"), folder.Dir.Filename()) {
 			info.inGOPATH = true
 			break
 		}
@@ -955,10 +950,10 @@ func (s *Session) getWorkspaceInformation(ctx context.Context, folder span.URI, 
 	//
 	// TODO(golang/go#57514): eliminate the expandWorkspaceToModule setting
 	// entirely.
-	if options.ExpandWorkspaceToModule && info.gomod != "" {
+	if folder.Options.ExpandWorkspaceToModule && info.gomod != "" {
 		info.goCommandDir = span.URIFromPath(filepath.Dir(info.gomod.Filename()))
 	} else {
-		info.goCommandDir = folder
+		info.goCommandDir = folder.Dir
 	}
 	return info, nil
 }

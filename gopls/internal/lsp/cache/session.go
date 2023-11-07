@@ -84,7 +84,11 @@ func (s *Session) NewView(ctx context.Context, folder *Folder) (*View, source.Sn
 			return nil, nil, nil, source.ErrViewExists
 		}
 	}
-	view, snapshot, release, err := s.createView(ctx, folder, 0)
+	info, err := getWorkspaceInformation(ctx, s.gocmdRunner, s, folder)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	view, snapshot, release, err := s.createView(ctx, info, folder, 0)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -97,14 +101,8 @@ func (s *Session) NewView(ctx context.Context, folder *Folder) (*View, source.Sn
 // TODO(rfindley): clarify that createView can never be cancelled (with the
 // possible exception of server shutdown).
 // On success, the caller becomes responsible for calling the release function once.
-func (s *Session) createView(ctx context.Context, folder *Folder, seqID uint64) (*View, *snapshot, func(), error) {
+func (s *Session) createView(ctx context.Context, info *workspaceInformation, folder *Folder, seqID uint64) (*View, *snapshot, func(), error) {
 	index := atomic.AddInt64(&viewIndex, 1)
-
-	// Get immutable workspace information.
-	info, err := s.getWorkspaceInformation(ctx, folder.Dir, folder.Options)
-	if err != nil {
-		return nil, nil, nil, err
-	}
 
 	gowork, _ := info.GOWORK()
 	wsModFiles, wsModFilesErr := computeWorkspaceModFiles(ctx, info.gomod, gowork, info.effectiveGO111MODULE(), s)
@@ -120,7 +118,6 @@ func (s *Session) createView(ctx context.Context, folder *Folder, seqID uint64) 
 		folder:               folder,
 		initialWorkspaceLoad: make(chan struct{}),
 		initializationSema:   make(chan struct{}, 1),
-		baseCtx:              baseCtx,
 		moduleUpgrades:       map[span.URI]map[string]string{},
 		vulns:                map[span.URI]*vulncheck.Result{},
 		parseCache:           s.parseCache,
@@ -128,7 +125,7 @@ func (s *Session) createView(ctx context.Context, folder *Folder, seqID uint64) 
 		workspaceInformation: info,
 	}
 	v.importsState = &importsState{
-		ctx: backgroundCtx,
+		ctx: baseCtx,
 		processEnv: &imports.ProcessEnv{
 			GocmdRunner: s.gocmdRunner,
 			SkipPathInScan: func(dir string) bool {
@@ -289,28 +286,34 @@ func (s *Session) RemoveView(view *View) {
 //
 // If the resulting error is non-nil, the view may or may not have already been
 // dropped from the session.
-func (s *Session) updateViewLocked(ctx context.Context, view *View, folder *Folder) error {
+func (s *Session) updateViewLocked(ctx context.Context, view *View, info *workspaceInformation, folder *Folder) (*View, error) {
 	// Preserve the snapshot ID if we are recreating the view.
 	view.snapshotMu.Lock()
 	if view.snapshot == nil {
 		view.snapshotMu.Unlock()
 		panic("updateView called after View was already shut down")
 	}
+	// TODO(rfindley): we should probably increment the sequence ID here.
 	seqID := view.snapshot.sequenceID // Preserve sequence IDs when updating a view in place.
 	view.snapshotMu.Unlock()
 
 	i := s.dropView(view)
 	if i == -1 {
-		return fmt.Errorf("view %q not found", view.id)
+		return nil, fmt.Errorf("view %q not found", view.id)
 	}
 
-	v, snapshot, release, err := s.createView(ctx, folder, seqID)
+	var (
+		snapshot *snapshot
+		release  func()
+		err      error
+	)
+	view, snapshot, release, err = s.createView(ctx, info, folder, seqID)
 	if err != nil {
 		// we have dropped the old view, but could not create the new one
 		// this should not happen and is very bad, but we still need to clean
 		// up the view array if it happens
 		s.views = removeElement(s.views, i)
-		return err
+		return nil, err
 	}
 	defer release()
 
@@ -320,13 +323,13 @@ func (s *Session) updateViewLocked(ctx context.Context, view *View, folder *Fold
 	// behavior when configuration is changed mid-session.
 	//
 	// Ensure the new snapshot observes all open files.
-	for _, o := range v.fs.Overlays() {
+	for _, o := range view.fs.Overlays() {
 		_, _ = snapshot.ReadFile(ctx, o.URI())
 	}
 
 	// substitute the new view into the array where the old view was
-	s.views[i] = v
-	return nil
+	s.views[i] = view
+	return view, nil
 }
 
 // removeElement removes the ith element from the slice replacing it with the last element.
@@ -362,6 +365,14 @@ func (s *Session) ModifyFiles(ctx context.Context, changes []source.FileModifica
 	_, release, err := s.DidModifyFiles(ctx, changes)
 	release()
 	return err
+}
+
+// ResetView resets the best view for the given URI.
+func (s *Session) ResetView(ctx context.Context, uri span.URI) (*View, error) {
+	s.viewMu.Lock()
+	defer s.viewMu.Unlock()
+	v := bestViewForURI(uri, s.views)
+	return s.updateViewLocked(ctx, v, v.workspaceInformation, v.folder)
 }
 
 // DidModifyFiles reports a file modification to the session. It returns
@@ -403,7 +414,6 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 			// Change, InvalidateMetadata, and UnknownFileAction actions do not cause
 			// us to re-evaluate views.
 			redoViews := (c.Action != source.Change &&
-				c.Action != source.InvalidateMetadata &&
 				c.Action != source.UnknownFileAction)
 
 			if redoViews {
@@ -419,7 +429,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 			// synchronously to change processing? Can we assume that the env did not
 			// change, and derive go.work using a combination of the configured
 			// GOWORK value and filesystem?
-			info, err := s.getWorkspaceInformation(ctx, view.folder.Dir, view.folder.Options)
+			info, err := getWorkspaceInformation(ctx, s.gocmdRunner, s, view.folder)
 			if err != nil {
 				// Catastrophic failure, equivalent to a failure of session
 				// initialization and therefore should almost never happen. One
@@ -430,10 +440,8 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 				// TODO(rfindley): consider surfacing this error more loudly. We
 				// could report a bug, but it's not really a bug.
 				event.Error(ctx, "fetching workspace information", err)
-			}
-
-			if info != view.workspaceInformation {
-				if err := s.updateViewLocked(ctx, view, view.folder); err != nil {
+			} else if *info != *view.workspaceInformation {
+				if _, err := s.updateViewLocked(ctx, view, info, view.folder); err != nil {
 					// More catastrophic failure. The view may or may not still exist.
 					// The best we can do is log and move on.
 					event.Error(ctx, "recreating view", err)
@@ -445,13 +453,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 	// Collect information about views affected by these changes.
 	views := make(map[*View]map[span.URI]source.FileHandle)
 	affectedViews := map[span.URI][]*View{}
-	// forceReloadMetadata records whether any change is the magic
-	// source.InvalidateMetadata action.
-	forceReloadMetadata := false
 	for _, c := range changes {
-		if c.Action == source.InvalidateMetadata {
-			forceReloadMetadata = true
-		}
 		// Build the list of affected views.
 		var changedViews []*View
 		for _, view := range s.views {
@@ -491,7 +493,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 	var releases []func()
 	viewToSnapshot := map[*View]*snapshot{}
 	for view, changed := range views {
-		snapshot, release := view.invalidateContent(ctx, changed, forceReloadMetadata)
+		snapshot, release := view.invalidateContent(ctx, changed)
 		releases = append(releases, release)
 		viewToSnapshot[view] = snapshot
 	}
@@ -578,11 +580,6 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 	defer fs.mu.Unlock()
 
 	for _, c := range changes {
-		// Don't update overlays for metadata invalidations.
-		if c.Action == source.InvalidateMetadata {
-			continue
-		}
-
 		o, ok := fs.overlays[c.URI]
 
 		// If the file is not opened in an overlay and the change is on disk,
