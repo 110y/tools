@@ -50,9 +50,6 @@ var UpdateGolden = flag.Bool("golden", false, "Update golden files")
 // type in the field name and the make() expression.
 type CallHierarchy = map[span.Span]*CallHierarchyResult
 type SemanticTokens = []span.Span
-type SuggestedFixes = map[span.Span][]SuggestedFix
-type Renames = map[span.Span]string
-type InlayHints = []span.Span
 type AddImport = map[span.URI]string
 type SelectionRanges = []span.Span
 
@@ -61,9 +58,6 @@ type Data struct {
 	Exported        *packagestest.Exported
 	CallHierarchy   CallHierarchy
 	SemanticTokens  SemanticTokens
-	SuggestedFixes  SuggestedFixes
-	Renames         Renames
-	InlayHints      InlayHints
 	AddImport       AddImport
 	SelectionRanges SelectionRanges
 
@@ -87,9 +81,6 @@ type Data struct {
 type Tests interface {
 	CallHierarchy(*testing.T, span.Span, *CallHierarchyResult)
 	SemanticTokens(*testing.T, span.Span)
-	SuggestedFix(*testing.T, span.Span, []SuggestedFix, int)
-	InlayHints(*testing.T, span.Span)
-	Rename(*testing.T, span.Span, string)
 	AddImport(*testing.T, span.URI, string)
 	SelectionRanges(*testing.T, span.Span)
 }
@@ -177,10 +168,8 @@ func RunTests(t *testing.T, dataDir string, includeMultiModule bool, f func(*tes
 
 func load(t testing.TB, mode string, dir string) *Data {
 	datum := &Data{
-		CallHierarchy:  make(CallHierarchy),
-		Renames:        make(Renames),
-		SuggestedFixes: make(SuggestedFixes),
-		AddImport:      make(AddImport),
+		CallHierarchy: make(CallHierarchy),
+		AddImport:     make(AddImport),
 
 		dir:       dir,
 		fragments: map[string]string{},
@@ -314,9 +303,6 @@ func load(t testing.TB, mode string, dir string) *Data {
 	// Collect any data that needs to be used by subsequent tests.
 	if err := datum.Exported.Expect(map[string]interface{}{
 		"semantic":       datum.collectSemanticTokens,
-		"inlayHint":      datum.collectInlayHints,
-		"rename":         datum.collectRenames,
-		"suggestedfix":   datum.collectSuggestedFixes,
 		"incomingcalls":  datum.collectIncomingCalls,
 		"outgoingcalls":  datum.collectOutgoingCalls,
 		"addimport":      datum.collectAddImports,
@@ -395,40 +381,6 @@ func Run(t *testing.T, tests Tests, data *Data) {
 		}
 	})
 
-	t.Run("SuggestedFix", func(t *testing.T) {
-		t.Helper()
-		for spn, actionKinds := range data.SuggestedFixes {
-			// Check if we should skip this spn if the -modfile flag is not available.
-			if shouldSkip(data, spn.URI()) {
-				continue
-			}
-			t.Run(SpanName(spn), func(t *testing.T) {
-				t.Helper()
-				tests.SuggestedFix(t, spn, actionKinds, 1)
-			})
-		}
-	})
-
-	t.Run("InlayHints", func(t *testing.T) {
-		t.Helper()
-		for _, src := range data.InlayHints {
-			t.Run(SpanName(src), func(t *testing.T) {
-				t.Helper()
-				tests.InlayHints(t, src)
-			})
-		}
-	})
-
-	t.Run("Renames", func(t *testing.T) {
-		t.Helper()
-		for spn, newText := range data.Renames {
-			t.Run(uriName(spn.URI())+"_"+newText, func(t *testing.T) {
-				t.Helper()
-				tests.Rename(t, spn, newText)
-			})
-		}
-	})
-
 	t.Run("AddImport", func(t *testing.T) {
 		t.Helper()
 		for uri, exp := range data.AddImport {
@@ -467,9 +419,6 @@ func checkData(t *testing.T, data *Data) {
 
 	fmt.Fprintf(buf, "CallHierarchyCount = %v\n", len(data.CallHierarchy))
 	fmt.Fprintf(buf, "SemanticTokenCount = %v\n", len(data.SemanticTokens))
-	fmt.Fprintf(buf, "SuggestedFixCount = %v\n", len(data.SuggestedFixes))
-	fmt.Fprintf(buf, "InlayHintsCount = %v\n", len(data.InlayHints))
-	fmt.Fprintf(buf, "RenamesCount = %v\n", len(data.Renames))
 	fmt.Fprintf(buf, "SelectionRangesCount = %v\n", len(data.SelectionRanges))
 
 	want := string(data.Golden(t, "summary", summaryFile, func() ([]byte, error) {
@@ -559,10 +508,6 @@ func (data *Data) collectSemanticTokens(spn span.Span) {
 	data.SemanticTokens = append(data.SemanticTokens, spn)
 }
 
-func (data *Data) collectSuggestedFixes(spn span.Span, actionKind, fix string) {
-	data.SuggestedFixes[spn] = append(data.SuggestedFixes[spn], SuggestedFix{actionKind, fix})
-}
-
 func (data *Data) collectSelectionRanges(spn span.Span) {
 	data.SelectionRanges = append(data.SelectionRanges, spn)
 }
@@ -601,14 +546,6 @@ func (data *Data) collectOutgoingCalls(src span.Span, calls []span.Span) {
 	}
 }
 
-func (data *Data) collectInlayHints(src span.Span) {
-	data.InlayHints = append(data.InlayHints, src)
-}
-
-func (data *Data) collectRenames(src span.Span, newText string) {
-	data.Renames[src] = newText
-}
-
 // mustRange converts spn into a protocol.Range, panicking on any error.
 func (data *Data) mustRange(spn span.Span) protocol.Range {
 	m, err := data.Mapper(spn.URI())
@@ -627,19 +564,4 @@ func uriName(uri span.URI) string {
 // line:column position formatting.
 func SpanName(spn span.Span) string {
 	return fmt.Sprintf("%v_%v_%v", uriName(spn.URI()), spn.Start().Line(), spn.Start().Column())
-}
-
-func shouldSkip(data *Data, uri span.URI) bool {
-	if data.ModfileFlagAvailable {
-		return false
-	}
-	// If the -modfile flag is not available, then we do not want to run
-	// any tests on the go.mod file.
-	if strings.HasSuffix(uri.Filename(), ".mod") {
-		return true
-	}
-	// If the -modfile flag is not available, then we do not want to test any
-	// uri that contains "go mod tidy".
-	m, err := data.Mapper(uri)
-	return err == nil && strings.Contains(string(m.Content), ", \"go mod tidy\",")
 }

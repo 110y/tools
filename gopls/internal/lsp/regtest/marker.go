@@ -37,6 +37,7 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/tests"
 	"golang.org/x/tools/gopls/internal/lsp/tests/compare"
 	"golang.org/x/tools/internal/diff"
+	"golang.org/x/tools/internal/diff/myers"
 	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/jsonrpc2/servertest"
 	"golang.org/x/tools/internal/testenv"
@@ -394,7 +395,6 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 // Existing marker tests (in ../testdata) to port:
 //   - CallHierarchy
 //   - SemanticTokens
-//   - SuggestedFixes
 //   - InlayHints
 //   - Renames
 //   - SelectionRanges
@@ -729,6 +729,7 @@ var actionMarkerFuncs = map[string]func(marker){
 	"highlight":        actionMarkerFunc(highlightMarker),
 	"hover":            actionMarkerFunc(hoverMarker),
 	"implementation":   actionMarkerFunc(implementationMarker),
+	"inlayhints":       actionMarkerFunc(inlayhintsMarker),
 	"preparerename":    actionMarkerFunc(prepareRenameMarker),
 	"rank":             actionMarkerFunc(rankMarker),
 	"rankl":            actionMarkerFunc(ranklMarker),
@@ -1129,9 +1130,23 @@ func (mark marker) uri() protocol.DocumentURI {
 	return mark.run.env.Sandbox.Workdir.URI(mark.run.test.fset.File(mark.note.Pos).Name())
 }
 
+// document returns a protocol.TextDocumentIdentifier for the current file.
+func (mark marker) document() protocol.TextDocumentIdentifier {
+	return protocol.TextDocumentIdentifier{URI: mark.uri()}
+}
+
 // path returns the relative path to the file containing the marker.
 func (mark marker) path() string {
 	return mark.run.env.Sandbox.Workdir.RelPath(mark.run.test.fset.File(mark.note.Pos).Name())
+}
+
+// mapper returns a *protocol.Mapper for the current file.
+func (mark marker) mapper() *protocol.Mapper {
+	mapper, err := mark.run.env.Editor.Mapper(mark.path())
+	if err != nil {
+		mark.run.env.T.Fatalf("failed to get mapper for current mark: %v", err)
+	}
+	return mapper
 }
 
 // fmtLoc formats the given pos in the context of the test, using
@@ -1436,13 +1451,20 @@ func checkDiffs(mark marker, changed map[string][]byte, golden *Golden) {
 	diffs := make(map[string]string)
 	for name, after := range changed {
 		before := mark.run.env.FileContent(name)
-		edits := diff.Strings(before, string(after))
+		// TODO(golang/go#64023): switch back to diff.Strings.
+		edits := myers.ComputeEdits(before, string(after))
 		d, err := diff.ToUnified("before", "after", before, edits, 0)
 		if err != nil {
 			// Can't happen: edits are consistent.
 			log.Fatalf("internal error in diff.ToUnified: %v", err)
 		}
-		diffs[name] = d
+		// Trim the unified header from diffs, as it is unnecessary and repetitive.
+		difflines := strings.Split(d, "\n")
+		if len(difflines) >= 2 && strings.HasPrefix(difflines[1], "+++") {
+			diffs[name] = strings.Join(difflines[2:], "\n")
+		} else {
+			diffs[name] = d
+		}
 	}
 	// Check changed files match expectations.
 	for filename, got := range diffs {
@@ -1640,12 +1662,7 @@ func acceptCompletionMarker(mark marker, src protocol.Location, label string, go
 		return
 	}
 	filename := mark.path()
-	mapper, err := mark.run.env.Editor.Mapper(filename)
-	if err != nil {
-		mark.errorf("Editor.Mapper(%s) failed: %v", filename, err)
-		return
-	}
-
+	mapper := mark.mapper()
 	patched, _, err := source.ApplyProtocolEdits(mapper, append([]protocol.TextEdit{
 		*selected.TextEdit,
 	}, selected.AdditionalTextEdits...))
@@ -1683,7 +1700,7 @@ func typedefMarker(mark marker, src, dst protocol.Location) {
 func foldingRangeMarker(mark marker, g *Golden) {
 	env := mark.run.env
 	ranges, err := mark.server().FoldingRange(env.Ctx, &protocol.FoldingRangeParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: mark.uri()},
+		TextDocument: mark.document(),
 	})
 	if err != nil {
 		mark.errorf("foldingRange failed: %v", err)
@@ -1724,7 +1741,7 @@ func foldingRangeMarker(mark marker, g *Golden) {
 // formatMarker implements the @format marker.
 func formatMarker(mark marker, golden *Golden) {
 	edits, err := mark.server().Formatting(mark.run.env.Ctx, &protocol.DocumentFormattingParams{
-		TextDocument: protocol.TextDocumentIdentifier{URI: mark.uri()},
+		TextDocument: mark.document(),
 	})
 	var got []byte
 	if err != nil {
@@ -1838,7 +1855,7 @@ func renameMarker(mark marker, loc protocol.Location, newName string, golden *Go
 		mark.errorf("rename failed: %v. (Use @renameerr for expected errors.)", err)
 		return
 	}
-	checkChangedFiles(mark, changed, golden)
+	checkDiffs(mark, changed, golden)
 }
 
 // renameErrMarker implements the @renamererr(location, new, error) marker.
@@ -2215,6 +2232,35 @@ func implementationMarker(mark marker, src protocol.Location, want ...protocol.L
 	if err := compareLocations(mark, got, want); err != nil {
 		mark.errorf("implementation: %v", err)
 	}
+}
+
+func inlayhintsMarker(mark marker, g *Golden) {
+	hints := mark.run.env.InlayHints(mark.path())
+
+	// Map inlay hints to text edits.
+	edits := make([]protocol.TextEdit, len(hints))
+	for i, hint := range hints {
+		var paddingLeft, paddingRight string
+		if hint.PaddingLeft {
+			paddingLeft = " "
+		}
+		if hint.PaddingRight {
+			paddingRight = " "
+		}
+		edits[i] = protocol.TextEdit{
+			Range:   protocol.Range{Start: hint.Position, End: hint.Position},
+			NewText: fmt.Sprintf("<%s%s%s>", paddingLeft, hint.Label[0].Value, paddingRight),
+		}
+	}
+
+	m := mark.mapper()
+	got, _, err := source.ApplyProtocolEdits(m, edits)
+	if err != nil {
+		mark.errorf("ApplyProtocolEdits: %v", err)
+		return
+	}
+
+	compareGolden(mark, "inlay hints", got, g)
 }
 
 func prepareRenameMarker(mark marker, src, spn protocol.Location, placeholder string) {
