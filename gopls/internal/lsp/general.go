@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/goversion"
 	"golang.org/x/tools/gopls/internal/lsp/debug"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
@@ -27,7 +28,7 @@ import (
 	"golang.org/x/tools/internal/jsonrpc2"
 )
 
-func (s *Server) initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
+func (s *server) initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.initialize")
 	defer done()
 
@@ -200,7 +201,7 @@ See https://github.com/golang/go/issues/45732 for more information.`,
 	}, nil
 }
 
-func (s *Server) initialized(ctx context.Context, params *protocol.InitializedParams) error {
+func (s *server) initialized(ctx context.Context, params *protocol.InitializedParams) error {
 	ctx, done := event.Start(ctx, "lsp.Server.initialized")
 	defer done()
 
@@ -246,76 +247,11 @@ func (s *Server) initialized(ctx context.Context, params *protocol.InitializedPa
 	return nil
 }
 
-// GoVersionTable maps Go versions to the gopls version in which support will
-// be deprecated, and the final gopls version supporting them without warnings.
-// Keep this in sync with gopls/README.md.
-//
-// Must be sorted in ascending order of Go version.
-//
-// Mutable for testing.
-var GoVersionTable = []GoVersionSupport{
-	{12, "", "v0.7.5"},
-	{15, "", "v0.9.5"},
-	{16, "v0.13.0", "v0.11.0"},
-	{17, "v0.13.0", "v0.11.0"},
-}
-
-// GoVersionSupport holds information about end-of-life Go version support.
-type GoVersionSupport struct {
-	GoVersion           int
-	DeprecatedVersion   string // if unset, the version is already deprecated
-	InstallGoplsVersion string
-}
-
-// OldestSupportedGoVersion is the last X in Go 1.X that this version of gopls
-// supports.
-func OldestSupportedGoVersion() int {
-	return GoVersionTable[len(GoVersionTable)-1].GoVersion + 1
-}
-
-// versionMessage returns the warning/error message to display if the user has
-// the given Go version, if any. The goVersion variable is the X in Go 1.X. If
-// fromBuild is set, the Go version is the version used to build gopls.
-// Otherwise, it is the go command version.
-//
-// If goVersion is invalid (< 0), it returns "", 0.
-func versionMessage(goVersion int, fromBuild bool) (string, protocol.MessageType) {
-	if goVersion < 0 {
-		return "", 0
-	}
-
-	for _, v := range GoVersionTable {
-		if goVersion <= v.GoVersion {
-			var msgBuilder strings.Builder
-
-			mType := protocol.Error
-			if fromBuild {
-				fmt.Fprintf(&msgBuilder, "Gopls was built with Go version 1.%d", goVersion)
-			} else {
-				fmt.Fprintf(&msgBuilder, "Found Go version 1.%d", goVersion)
-			}
-			if v.DeprecatedVersion != "" {
-				// not deprecated yet, just a warning
-				fmt.Fprintf(&msgBuilder, ", which will be unsupported by gopls %s. ", v.DeprecatedVersion)
-				mType = protocol.Warning
-			} else {
-				fmt.Fprint(&msgBuilder, ", which is not supported by this version of gopls. ")
-			}
-			fmt.Fprintf(&msgBuilder, "Please upgrade to Go 1.%d or later and reinstall gopls. ", OldestSupportedGoVersion())
-			fmt.Fprintf(&msgBuilder, "If you can't upgrade and want this message to go away, please install gopls %s. ", v.InstallGoplsVersion)
-			fmt.Fprint(&msgBuilder, "See https://go.dev/s/gopls-support-policy for more details.")
-
-			return msgBuilder.String(), mType
-		}
-	}
-	return "", 0
-}
-
 // checkViewGoVersions checks whether any Go version used by a view is too old,
 // raising a showMessage notification if so.
 //
 // It should be called after views change.
-func (s *Server) checkViewGoVersions() {
+func (s *server) checkViewGoVersions() {
 	oldestVersion, fromBuild := go1Point(), true
 	for _, view := range s.session.Views() {
 		viewVersion := view.GoVersion()
@@ -325,7 +261,11 @@ func (s *Server) checkViewGoVersions() {
 		telemetry.RecordViewGoVersion(viewVersion)
 	}
 
-	if msg, mType := versionMessage(oldestVersion, fromBuild); msg != "" {
+	if msg, isError := goversion.Message(oldestVersion, fromBuild); msg != "" {
+		mType := protocol.Warning
+		if isError {
+			mType = protocol.Error
+		}
 		s.eventuallyShowMessage(context.Background(), &protocol.ShowMessageParams{
 			Type:    mType,
 			Message: msg,
@@ -348,7 +288,7 @@ func go1Point() int {
 	return -1
 }
 
-func (s *Server) addFolders(ctx context.Context, folders []protocol.WorkspaceFolder) error {
+func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFolder) error {
 	originalViews := len(s.session.Views())
 	viewErrors := make(map[span.URI]error)
 
@@ -428,7 +368,7 @@ func (s *Server) addFolders(ctx context.Context, folders []protocol.WorkspaceFol
 // with the previously registered set of directories. If the set of directories
 // has changed, we unregister and re-register for file watching notifications.
 // updatedSnapshots is the set of snapshots that have been updated.
-func (s *Server) updateWatchedDirectories(ctx context.Context) error {
+func (s *server) updateWatchedDirectories(ctx context.Context) error {
 	patterns := s.session.FileWatchingGlobPatterns(ctx)
 
 	s.watchedGlobPatternsMu.Lock()
@@ -479,7 +419,7 @@ func equalURISet(m1, m2 map[string]struct{}) bool {
 // registerWatchedDirectoriesLocked sends the workspace/didChangeWatchedFiles
 // registrations to the client and updates s.watchedDirectories.
 // The caller must not subsequently mutate patterns.
-func (s *Server) registerWatchedDirectoriesLocked(ctx context.Context, patterns map[string]struct{}) error {
+func (s *server) registerWatchedDirectoriesLocked(ctx context.Context, patterns map[string]struct{}) error {
 	if !s.Options().DynamicWatchedFilesSupported {
 		return nil
 	}
@@ -511,7 +451,7 @@ func (s *Server) registerWatchedDirectoriesLocked(ctx context.Context, patterns 
 // Options returns the current server options.
 //
 // The caller must not modify the result.
-func (s *Server) Options() *source.Options {
+func (s *server) Options() *source.Options {
 	s.optionsMu.Lock()
 	defer s.optionsMu.Unlock()
 	return s.options
@@ -520,13 +460,13 @@ func (s *Server) Options() *source.Options {
 // SetOptions sets the current server options.
 //
 // The caller must not subsequently modify the options.
-func (s *Server) SetOptions(opts *source.Options) {
+func (s *server) SetOptions(opts *source.Options) {
 	s.optionsMu.Lock()
 	defer s.optionsMu.Unlock()
 	s.options = opts
 }
 
-func (s *Server) fetchFolderOptions(ctx context.Context, folder span.URI) (*source.Options, error) {
+func (s *server) fetchFolderOptions(ctx context.Context, folder span.URI) (*source.Options, error) {
 	if opts := s.Options(); !opts.ConfigurationSupported {
 		return opts, nil
 	}
@@ -550,7 +490,7 @@ func (s *Server) fetchFolderOptions(ctx context.Context, folder span.URI) (*sour
 	return folderOpts, nil
 }
 
-func (s *Server) eventuallyShowMessage(ctx context.Context, msg *protocol.ShowMessageParams) error {
+func (s *server) eventuallyShowMessage(ctx context.Context, msg *protocol.ShowMessageParams) error {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	if s.state == serverInitialized {
@@ -560,7 +500,7 @@ func (s *Server) eventuallyShowMessage(ctx context.Context, msg *protocol.ShowMe
 	return nil
 }
 
-func (s *Server) handleOptionResults(ctx context.Context, results source.OptionResults) error {
+func (s *server) handleOptionResults(ctx context.Context, results source.OptionResults) error {
 	var warnings, errors []string
 	for _, result := range results {
 		switch result.Error.(type) {
@@ -609,7 +549,7 @@ func (s *Server) handleOptionResults(ctx context.Context, results source.OptionR
 // We don't want to return errors for benign conditions like wrong file type,
 // so callers should do if !ok { return err } rather than if err != nil.
 // The returned cleanup function is non-nil even in case of false/error result.
-func (s *Server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI, expectKind source.FileKind) (source.Snapshot, source.FileHandle, bool, func(), error) {
+func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI, expectKind source.FileKind) (source.Snapshot, source.FileHandle, bool, func(), error) {
 	uri := pURI.SpanURI()
 	if !uri.IsFile() {
 		// Not a file URI. Stop processing the request, but don't return an error.
@@ -638,7 +578,7 @@ func (s *Server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI
 
 // shutdown implements the 'shutdown' LSP handler. It releases resources
 // associated with the server and waits for all ongoing work to complete.
-func (s *Server) shutdown(ctx context.Context) error {
+func (s *server) shutdown(ctx context.Context) error {
 	ctx, done := event.Start(ctx, "lsp.Server.shutdown")
 	defer done()
 
@@ -660,7 +600,7 @@ func (s *Server) shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) exit(ctx context.Context) error {
+func (s *server) exit(ctx context.Context) error {
 	ctx, done := event.Start(ctx, "lsp.Server.exit")
 	defer done()
 

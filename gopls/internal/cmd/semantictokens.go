@@ -15,7 +15,6 @@ import (
 	"os"
 	"unicode/utf8"
 
-	"golang.org/x/tools/gopls/internal/lsp"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/span"
@@ -58,7 +57,7 @@ func (c *semtok) DetailedHelp(f *flag.FlagSet) {
 	fmt.Fprint(f.Output(), `
 Example: show the semantic tokens for this file:
 
-	$ gopls semtok internal/lsp/cmd/semtok.go
+	$ gopls semtok internal/cmd/semtok.go
 `)
 	printFlagDefaults(f)
 }
@@ -215,8 +214,8 @@ func newMarks(d []uint32) []mark {
 			line:   spn.Start().Line(),
 			offset: spn.Start().Column(),
 			len:    spn.End().Column() - spn.Start().Column(),
-			typ:    lsp.SemType(int(d[5*i+3])),
-			mods:   lsp.SemMods(int(d[5*i+4])),
+			typ:    protocol.SemType(int(d[5*i+3])),
+			mods:   protocol.SemMods(int(d[5*i+4])),
 		}
 		ans = append(ans, m)
 	}

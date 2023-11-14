@@ -38,7 +38,15 @@ const maxFullFileSize int = 100000
 // semDebug should NEVER be true in checked-in code
 const semDebug = false
 
-func (s *Server) semanticTokens(ctx context.Context, td protocol.TextDocumentIdentifier, rng *protocol.Range) (*protocol.SemanticTokens, error) {
+func (s *server) semanticTokensFull(ctx context.Context, params *protocol.SemanticTokensParams) (*protocol.SemanticTokens, error) {
+	return s.semanticTokens(ctx, params.TextDocument, nil)
+}
+
+func (s *server) semanticTokensRange(ctx context.Context, params *protocol.SemanticTokensRangeParams) (*protocol.SemanticTokens, error) {
+	return s.semanticTokens(ctx, params.TextDocument, &params.Range)
+}
+
+func (s *server) semanticTokens(ctx context.Context, td protocol.TextDocumentIdentifier, rng *protocol.Range) (*protocol.SemanticTokens, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.semanticTokens", tag.URI.Of(td.URI))
 	defer done()
 
@@ -922,29 +930,6 @@ func (e *encoded) unexpected(msg string) {
 	event.Error(e.ctx, e.strStack(), errors.New(msg))
 }
 
-// SemType returns a string equivalent of the type, for gopls semtok
-func SemType(n int) string {
-	tokTypes := SemanticTypes()
-	tokMods := SemanticModifiers()
-	if n >= 0 && n < len(tokTypes) {
-		return tokTypes[n]
-	}
-	// not found for some reason
-	return fmt.Sprintf("?%d[%d,%d]?", n, len(tokTypes), len(tokMods))
-}
-
-// SemMods returns the []string equivalent of the mods, for gopls semtok.
-func SemMods(n int) []string {
-	tokMods := SemanticModifiers()
-	mods := []string{}
-	for i := 0; i < len(tokMods); i++ {
-		if (n & (1 << uint(i))) != 0 {
-			mods = append(mods, tokMods[i])
-		}
-	}
-	return mods
-}
-
 func (e *encoded) maps() (map[tokenType]int, map[string]int) {
 	tmap := make(map[tokenType]int)
 	mmap := make(map[string]int)
@@ -956,29 +941,6 @@ func (e *encoded) maps() (map[tokenType]int, map[string]int) {
 	}
 	return tmap, mmap
 }
-
-// SemanticTypes to use in case there is no client, as in the command line, or tests
-func SemanticTypes() []string {
-	return semanticTypes[:]
-}
-
-// SemanticModifiers to use in case there is no client.
-func SemanticModifiers() []string {
-	return semanticModifiers[:]
-}
-
-var (
-	semanticTypes = [...]string{
-		"namespace", "type", "class", "enum", "interface",
-		"struct", "typeParameter", "parameter", "variable", "property", "enumMember",
-		"event", "function", "method", "macro", "keyword", "modifier", "comment",
-		"string", "number", "regexp", "operator",
-	}
-	semanticModifiers = [...]string{
-		"declaration", "definition", "readonly", "static",
-		"deprecated", "abstract", "async", "modification", "documentation", "defaultLibrary",
-	}
-)
 
 var godirectives = map[string]struct{}{
 	// https://pkg.go.dev/cmd/compile

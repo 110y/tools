@@ -38,7 +38,7 @@ import (
 	"golang.org/x/tools/internal/xcontext"
 )
 
-func (s *Server) executeCommand(ctx context.Context, params *protocol.ExecuteCommandParams) (interface{}, error) {
+func (s *server) executeCommand(ctx context.Context, params *protocol.ExecuteCommandParams) (interface{}, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.executeCommand")
 	defer done()
 
@@ -61,7 +61,7 @@ func (s *Server) executeCommand(ctx context.Context, params *protocol.ExecuteCom
 }
 
 type commandHandler struct {
-	s      *Server
+	s      *server
 	params *protocol.ExecuteCommandParams
 }
 
@@ -622,7 +622,7 @@ func (c *commandHandler) GoGetPackage(ctx context.Context, args command.GoGetPac
 	})
 }
 
-func (s *Server) runGoModUpdateCommands(ctx context.Context, snapshot source.Snapshot, uri span.URI, run func(invoke func(...string) (*bytes.Buffer, error)) error) error {
+func (s *server) runGoModUpdateCommands(ctx context.Context, snapshot source.Snapshot, uri span.URI, run func(invoke func(...string) (*bytes.Buffer, error)) error) error {
 	tmpModfile, newModBytes, newSumBytes, err := snapshot.RunGoCommands(ctx, true, filepath.Dir(uri.Filename()), run)
 	if err != nil {
 		return err
@@ -734,7 +734,7 @@ func addModuleRequire(invoke func(...string) (*bytes.Buffer, error), args []stri
 	return err
 }
 
-func (s *Server) getUpgrades(ctx context.Context, snapshot source.Snapshot, uri span.URI, modules []string) (map[string]string, error) {
+func (s *server) getUpgrades(ctx context.Context, snapshot source.Snapshot, uri span.URI, modules []string) (map[string]string, error) {
 	stdout, err := snapshot.RunGoCommandDirect(ctx, source.Normal|source.AllowNetwork, &gocommand.Invocation{
 		Verb:       "list",
 		Args:       append([]string{"-m", "-u", "-json"}, modules...),
@@ -926,7 +926,7 @@ func (c *commandHandler) StopProfile(ctx context.Context, args command.StopProfi
 	return result, nil
 }
 
-// Copy of pkgLoadConfig defined in internal/lsp/cmd/vulncheck.go
+// Copy of pkgLoadConfig defined in internal/cmd/vulncheck.go
 // TODO(hyangah): decide where to define this.
 type pkgLoadConfig struct {
 	// BuildFlags is a list of command-line flags to be passed through to
