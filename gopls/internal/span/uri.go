@@ -4,10 +4,13 @@
 
 package span
 
+// TODO(adonovan): rename this package. Perhaps merge span.URI with
+// protocol.DocumentURI and make these methods on it? Or is span.URI
+// supposed to establish stronger invariants? urls.FromPath?
+
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -100,28 +103,6 @@ func URIFromURI(s string) URI {
 	}
 	u := url.URL{Scheme: fileScheme, Path: path}
 	return URI(u.String())
-}
-
-// SameExistingFile reports whether two spans denote the
-// same existing file by querying the file system.
-func SameExistingFile(a, b URI) bool {
-	fa, err := filename(a)
-	if err != nil {
-		return false
-	}
-	fb, err := filename(b)
-	if err != nil {
-		return false
-	}
-	infoa, err := os.Stat(filepath.FromSlash(fa))
-	if err != nil {
-		return false
-	}
-	infob, err := os.Stat(filepath.FromSlash(fb))
-	if err != nil {
-		return false
-	}
-	return os.SameFile(infoa, infob)
 }
 
 // URIFromPath returns a span URI for the supplied file path.
