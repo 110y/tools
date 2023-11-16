@@ -79,8 +79,6 @@ const (
 // regression test for golang/go#39446. It also checks that these code lenses
 // only affect the diagnostics and contents of the containing go.mod file.
 func TestUpgradeCodelens(t *testing.T) {
-	testenv.NeedsGo1Point(t, 18) // uses go.work
-
 	const proxyWithLatest = `
 -- golang.org/x/hello@v1.3.3/go.mod --
 module golang.org/x/hello
@@ -210,18 +208,10 @@ require golang.org/x/hello v1.2.3
 				env.OpenFile("a/go.mod")
 				env.OpenFile("b/go.mod")
 
-				// Await the diagnostics resulting from opening the modfiles, because
-				// otherwise they may cause races when running asynchronously to the
-				// explicit re-diagnosing below.
-				//
-				// TODO(golang/go#58750): there is still a race here, inherent to
-				// accessing state on the View; we should create a new snapshot when
-				// the view diagnostics change.
-				env.AfterChange()
-
 				env.ExecuteCodeLensCommand("a/go.mod", command.CheckUpgrades, nil)
 				d := &protocol.PublishDiagnosticsParams{}
 				env.OnceMet(
+					CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromCheckUpgrades), 1, true),
 					Diagnostics(env.AtRegexp("a/go.mod", `require`), WithMessage("can be upgraded")),
 					ReadDiagnostics("a/go.mod", d),
 					// We do not want there to be a diagnostic for b/go.mod,
@@ -232,9 +222,15 @@ require golang.org/x/hello v1.2.3
 				)
 				// Check for upgrades in b/go.mod and then clear them.
 				env.ExecuteCodeLensCommand("b/go.mod", command.CheckUpgrades, nil)
-				env.Await(Diagnostics(env.AtRegexp("b/go.mod", `require`), WithMessage("can be upgraded")))
+				env.OnceMet(
+					CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromCheckUpgrades), 2, true),
+					Diagnostics(env.AtRegexp("b/go.mod", `require`), WithMessage("can be upgraded")),
+				)
 				env.ExecuteCodeLensCommand("b/go.mod", command.ResetGoModDiagnostics, nil)
-				env.Await(NoDiagnostics(ForFile("b/go.mod")))
+				env.OnceMet(
+					CompletedWork(lsp.DiagnosticWorkTitle(lsp.FromResetGoModDiagnostics), 1, true),
+					NoDiagnostics(ForFile("b/go.mod")),
+				)
 
 				// Apply the diagnostics to a/go.mod.
 				env.ApplyQuickFixes("a/go.mod", d.Diagnostics)
@@ -295,7 +291,7 @@ func main() {
 	WithOptions(ProxyFiles(proxy)).Run(t, shouldRemoveDep, func(t *testing.T, env *Env) {
 		env.OpenFile("go.mod")
 		env.ExecuteCodeLensCommand("go.mod", command.Tidy, nil)
-		env.Await(env.DoneWithChangeWatchedFiles())
+		env.AfterChange()
 		got := env.BufferText("go.mod")
 		const wantGoMod = `module mod.com
 
