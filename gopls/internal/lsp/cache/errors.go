@@ -27,7 +27,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/typesinternal"
 )
@@ -46,7 +45,7 @@ func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *source
 	// Parse error location and attempt to convert to protocol form.
 	loc, err := func() (protocol.Location, error) {
 		filename, line, col8 := parseGoListError(e, m.LoadDir)
-		uri := span.URIFromPath(filename)
+		uri := protocol.URIFromPath(filename)
 
 		fh, err := fs.ReadFile(ctx, uri)
 		if err != nil {
@@ -62,7 +61,7 @@ func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *source
 			return protocol.Location{}, err
 		}
 		return protocol.Location{
-			URI: protocol.DocumentURI(uri),
+			URI: uri,
 			Range: protocol.Range{
 				Start: posn,
 				End:   posn,
@@ -96,7 +95,7 @@ func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *source
 		return diags, nil
 	}
 	return []*source.Diagnostic{{
-		URI:      span.URI(loc.URI),
+		URI:      loc.URI,
 		Range:    loc.Range,
 		Severity: protocol.SeverityError,
 		Source:   source.ListError,
@@ -110,7 +109,7 @@ func parseErrorDiagnostics(pkg *syntaxPackage, errList scanner.ErrorList) ([]*so
 		return nil, fmt.Errorf("no errors in %v", errList)
 	}
 	e := errList[0]
-	pgf, err := pkg.File(span.URIFromPath(e.Pos.Filename))
+	pgf, err := pkg.File(protocol.URIFromPath(e.Pos.Filename))
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +135,7 @@ func typeErrorDiagnostics(moduleMode bool, linkTarget string, pkg *syntaxPackage
 		return nil, err
 	}
 	diag := &source.Diagnostic{
-		URI:      loc.URI.SpanURI(),
+		URI:      loc.URI,
 		Range:    loc.Range,
 		Severity: protocol.SeverityError,
 		Source:   source.TypeError,
@@ -169,13 +168,13 @@ func typeErrorDiagnostics(moduleMode bool, linkTarget string, pkg *syntaxPackage
 	}
 
 	if match := importErrorRe.FindStringSubmatch(e.primary.Msg); match != nil {
-		diag.SuggestedFixes, err = goGetQuickFixes(moduleMode, loc.URI.SpanURI(), match[1])
+		diag.SuggestedFixes, err = goGetQuickFixes(moduleMode, loc.URI, match[1])
 		if err != nil {
 			return nil, err
 		}
 	}
 	if match := unsupportedFeatureRe.FindStringSubmatch(e.primary.Msg); match != nil {
-		diag.SuggestedFixes, err = editGoDirectiveQuickFix(moduleMode, loc.URI.SpanURI(), match[1])
+		diag.SuggestedFixes, err = editGoDirectiveQuickFix(moduleMode, loc.URI, match[1])
 		if err != nil {
 			return nil, err
 		}
@@ -183,14 +182,14 @@ func typeErrorDiagnostics(moduleMode bool, linkTarget string, pkg *syntaxPackage
 	return []*source.Diagnostic{diag}, nil
 }
 
-func goGetQuickFixes(moduleMode bool, uri span.URI, pkg string) ([]source.SuggestedFix, error) {
+func goGetQuickFixes(moduleMode bool, uri protocol.DocumentURI, pkg string) ([]source.SuggestedFix, error) {
 	// Go get only supports module mode for now.
 	if !moduleMode {
 		return nil, nil
 	}
 	title := fmt.Sprintf("go get package %v", pkg)
 	cmd, err := command.NewGoGetPackageCommand(title, command.GoGetPackageArgs{
-		URI:        protocol.URIFromSpanURI(uri),
+		URI:        uri,
 		AddRequire: true,
 		Pkg:        pkg,
 	})
@@ -200,14 +199,14 @@ func goGetQuickFixes(moduleMode bool, uri span.URI, pkg string) ([]source.Sugges
 	return []source.SuggestedFix{source.SuggestedFixFromCommand(cmd, protocol.QuickFix)}, nil
 }
 
-func editGoDirectiveQuickFix(moduleMode bool, uri span.URI, version string) ([]source.SuggestedFix, error) {
+func editGoDirectiveQuickFix(moduleMode bool, uri protocol.DocumentURI, version string) ([]source.SuggestedFix, error) {
 	// Go mod edit only supports module mode.
 	if !moduleMode {
 		return nil, nil
 	}
 	title := fmt.Sprintf("go mod edit -go=%s", version)
 	cmd, err := command.NewEditGoDirectiveCommand(title, command.EditGoDirectiveArgs{
-		URI:     protocol.URIFromSpanURI(uri),
+		URI:     uri,
 		Version: version,
 	})
 	if err != nil {
@@ -230,7 +229,7 @@ func encodeDiagnostics(srcDiags []*source.Diagnostic) []byte {
 				for _, srcEdit := range srcEdits {
 					gobFix.TextEdits = append(gobFix.TextEdits, gobTextEdit{
 						Location: protocol.Location{
-							URI:   protocol.URIFromSpanURI(uri),
+							URI:   uri,
 							Range: srcEdit.Range,
 						},
 						NewText: []byte(srcEdit.NewText),
@@ -253,7 +252,7 @@ func encodeDiagnostics(srcDiags []*source.Diagnostic) []byte {
 		}
 		gobDiag := gobDiagnostic{
 			Location: protocol.Location{
-				URI:   protocol.URIFromSpanURI(srcDiag.URI),
+				URI:   srcDiag.URI,
 				Range: srcDiag.Range,
 			},
 			Severity:       srcDiag.Severity,
@@ -284,13 +283,13 @@ func decodeDiagnostics(data []byte) []*source.Diagnostic {
 			}
 			for _, gobEdit := range gobFix.TextEdits {
 				if srcFix.Edits == nil {
-					srcFix.Edits = make(map[span.URI][]protocol.TextEdit)
+					srcFix.Edits = make(map[protocol.DocumentURI][]protocol.TextEdit)
 				}
 				srcEdit := protocol.TextEdit{
 					Range:   gobEdit.Location.Range,
 					NewText: string(gobEdit.NewText),
 				}
-				uri := gobEdit.Location.URI.SpanURI()
+				uri := gobEdit.Location.URI
 				srcFix.Edits[uri] = append(srcFix.Edits[uri], srcEdit)
 			}
 			if gobCmd := gobFix.Command; gobCmd != nil {
@@ -308,7 +307,7 @@ func decodeDiagnostics(data []byte) []*source.Diagnostic {
 			srcRelated = append(srcRelated, srcRel)
 		}
 		srcDiag := &source.Diagnostic{
-			URI:            gobDiag.Location.URI.SpanURI(),
+			URI:            gobDiag.Location.URI,
 			Range:          gobDiag.Location.Range,
 			Severity:       gobDiag.Severity,
 			Code:           gobDiag.Code,
@@ -357,7 +356,7 @@ func toSourceDiagnostic(srcAnalyzer *source.Analyzer, gobDiag *gobDiagnostic) *s
 	}
 
 	diag := &source.Diagnostic{
-		URI:      gobDiag.Location.URI.SpanURI(),
+		URI:      gobDiag.Location.URI,
 		Range:    gobDiag.Location.Range,
 		Severity: severity,
 		Code:     gobDiag.Code,
@@ -405,9 +404,9 @@ func typesCodeHref(linkTarget string, code typesinternal.ErrorCode) string {
 func suggestedAnalysisFixes(diag *gobDiagnostic, kinds []protocol.CodeActionKind) []source.SuggestedFix {
 	var fixes []source.SuggestedFix
 	for _, fix := range diag.SuggestedFixes {
-		edits := make(map[span.URI][]protocol.TextEdit)
+		edits := make(map[protocol.DocumentURI][]protocol.TextEdit)
 		for _, e := range fix.TextEdits {
-			uri := span.URI(e.Location.URI)
+			uri := e.Location.URI
 			edits[uri] = append(edits[uri], protocol.TextEdit{
 				Range:   e.Location.Range,
 				NewText: string(e.NewText),
@@ -446,7 +445,7 @@ func typeErrorData(pkg *syntaxPackage, terr types.Error) (typesinternal.ErrorCod
 	if !posn.IsValid() {
 		return 0, protocol.Location{}, fmt.Errorf("position %d of type error %q (code %q) not found in FileSet", start, start, terr)
 	}
-	pgf, err := pkg.File(span.URIFromPath(posn.Filename))
+	pgf, err := pkg.File(protocol.URIFromPath(posn.Filename))
 	if err != nil {
 		return 0, protocol.Location{}, err
 	}
@@ -559,7 +558,7 @@ func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *sourc
 // It returns an error if the file could not be read.
 //
 // TODO(rfindley): eliminate this helper.
-func parseGoURI(ctx context.Context, fs source.FileSource, uri span.URI, mode parser.Mode) (*source.ParsedGoFile, error) {
+func parseGoURI(ctx context.Context, fs source.FileSource, uri protocol.DocumentURI, mode parser.Mode) (*source.ParsedGoFile, error) {
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, err
@@ -571,7 +570,7 @@ func parseGoURI(ctx context.Context, fs source.FileSource, uri span.URI, mode pa
 // source fs.
 //
 // It returns an error if the file could not be read.
-func parseModURI(ctx context.Context, fs source.FileSource, uri span.URI) (*source.ParsedModule, error) {
+func parseModURI(ctx context.Context, fs source.FileSource, uri protocol.DocumentURI) (*source.ParsedModule, error) {
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, err

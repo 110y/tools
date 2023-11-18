@@ -18,7 +18,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/gocommand"
@@ -55,7 +54,7 @@ func (s *snapshot) ModTidy(ctx context.Context, pm *source.ParsedModule) (*sourc
 			return nil, err
 		}
 		if _, ok := fh.(*Overlay); ok {
-			if info, _ := os.Stat(uri.Filename()); info == nil {
+			if info, _ := os.Stat(uri.Path()); info == nil {
 				return nil, source.ErrNoModOnDisk
 			}
 		}
@@ -74,7 +73,7 @@ func (s *snapshot) ModTidy(ctx context.Context, pm *source.ParsedModule) (*sourc
 		}
 
 		handle := memoize.NewPromise("modTidy", func(ctx context.Context, arg interface{}) interface{} {
-			tidied, err := modTidyImpl(ctx, arg.(*snapshot), uri.Filename(), pm)
+			tidied, err := modTidyImpl(ctx, arg.(*snapshot), uri.Path(), pm)
 			return modTidyResult{tidied, err}
 		})
 
@@ -117,11 +116,11 @@ func modTidyImpl(ctx context.Context, snapshot *snapshot, filename string, pm *s
 
 	// Go directly to disk to get the temporary mod file,
 	// since it is always on disk.
-	tempContents, err := os.ReadFile(tmpURI.Filename())
+	tempContents, err := os.ReadFile(tmpURI.Path())
 	if err != nil {
 		return nil, err
 	}
-	ideal, err := modfile.Parse(tmpURI.Filename(), tempContents, nil)
+	ideal, err := modfile.Parse(tmpURI.Path(), tempContents, nil)
 	if err != nil {
 		// We do not need to worry about the temporary file's parse errors
 		// since it has been "tidied".
@@ -326,7 +325,7 @@ func unusedDiagnostic(m *protocol.Mapper, req *modfile.Require, onlyDiagnostic b
 	}
 	title := fmt.Sprintf("Remove dependency: %s", req.Mod.Path)
 	cmd, err := command.NewRemoveDependencyCommand(title, command.RemoveDependencyArgs{
-		URI:            protocol.URIFromSpanURI(m.URI),
+		URI:            m.URI,
 		OnlyDiagnostic: onlyDiagnostic,
 		ModulePath:     req.Mod.Path,
 	})
@@ -378,7 +377,7 @@ func directnessDiagnostic(m *protocol.Mapper, req *modfile.Require, computeEdits
 		Message:  fmt.Sprintf("%s should be %s", req.Mod.Path, direction),
 		SuggestedFixes: []source.SuggestedFix{{
 			Title: fmt.Sprintf("Change %s to %s", req.Mod.Path, direction),
-			Edits: map[span.URI][]protocol.TextEdit{
+			Edits: map[protocol.DocumentURI][]protocol.TextEdit{
 				m.URI: edits,
 			},
 			ActionKind: protocol.QuickFix,
@@ -399,7 +398,7 @@ func missingModuleDiagnostic(pm *source.ParsedModule, req *modfile.Require) (*so
 	}
 	title := fmt.Sprintf("Add %s to your go.mod file", req.Mod.Path)
 	cmd, err := command.NewAddDependencyCommand(title, command.DependencyArgs{
-		URI:        protocol.URIFromSpanURI(pm.Mapper.URI),
+		URI:        pm.Mapper.URI,
 		AddRequire: !req.Indirect,
 		GoCmdArgs:  []string{req.Mod.Path + "@" + req.Mod.Version},
 	})

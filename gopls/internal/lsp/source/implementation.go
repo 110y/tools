@@ -21,7 +21,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source/methodsets"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 )
 
@@ -83,7 +82,7 @@ func implementations(ctx context.Context, snapshot Snapshot, fh FileHandle, pp p
 		// by the "local" search, which uses type information to
 		// enumerate all types within the package that satisfy the
 		// query type, even those defined local to a function.
-		declURI := span.URIFromPath(declPosn.Filename)
+		declURI := protocol.URIFromPath(declPosn.Filename)
 		declMetas, err := snapshot.MetadataForFile(ctx, declURI)
 		if err != nil {
 			return nil, err
@@ -210,7 +209,7 @@ func implementations(ctx context.Context, snapshot Snapshot, fh FileHandle, pp p
 // offsetToLocation converts an offset-based position to a protocol.Location,
 // which requires reading the file.
 func offsetToLocation(ctx context.Context, snapshot Snapshot, filename string, start, end int) (protocol.Location, error) {
-	uri := span.URIFromPath(filename)
+	uri := protocol.URIFromPath(filename)
 	fh, err := snapshot.ReadFile(ctx, uri)
 	if err != nil {
 		return protocol.Location{}, err // cancelled, perhaps
@@ -228,7 +227,7 @@ func offsetToLocation(ctx context.Context, snapshot Snapshot, filename string, s
 //
 // The returned Package is the narrowest package containing ppos, which is the
 // package using the resulting obj but not necessarily the declaring package.
-func implementsObj(ctx context.Context, snapshot Snapshot, uri span.URI, ppos protocol.Position) (types.Object, Package, error) {
+func implementsObj(ctx context.Context, snapshot Snapshot, uri protocol.DocumentURI, ppos protocol.Position) (types.Object, Package, error) {
 	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, uri)
 	if err != nil {
 		return nil, nil, err

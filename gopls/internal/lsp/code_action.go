@@ -20,7 +20,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/mod"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/imports"
@@ -138,7 +137,7 @@ func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 			if wantQuickFixes || want[protocol.SourceOrganizeImports] {
 				importEdits, importEditsPerFix, err := source.AllImportsFixes(ctx, snapshot, pgf)
 				if err != nil {
-					event.Error(ctx, "imports fixes", err, tag.File.Of(fh.URI().Filename()))
+					event.Error(ctx, "imports fixes", err, tag.File.Of(fh.URI().Path()))
 					importEdits = nil
 					importEditsPerFix = nil
 				}
@@ -223,7 +222,7 @@ func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 						return protocol.CodeAction{}, false, nil
 					}
 					cmd, err := command.NewApplyFixCommand(d.Message, command.ApplyFixArgs{
-						URI:   protocol.URIFromSpanURI(pgf.URI),
+						URI:   pgf.URI,
 						Fix:   source.StubMethods,
 						Range: pd.Range,
 					})
@@ -278,7 +277,7 @@ func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 	}
 }
 
-func (s *server) findMatchingDiagnostics(uri span.URI, pd protocol.Diagnostic) []*source.Diagnostic {
+func (s *server) findMatchingDiagnostics(uri protocol.DocumentURI, pd protocol.Diagnostic) []*source.Diagnostic {
 	s.diagnosticsMu.Lock()
 	defer s.diagnosticsMu.Unlock()
 
@@ -373,7 +372,7 @@ func refactorExtract(ctx context.Context, snapshot source.Snapshot, pgf *source.
 	if err != nil {
 		return nil, err
 	}
-	puri := protocol.URIFromSpanURI(pgf.URI)
+	puri := pgf.URI
 	var commands []protocol.Command
 	if _, ok, methodOk, _ := source.CanExtractFunction(pgf.Tok, start, end, pgf.Src, pgf.File); ok {
 		cmd, err := command.NewApplyFixCommand("Extract function", command.ApplyFixArgs{
@@ -436,7 +435,7 @@ func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.P
 	if canRemoveParameter(pkg, pgf, rng) {
 		cmd, err := command.NewChangeSignatureCommand("remove unused parameter", command.ChangeSignatureArgs{
 			RemoveParameter: protocol.Location{
-				URI:   protocol.URIFromSpanURI(pgf.URI),
+				URI:   pgf.URI,
 				Range: rng,
 			},
 		})
@@ -462,7 +461,7 @@ func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.P
 	var commands []protocol.Command
 	if _, ok, _ := source.CanInvertIfCondition(pgf.File, start, end); ok {
 		cmd, err := command.NewApplyFixCommand("Invert if condition", command.ApplyFixArgs{
-			URI:   protocol.URIFromSpanURI(pgf.URI),
+			URI:   pgf.URI,
 			Fix:   source.InvertIfCondition,
 			Range: rng,
 		})
@@ -484,7 +483,7 @@ func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.P
 				return nil, err
 			}
 			cmd, err := command.NewApplyFixCommand(d.Message, command.ApplyFixArgs{
-				URI:   protocol.URIFromSpanURI(pgf.URI),
+				URI:   pgf.URI,
 				Fix:   source.FillStruct,
 				Range: rng,
 			})
@@ -581,7 +580,7 @@ func refactorInline(ctx context.Context, snapshot source.Snapshot, pkg source.Pa
 	// If range is within call expression, offer inline action.
 	if _, fn, err := source.EnclosingStaticCall(pkg, pgf, rng); err == nil {
 		cmd, err := command.NewApplyFixCommand(fmt.Sprintf("Inline call to %s", fn.Name()), command.ApplyFixArgs{
-			URI:   protocol.URIFromSpanURI(pgf.URI),
+			URI:   pgf.URI,
 			Fix:   source.InlineCall,
 			Range: rng,
 		})
@@ -610,7 +609,7 @@ func documentChanges(fh source.FileHandle, edits []protocol.TextEdit) []protocol
 				TextDocument: protocol.OptionalVersionedTextDocumentIdentifier{
 					Version: fh.Version(),
 					TextDocumentIdentifier: protocol.TextDocumentIdentifier{
-						URI: protocol.URIFromSpanURI(fh.URI()),
+						URI: fh.URI(),
 					},
 				},
 				Edits: nonNilSliceTextEdit(edits),
@@ -624,7 +623,7 @@ func documentChanges(fh source.FileHandle, edits []protocol.TextEdit) []protocol
 // bundled protocol.Diagnostic.Data field, and failing that by falling back on
 // fetching a matching source.Diagnostic from the set of stored diagnostics for
 // this file.
-func (s *server) codeActionsMatchingDiagnostics(ctx context.Context, uri span.URI, snapshot source.Snapshot, pds []protocol.Diagnostic, want map[protocol.CodeActionKind]bool) ([]protocol.CodeAction, error) {
+func (s *server) codeActionsMatchingDiagnostics(ctx context.Context, uri protocol.DocumentURI, snapshot source.Snapshot, pds []protocol.Diagnostic, want map[protocol.CodeActionKind]bool) ([]protocol.CodeAction, error) {
 	var actions []protocol.CodeAction
 	var unbundled []protocol.Diagnostic // diagnostics without bundled code actions in their Data field
 	for _, pd := range pds {
@@ -705,7 +704,7 @@ func goTest(ctx context.Context, snapshot source.Snapshot, pkg source.Package, p
 		return nil, nil
 	}
 
-	cmd, err := command.NewTestCommand("Run tests and benchmarks", protocol.URIFromSpanURI(pgf.URI), tests, benchmarks)
+	cmd, err := command.NewTestCommand("Run tests and benchmarks", pgf.URI, tests, benchmarks)
 	if err != nil {
 		return nil, err
 	}

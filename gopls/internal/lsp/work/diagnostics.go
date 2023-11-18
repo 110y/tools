@@ -13,15 +13,14 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 )
 
-func Diagnostics(ctx context.Context, snapshot source.Snapshot) (map[span.URI][]*source.Diagnostic, error) {
+func Diagnostics(ctx context.Context, snapshot source.Snapshot) (map[protocol.DocumentURI][]*source.Diagnostic, error) {
 	ctx, done := event.Start(ctx, "work.Diagnostics", source.SnapshotLabels(snapshot)...)
 	defer done()
 
-	reports := map[span.URI][]*source.Diagnostic{}
+	reports := map[protocol.DocumentURI][]*source.Diagnostic{}
 	uri := snapshot.WorkFile()
 	if uri == "" {
 		return nil, nil
@@ -80,13 +79,13 @@ func DiagnosticsForWork(ctx context.Context, snapshot source.Snapshot, fh source
 	return diagnostics, nil
 }
 
-func modFileURI(pw *source.ParsedWorkFile, use *modfile.Use) span.URI {
-	workdir := filepath.Dir(pw.URI.Filename())
+func modFileURI(pw *source.ParsedWorkFile, use *modfile.Use) protocol.DocumentURI {
+	workdir := filepath.Dir(pw.URI.Path())
 
 	modroot := filepath.FromSlash(use.Path)
 	if !filepath.IsAbs(modroot) {
 		modroot = filepath.Join(workdir, modroot)
 	}
 
-	return span.URIFromPath(filepath.Join(modroot, "go.mod"))
+	return protocol.URIFromPath(filepath.Join(modroot, "go.mod"))
 }

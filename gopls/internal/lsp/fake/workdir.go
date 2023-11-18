@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/robustio"
 )
 
@@ -56,7 +55,7 @@ func writeFileData(path string, content []byte, rel RelativeTo) error {
 	}
 	backoff := 1 * time.Millisecond
 	for {
-		err := os.WriteFile(fp, []byte(content), 0644)
+		err := os.WriteFile(fp, content, 0644)
 		if err != nil {
 			// This lock file violation is not handled by the robustio package, as it
 			// indicates a real race condition that could be avoided.
@@ -129,7 +128,7 @@ func hashFile(data []byte) string {
 // RootURI returns the root URI for this working directory of this scratch
 // environment.
 func (w *Workdir) RootURI() protocol.DocumentURI {
-	return toURI(string(w.RelativeTo))
+	return protocol.URIFromPath(string(w.RelativeTo))
 }
 
 // AddWatcher registers the given func to be called on any file change.
@@ -141,18 +140,13 @@ func (w *Workdir) AddWatcher(watcher func(context.Context, []protocol.FileEvent)
 
 // URI returns the URI to a the workdir-relative path.
 func (w *Workdir) URI(path string) protocol.DocumentURI {
-	return toURI(w.AbsPath(path))
+	return protocol.URIFromPath(w.AbsPath(path))
 }
 
 // URIToPath converts a uri to a workdir-relative path (or an absolute path,
 // if the uri is outside of the workdir).
 func (w *Workdir) URIToPath(uri protocol.DocumentURI) string {
-	fp := uri.SpanURI().Filename()
-	return w.RelPath(fp)
-}
-
-func toURI(fp string) protocol.DocumentURI {
-	return protocol.DocumentURI(span.URIFromPath(fp))
+	return w.RelPath(uri.Path())
 }
 
 // ReadFile reads a text file specified by a workdir-relative path.
@@ -181,7 +175,7 @@ func (w *Workdir) RegexpSearch(path string, re string) (protocol.Location, error
 	if err != nil {
 		return protocol.Location{}, err
 	}
-	mapper := protocol.NewMapper(w.URI(path).SpanURI(), content)
+	mapper := protocol.NewMapper(w.URI(path), content)
 	return regexpLocation(mapper, re)
 }
 
@@ -281,7 +275,7 @@ func (w *Workdir) RenameFile(ctx context.Context, oldPath, newPath string) error
 			// the error from Rename may be accurate.
 			return renameErr
 		}
-		if writeErr := writeFileData(newPath, []byte(content), w.RelativeTo); writeErr != nil {
+		if writeErr := writeFileData(newPath, content, w.RelativeTo); writeErr != nil {
 			// At this point we have tried to actually write the file.
 			// If it still doesn't exist, assume that the error from Rename was accurate:
 			// for example, maybe we don't have permission to create the new path.

@@ -20,7 +20,6 @@ import (
 	"golang.org/x/tools/gopls/internal/immutable"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/gocommand"
@@ -63,7 +62,7 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadSc
 			// information. For example go/packages returns at most one command-line
 			// arguments package, and does not handle a combination of standalone
 			// files and packages.
-			uri := span.URI(scope)
+			uri := protocol.DocumentURI(scope)
 			if len(scopes) > 1 {
 				panic(fmt.Sprintf("internal error: load called with multiple scopes when a file scope is present (file: %s)", uri))
 			}
@@ -78,15 +77,15 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadSc
 			}
 			if isStandaloneFile(contents, s.Options().StandaloneTags) {
 				standalone = true
-				query = append(query, uri.Filename())
+				query = append(query, uri.Path())
 			} else {
-				query = append(query, fmt.Sprintf("file=%s", uri.Filename()))
+				query = append(query, fmt.Sprintf("file=%s", uri.Path()))
 			}
 
 		case moduleLoadScope:
 			modQuery := fmt.Sprintf("%s%c...", scope.dir, filepath.Separator)
 			query = append(query, modQuery)
-			moduleQueries[modQuery] = string(scope.modulePath)
+			moduleQueries[modQuery] = scope.modulePath
 
 		case viewLoadScope:
 			// If we are outside of GOPATH, a module, or some other known
@@ -118,7 +117,7 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadSc
 		flags |= source.AllowNetwork
 	}
 	_, inv, cleanup, err := s.goCommandInvocation(ctx, flags, &gocommand.Invocation{
-		WorkingDir: s.view.goCommandDir.Filename(),
+		WorkingDir: s.view.goCommandDir.Path(),
 	})
 	if err != nil {
 		return err
@@ -226,8 +225,8 @@ func (s *snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadSc
 
 	// Compute the minimal metadata updates (for Clone)
 	// required to preserve the above invariant.
-	var files []span.URI // files to preload
-	seenFiles := make(map[span.URI]bool)
+	var files []protocol.DocumentURI // files to preload
+	seenFiles := make(map[protocol.DocumentURI]bool)
 	updates := make(map[PackageID]*source.Metadata)
 	for _, m := range newMetadata {
 		if existing := s.meta.metadata[m.ID]; existing == nil {
@@ -435,15 +434,15 @@ func buildMetadata(updates map[PackageID]*source.Metadata, pkg *packages.Package
 	updates[id] = m
 
 	for _, filename := range pkg.CompiledGoFiles {
-		uri := span.URIFromPath(filename)
+		uri := protocol.URIFromPath(filename)
 		m.CompiledGoFiles = append(m.CompiledGoFiles, uri)
 	}
 	for _, filename := range pkg.GoFiles {
-		uri := span.URIFromPath(filename)
+		uri := protocol.URIFromPath(filename)
 		m.GoFiles = append(m.GoFiles, uri)
 	}
 	for _, filename := range pkg.IgnoredFiles {
-		uri := span.URIFromPath(filename)
+		uri := protocol.URIFromPath(filename)
 		m.IgnoredFiles = append(m.IgnoredFiles, uri)
 	}
 
@@ -607,13 +606,13 @@ func containsPackageLocked(s *snapshot, m *source.Metadata) bool {
 	// gowork != "". It should suffice to consider workspace mod files (also, we
 	// will hopefully eliminate the concept of a workspace package soon).
 	if m.Module != nil && s.view.gowork != "" {
-		modURI := span.URIFromPath(m.Module.GoMod)
+		modURI := protocol.URIFromPath(m.Module.GoMod)
 		_, ok := s.workspaceModFiles[modURI]
 		if !ok {
 			return false
 		}
 
-		uris := map[span.URI]struct{}{}
+		uris := map[protocol.DocumentURI]struct{}{}
 		for _, uri := range m.CompiledGoFiles {
 			uris[uri] = struct{}{}
 		}
@@ -640,7 +639,7 @@ func containsPackageLocked(s *snapshot, m *source.Metadata) bool {
 //
 // s.mu must be held while calling this function.
 func containsOpenFileLocked(s *snapshot, m *source.Metadata) bool {
-	uris := map[span.URI]struct{}{}
+	uris := map[protocol.DocumentURI]struct{}{}
 	for _, uri := range m.CompiledGoFiles {
 		uris[uri] = struct{}{}
 	}
@@ -662,7 +661,7 @@ func containsOpenFileLocked(s *snapshot, m *source.Metadata) bool {
 //
 // s.mu must be held while calling this function.
 func containsFileInWorkspaceLocked(v *View, m *source.Metadata) bool {
-	uris := map[span.URI]struct{}{}
+	uris := map[protocol.DocumentURI]struct{}{}
 	for _, uri := range m.CompiledGoFiles {
 		uris[uri] = struct{}{}
 	}

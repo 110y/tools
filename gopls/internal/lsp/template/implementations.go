@@ -13,7 +13,6 @@ import (
 
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 )
 
 // line number (1-based) and message
@@ -28,7 +27,7 @@ func Diagnose(f source.FileHandle) []*source.Diagnostic {
 	buf, err := f.Content()
 	if err != nil {
 		// Is a Diagnostic with no Range useful? event.Error also?
-		msg := fmt.Sprintf("failed to read %s (%v)", f.URI().Filename(), err)
+		msg := fmt.Sprintf("failed to read %s (%v)", f.URI().Path(), err)
 		d := source.Diagnostic{Message: msg, Severity: protocol.SeverityError, URI: f.URI(),
 			Source: source.TemplateError}
 		return []*source.Diagnostic{&d}
@@ -87,7 +86,7 @@ func Definition(snapshot source.Snapshot, fh source.FileHandle, loc protocol.Pos
 			if !s.vardef || s.name != sym {
 				continue
 			}
-			ans = append(ans, protocol.Location{URI: protocol.DocumentURI(k), Range: p.Range(s.start, s.length)})
+			ans = append(ans, protocol.Location{URI: k, Range: p.Range(s.start, s.length)})
 		}
 	}
 	return ans, nil
@@ -140,14 +139,14 @@ func References(ctx context.Context, snapshot source.Snapshot, fh source.FileHan
 			if s.vardef && !params.Context.IncludeDeclaration {
 				continue
 			}
-			ans = append(ans, protocol.Location{URI: protocol.DocumentURI(k), Range: p.Range(s.start, s.length)})
+			ans = append(ans, protocol.Location{URI: k, Range: p.Range(s.start, s.length)})
 		}
 	}
 	// do these need to be sorted? (a.files is a map)
 	return ans, nil
 }
 
-func SemanticTokens(ctx context.Context, snapshot source.Snapshot, spn span.URI, add func(line, start, len uint32), d func() []uint32) (*protocol.SemanticTokens, error) {
+func SemanticTokens(ctx context.Context, snapshot source.Snapshot, spn protocol.DocumentURI, add func(line, start, len uint32), d func() []uint32) (*protocol.SemanticTokens, error) {
 	fh, err := snapshot.ReadFile(ctx, spn)
 	if err != nil {
 		return nil, err

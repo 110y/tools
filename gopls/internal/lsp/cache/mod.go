@@ -17,7 +17,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/gocommand"
@@ -71,7 +70,7 @@ func parseModImpl(ctx context.Context, fh source.FileHandle) (*source.ParsedModu
 		return nil, err
 	}
 	m := protocol.NewMapper(fh.URI(), contents)
-	file, parseErr := modfile.Parse(fh.URI().Filename(), contents, nil)
+	file, parseErr := modfile.Parse(fh.URI().Path(), contents, nil)
 	// Attempt to convert the error to a standardized parse error.
 	var parseErrors []*source.Diagnostic
 	if parseErr != nil {
@@ -148,7 +147,7 @@ func parseWorkImpl(ctx context.Context, fh source.FileHandle) (*source.ParsedWor
 		return nil, err
 	}
 	m := protocol.NewMapper(fh.URI(), content)
-	file, parseErr := modfile.ParseWork(fh.URI().Filename(), content, nil)
+	file, parseErr := modfile.ParseWork(fh.URI().Path(), content, nil)
 	// Attempt to convert the error to a standardized parse error.
 	var parseErrors []*source.Diagnostic
 	if parseErr != nil {
@@ -180,14 +179,14 @@ func parseWorkImpl(ctx context.Context, fh source.FileHandle) (*source.ParsedWor
 
 // goSum reads the go.sum file for the go.mod file at modURI, if it exists. If
 // it doesn't exist, it returns nil.
-func (s *snapshot) goSum(ctx context.Context, modURI span.URI) []byte {
+func (s *snapshot) goSum(ctx context.Context, modURI protocol.DocumentURI) []byte {
 	// Get the go.sum file, either from the snapshot or directly from the
 	// cache. Avoid (*snapshot).ReadFile here, as we don't want to add
 	// nonexistent file handles to the snapshot if the file does not exist.
 	//
 	// TODO(rfindley): but that's not right. Changes to sum files should
 	// invalidate content, even if it's nonexistent content.
-	sumURI := span.URIFromPath(sumFilename(modURI))
+	sumURI := protocol.URIFromPath(sumFilename(modURI))
 	var sumFH source.FileHandle = s.FindFile(sumURI)
 	if sumFH == nil {
 		var err error
@@ -203,8 +202,8 @@ func (s *snapshot) goSum(ctx context.Context, modURI span.URI) []byte {
 	return content
 }
 
-func sumFilename(modURI span.URI) string {
-	return strings.TrimSuffix(modURI.Filename(), ".mod") + ".sum"
+func sumFilename(modURI protocol.DocumentURI) string {
+	return strings.TrimSuffix(modURI.Path(), ".mod") + ".sum"
 }
 
 // ModWhy returns the "go mod why" result for each module named in a
@@ -265,7 +264,7 @@ func modWhyImpl(ctx context.Context, snapshot *snapshot, fh source.FileHandle) (
 	inv := &gocommand.Invocation{
 		Verb:       "mod",
 		Args:       []string{"why", "-m"},
-		WorkingDir: filepath.Dir(fh.URI().Filename()),
+		WorkingDir: filepath.Dir(fh.URI().Path()),
 	}
 	for _, req := range pm.File.Require {
 		inv.Args = append(inv.Args, req.Mod.Path)
@@ -427,7 +426,7 @@ func (s *snapshot) goCommandDiagnostic(pm *source.ParsedModule, loc protocol.Loc
 
 	switch {
 	case strings.Contains(goCmdError, "inconsistent vendoring"):
-		cmd, err := command.NewVendorCommand("Run go mod vendor", command.URIArg{URI: protocol.URIFromSpanURI(pm.URI)})
+		cmd, err := command.NewVendorCommand("Run go mod vendor", command.URIArg{URI: pm.URI})
 		if err != nil {
 			return nil, err
 		}
@@ -444,7 +443,7 @@ See https://github.com/golang/go/issues/39164 for more detail on this issue.`,
 	case strings.Contains(goCmdError, "updates to go.sum needed"), strings.Contains(goCmdError, "missing go.sum entry"):
 		var args []protocol.DocumentURI
 		for _, uri := range s.ModFiles() {
-			args = append(args, protocol.URIFromSpanURI(uri))
+			args = append(args, uri)
 		}
 		tidyCmd, err := command.NewTidyCommand("Run go mod tidy", command.URIArgs{URIs: args})
 		if err != nil {
@@ -472,7 +471,7 @@ See https://github.com/golang/go/issues/39164 for more detail on this issue.`,
 	case strings.Contains(goCmdError, "disabled by GOPROXY=off") && innermost != nil:
 		title := fmt.Sprintf("Download %v@%v", innermost.Path, innermost.Version)
 		cmd, err := command.NewAddDependencyCommand(title, command.DependencyArgs{
-			URI:        protocol.URIFromSpanURI(pm.URI),
+			URI:        pm.URI,
 			AddRequire: false,
 			GoCmdArgs:  []string{fmt.Sprintf("%v@%v", innermost.Path, innermost.Version)},
 		})

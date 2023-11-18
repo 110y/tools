@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 )
 
 func TestFileMap(t *testing.T) {
@@ -67,7 +67,7 @@ func TestFileMap(t *testing.T) {
 		t.Run(test.label, func(t *testing.T) {
 			m := newFileMap()
 			for _, op := range test.ops {
-				uri := span.URIFromPath(filepath.FromSlash(op.path))
+				uri := protocol.URIFromPath(filepath.FromSlash(op.path))
 				switch op.op {
 				case set:
 					var fh source.FileHandle
@@ -83,8 +83,8 @@ func TestFileMap(t *testing.T) {
 			}
 
 			var gotFiles []string
-			m.Range(func(uri span.URI, _ source.FileHandle) {
-				gotFiles = append(gotFiles, normalize(uri.Filename()))
+			m.Range(func(uri protocol.DocumentURI, _ source.FileHandle) {
+				gotFiles = append(gotFiles, normalize(uri.Path()))
 			})
 			sort.Strings(gotFiles)
 			if diff := cmp.Diff(test.wantFiles, gotFiles); diff != "" {
@@ -93,7 +93,7 @@ func TestFileMap(t *testing.T) {
 
 			var gotOverlays []string
 			for _, o := range m.Overlays() {
-				gotOverlays = append(gotOverlays, normalize(o.URI().Filename()))
+				gotOverlays = append(gotOverlays, normalize(o.URI().Path()))
 			}
 			if diff := cmp.Diff(test.wantOverlays, gotOverlays); diff != "" {
 				t.Errorf("Overlays mismatch (-want +got):\n%s", diff)

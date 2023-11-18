@@ -22,9 +22,9 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/gopls/internal/astutil"
 	"golang.org/x/tools/gopls/internal/lsp/cache"
+	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/source/typerefs"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/packagesinternal"
 	"golang.org/x/tools/internal/testenv"
 )
@@ -272,7 +272,7 @@ func BenchmarkBuildPackageGraph(b *testing.B) {
 
 type memoizedParser struct {
 	mu    sync.Mutex
-	files map[span.URI]*futureParse
+	files map[protocol.DocumentURI]*futureParse
 }
 
 type futureParse struct {
@@ -283,14 +283,14 @@ type futureParse struct {
 
 func newParser() *memoizedParser {
 	return &memoizedParser{
-		files: make(map[span.URI]*futureParse),
+		files: make(map[protocol.DocumentURI]*futureParse),
 	}
 }
 
-func (p *memoizedParser) parse(ctx context.Context, uri span.URI) (*ParsedGoFile, error) {
-	doParse := func(ctx context.Context, uri span.URI) (*ParsedGoFile, error) {
+func (p *memoizedParser) parse(ctx context.Context, uri protocol.DocumentURI) (*ParsedGoFile, error) {
+	doParse := func(ctx context.Context, uri protocol.DocumentURI) (*ParsedGoFile, error) {
 		// TODO(adonovan): hoist this operation outside the benchmark critsec.
-		content, err := os.ReadFile(uri.Filename())
+		content, err := os.ReadFile(uri.Path())
 		if err != nil {
 			return nil, err
 		}
@@ -375,10 +375,10 @@ func load(query string, needExport bool) (map[PackageID]string, MetadataSource, 
 		meta[id] = m
 
 		for _, filename := range pkg.CompiledGoFiles {
-			m.CompiledGoFiles = append(m.CompiledGoFiles, span.URIFromPath(filename))
+			m.CompiledGoFiles = append(m.CompiledGoFiles, protocol.URIFromPath(filename))
 		}
 		for _, filename := range pkg.GoFiles {
-			m.GoFiles = append(m.GoFiles, span.URIFromPath(filename))
+			m.GoFiles = append(m.GoFiles, protocol.URIFromPath(filename))
 		}
 
 		m.DepsByImpPath = make(map[ImportPath]PackageID)

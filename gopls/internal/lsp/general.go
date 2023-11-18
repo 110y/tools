@@ -22,7 +22,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/debug"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/jsonrpc2"
@@ -88,12 +87,12 @@ func (s *server) initialize(ctx context.Context, params *protocol.ParamInitializ
 		if params.RootURI != "" {
 			folders = []protocol.WorkspaceFolder{{
 				URI:  string(params.RootURI),
-				Name: path.Base(params.RootURI.SpanURI().Filename()),
+				Name: path.Base(params.RootURI.Path()),
 			}}
 		}
 	}
 	for _, folder := range folders {
-		uri := span.URIFromURI(folder.URI)
+		uri := protocol.URIFromURI(folder.URI)
 		if !uri.IsFile() {
 			continue
 		}
@@ -290,7 +289,7 @@ func go1Point() int {
 
 func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFolder) error {
 	originalViews := len(s.session.Views())
-	viewErrors := make(map[span.URI]error)
+	viewErrors := make(map[protocol.DocumentURI]error)
 
 	var ndiagnose sync.WaitGroup // number of unfinished diagnose calls
 	if s.Options().VerboseWorkDoneProgress {
@@ -305,7 +304,7 @@ func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFol
 	// Only one view gets to have a workspace.
 	var nsnapshots sync.WaitGroup // number of unfinished snapshot initializations
 	for _, folder := range folders {
-		uri := span.URIFromURI(folder.URI)
+		uri := protocol.URIFromURI(folder.URI)
 		// Ignore non-file URIs.
 		if !uri.IsFile() {
 			continue
@@ -466,7 +465,7 @@ func (s *server) SetOptions(opts *source.Options) {
 	s.options = opts
 }
 
-func (s *server) fetchFolderOptions(ctx context.Context, folder span.URI) (*source.Options, error) {
+func (s *server) fetchFolderOptions(ctx context.Context, folder protocol.DocumentURI) (*source.Options, error) {
 	if opts := s.Options(); !opts.ConfigurationSupported {
 		return opts, nil
 	}
@@ -550,7 +549,7 @@ func (s *server) handleOptionResults(ctx context.Context, results source.OptionR
 // so callers should do if !ok { return err } rather than if err != nil.
 // The returned cleanup function is non-nil even in case of false/error result.
 func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI, expectKind source.FileKind) (source.Snapshot, source.FileHandle, bool, func(), error) {
-	uri := pURI.SpanURI()
+	uri := pURI
 	if !uri.IsFile() {
 		// Not a file URI. Stop processing the request, but don't return an error.
 		return nil, nil, false, func() {}, nil

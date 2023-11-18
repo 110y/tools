@@ -21,7 +21,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/glob"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/jsonrpc2/servertest"
 	"golang.org/x/tools/internal/xcontext"
@@ -225,7 +224,7 @@ func makeSettings(sandbox *Sandbox, config EditorConfig) map[string]interface{} 
 		env[k] = v
 	}
 	for k, v := range env {
-		v = strings.ReplaceAll(v, "$SANDBOX_WORKDIR", sandbox.Workdir.RootURI().SpanURI().Filename())
+		v = strings.ReplaceAll(v, "$SANDBOX_WORKDIR", sandbox.Workdir.RootURI().Path())
 		env[k] = v
 	}
 
@@ -407,7 +406,7 @@ func (e *Editor) onFileChanges(ctx context.Context, evts []protocol.FileEvent) {
 		}
 		var matchedEvts []protocol.FileEvent
 		for _, evt := range evts {
-			filename := filepath.ToSlash(evt.URI.SpanURI().Filename())
+			filename := filepath.ToSlash(evt.URI.Path())
 			for _, g := range e.watchPatterns {
 				if g.Match(filename) {
 					matchedEvts = append(matchedEvts, evt)
@@ -478,7 +477,7 @@ func (e *Editor) createBuffer(ctx context.Context, path string, dirty bool, cont
 		return fmt.Errorf("buffer %q already exists", path)
 	}
 
-	uri := e.sandbox.Workdir.URI(path).SpanURI()
+	uri := e.sandbox.Workdir.URI(path)
 	buf := buffer{
 		version: 1,
 		path:    path,
@@ -1054,7 +1053,7 @@ func (e *Editor) RunGenerate(ctx context.Context, dir string) error {
 	}
 	absDir := e.sandbox.Workdir.AbsPath(dir)
 	cmd, err := command.NewGenerateCommand("", command.GenerateArgs{
-		Dir:       protocol.URIFromSpanURI(span.URIFromPath(absDir)),
+		Dir:       protocol.URIFromPath(absDir),
 		Recursive: false,
 	})
 	if err != nil {

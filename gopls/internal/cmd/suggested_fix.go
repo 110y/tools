@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/tool"
 )
 
@@ -93,7 +92,7 @@ func (s *suggestedFix) Run(ctx context.Context, args ...string) error {
 	}
 
 	// Get diagnostics.
-	if err := conn.diagnoseFiles(ctx, []span.URI{uri}); err != nil {
+	if err := conn.diagnoseFiles(ctx, []protocol.DocumentURI{uri}); err != nil {
 		return err
 	}
 	diagnostics := []protocol.Diagnostic{} // LSP wants non-nil slice
@@ -111,7 +110,7 @@ func (s *suggestedFix) Run(ctx context.Context, args ...string) error {
 	}
 	p := protocol.CodeActionParams{
 		TextDocument: protocol.TextDocumentIdentifier{
-			URI: protocol.URIFromSpanURI(uri),
+			URI: uri,
 		},
 		Context: protocol.CodeActionContext{
 			Only:        codeActionKinds,
@@ -154,7 +153,7 @@ func (s *suggestedFix) Run(ctx context.Context, args ...string) error {
 		if !from.HasPosition() {
 			for _, c := range a.Edit.DocumentChanges {
 				if c.TextDocumentEdit != nil {
-					if fileURI(c.TextDocumentEdit.TextDocument.URI) == uri {
+					if c.TextDocumentEdit.TextDocument.URI == uri {
 						edits = append(edits, c.TextDocumentEdit.Edits...)
 					}
 				}
@@ -168,7 +167,7 @@ func (s *suggestedFix) Run(ctx context.Context, args ...string) error {
 			if diag.Range.Start == rng.Start {
 				for _, c := range a.Edit.DocumentChanges {
 					if c.TextDocumentEdit != nil {
-						if fileURI(c.TextDocumentEdit.TextDocument.URI) == uri {
+						if c.TextDocumentEdit.TextDocument.URI == uri {
 							edits = append(edits, c.TextDocumentEdit.Edits...)
 						}
 					}
@@ -181,7 +180,7 @@ func (s *suggestedFix) Run(ctx context.Context, args ...string) error {
 		if len(a.Diagnostics) == 0 {
 			for _, c := range a.Edit.DocumentChanges {
 				if c.TextDocumentEdit != nil {
-					if fileURI(c.TextDocumentEdit.TextDocument.URI) == uri {
+					if c.TextDocumentEdit.TextDocument.URI == uri {
 						edits = append(edits, c.TextDocumentEdit.Edits...)
 					}
 				}

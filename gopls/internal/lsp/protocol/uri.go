@@ -1,42 +1,67 @@
-// Copyright 2019 The Go Authors. All rights reserved.
+// Copyright 2023 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package span
+package protocol
 
-// TODO(adonovan): rename this package. Perhaps merge span.URI with
-// protocol.DocumentURI and make these methods on it? Or is span.URI
-// supposed to establish stronger invariants? urls.FromPath?
+// This file defines methods on DocumentURI.
 
 import (
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"unicode"
 )
 
-const fileScheme = "file"
+// UnmarshalText implements decoding of DocumentURI values.
+//
+// In particular, it implements a systematic correction of various odd
+// features of the definition of DocumentURI in the LSP spec that
+// appear to be workarounds for bugs in VS Code. For example, it may
+// URI-encode the URI itself, so that colon becomes %3A, and it may
+// send file://foo.go URIs that have two slashes (not three) and no
+// hostname.
+//
+// We use UnmarshalText, not UnmarshalJSON, because it is called even
+// for non-addressable values such as keys and values of map[K]V,
+// where there is no pointer of type *K or *V on which to call
+// UnmarshalJSON. (See Go issue #28189 for more detail.)
+//
+// TODO(adonovan): should we reject all non-file DocumentURIs at decoding?
+func (uri *DocumentURI) UnmarshalText(data []byte) error {
+	fixed, err := fixDocumentURI(string(data))
+	if err != nil {
+		return err
+	}
+	*uri = DocumentURI(fixed)
+	return nil
+}
 
-// URI represents the full URI for a file.
-type URI string
-
-func (uri URI) IsFile() bool {
+// IsFile reports whether the URI has "file" schema.
+//
+// (This is true for all current valid DocumentURIs. The protocol spec
+// doesn't require it, but all known LSP clients identify editor
+// documents with file URIs.)
+func (uri DocumentURI) IsFile() bool {
 	return strings.HasPrefix(string(uri), "file://")
 }
 
-// Filename returns the file path for the given URI.
-// It is an error to call this on a URI that is not a valid filename.
-func (uri URI) Filename() string {
+// Path returns the file path for the given URI.
+//
+// Path panics if called on a URI that is not a valid filename.
+func (uri DocumentURI) Path() string {
 	filename, err := filename(uri)
 	if err != nil {
+		// e.g. ParseRequestURI failed.
+		// TODO(adonovan): make this never panic,
+		// and always return the best value it can.
 		panic(err)
 	}
 	return filepath.FromSlash(filename)
 }
 
-func filename(uri URI) (string, error) {
+func filename(uri DocumentURI) (string, error) {
 	if uri == "" {
 		return "", nil
 	}
@@ -76,22 +101,41 @@ slow:
 	return u.Path, nil
 }
 
-// TODO(adonovan): document this function, and any invariants of
-// span.URI that it is supposed to establish.
-func URIFromURI(s string) URI {
+// URIFromURI returns a DocumentURI, applying VS Code workarounds; see
+// [DocumentURI.UnmarshalText] for details.
+//
+// TODO(adonovan): better name: FromWireURI? It's only used for
+// sanitizing ParamInitialize.WorkspaceFolder.URIs from VS Code. Do
+// they actually need this treatment?
+func URIFromURI(s string) DocumentURI {
+	fixed, err := fixDocumentURI(s)
+	if err != nil {
+		// TODO(adonovan): make this never panic.
+		panic(err)
+	}
+	return DocumentURI(fixed)
+}
+
+// fixDocumentURI returns the fixed-up value of a DocumentURI field
+// received from the LSP client; see [DocumentURI.UnmarshalText].
+func fixDocumentURI(s string) (string, error) {
 	if !strings.HasPrefix(s, "file://") {
-		return URI(s)
+		// TODO(adonovan): make this an error,
+		// i.e. reject non-file URIs at ingestion?
+		return s, nil
 	}
 
+	// VS Code sends URLs with only two slashes,
+	// which are invalid. golang/go#39789.
 	if !strings.HasPrefix(s, "file:///") {
-		// VS Code sends URLs with only two slashes, which are invalid. golang/go#39789.
 		s = "file:///" + s[len("file://"):]
 	}
+
 	// Even though the input is a URI, it may not be in canonical form. VS Code
 	// in particular over-escapes :, @, etc. Unescape and re-encode to canonicalize.
 	path, err := url.PathUnescape(s[len("file://"):])
 	if err != nil {
-		panic(err)
+		return "", err
 	}
 
 	// File URIs from Windows may have lowercase drive letters.
@@ -102,23 +146,14 @@ func URIFromURI(s string) URI {
 		path = path[:1] + strings.ToUpper(string(path[1])) + path[2:]
 	}
 	u := url.URL{Scheme: fileScheme, Path: path}
-	return URI(u.String())
+	return u.String(), nil
 }
 
-// URIFromPath returns a span URI for the supplied file path.
-//
-// For empty paths, URIFromPath returns the empty URI "".
-// For non-empty paths, URIFromPath returns a uri with the file:// scheme.
-func URIFromPath(path string) URI {
+// URIFromPath returns a "file"-scheme DocumentURI for the supplied
+// file path. Given "", it returns "".
+func URIFromPath(path string) DocumentURI {
 	if path == "" {
 		return ""
-	}
-	// Handle standard library paths that contain the literal "$GOROOT".
-	// TODO(rstambler): The go/packages API should allow one to determine a user's $GOROOT.
-	const prefix = "$GOROOT"
-	if len(path) >= len(prefix) && strings.EqualFold(prefix, path[:len(prefix)]) {
-		suffix := path[len(prefix):]
-		path = runtime.GOROOT() + suffix
 	}
 	if !isWindowsDrivePath(path) {
 		if abs, err := filepath.Abs(path); err == nil {
@@ -134,8 +169,10 @@ func URIFromPath(path string) URI {
 		Scheme: fileScheme,
 		Path:   path,
 	}
-	return URI(u.String())
+	return DocumentURI(u.String())
 }
+
+const fileScheme = "file"
 
 // isWindowsDrivePath returns true if the file path is of the form used by
 // Windows. We check if the path begins with a drive letter, followed by a ":".

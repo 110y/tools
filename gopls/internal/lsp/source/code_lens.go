@@ -15,7 +15,6 @@ import (
 
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/span"
 )
 
 type LensFunc func(context.Context, Snapshot, FileHandle) ([]protocol.CodeLens, error)
@@ -46,7 +45,7 @@ func runTestCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([]p
 	if err != nil {
 		return nil, err
 	}
-	puri := protocol.URIFromSpanURI(fh.URI())
+	puri := fh.URI()
 	for _, fn := range fns.Tests {
 		cmd, err := command.NewTestCommand("run test", puri, []string{fn.Name}, nil)
 		if err != nil {
@@ -101,7 +100,7 @@ type TestFns struct {
 func TestsAndBenchmarks(pkg Package, pgf *ParsedGoFile) (TestFns, error) {
 	var out TestFns
 
-	if !strings.HasSuffix(pgf.URI.Filename(), "_test.go") {
+	if !strings.HasSuffix(pgf.URI.Path(), "_test.go") {
 		return out, nil
 	}
 
@@ -181,7 +180,7 @@ func goGenerateCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle) (
 			if err != nil {
 				return nil, err
 			}
-			dir := protocol.URIFromSpanURI(span.URIFromPath(filepath.Dir(fh.URI().Filename())))
+			dir := protocol.URIFromPath(filepath.Dir(fh.URI().Path()))
 			nonRecursiveCmd, err := command.NewGenerateCommand("run go generate", command.GenerateArgs{Dir: dir, Recursive: false})
 			if err != nil {
 				return nil, err
@@ -218,7 +217,7 @@ func regenerateCgoLens(ctx context.Context, snapshot Snapshot, fh FileHandle) ([
 	if err != nil {
 		return nil, err
 	}
-	puri := protocol.URIFromSpanURI(fh.URI())
+	puri := fh.URI()
 	cmd, err := command.NewRegenerateCgoCommand("regenerate cgo definitions", command.URIArg{URI: puri})
 	if err != nil {
 		return nil, err
@@ -239,7 +238,7 @@ func toggleDetailsCodeLens(ctx context.Context, snapshot Snapshot, fh FileHandle
 	if err != nil {
 		return nil, err
 	}
-	puri := protocol.URIFromSpanURI(fh.URI())
+	puri := fh.URI()
 	cmd, err := command.NewGCDetailsCommand("Toggle gc annotation details", puri)
 	if err != nil {
 		return nil, err

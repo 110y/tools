@@ -17,7 +17,6 @@ import (
 	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 )
@@ -55,7 +54,7 @@ func PrepareCallHierarchy(ctx context.Context, snapshot Snapshot, fh FileHandle,
 		Name:           obj.Name(),
 		Kind:           protocol.Function,
 		Tags:           []protocol.SymbolTag{},
-		Detail:         fmt.Sprintf("%s • %s", obj.Pkg().Path(), filepath.Base(declLoc.URI.SpanURI().Filename())),
+		Detail:         fmt.Sprintf("%s • %s", obj.Pkg().Path(), filepath.Base(declLoc.URI.Path())),
 		URI:            declLoc.URI,
 		Range:          rng,
 		SelectionRange: rng,
@@ -107,7 +106,7 @@ func IncomingCalls(ctx context.Context, snapshot Snapshot, fh FileHandle, pos pr
 // enclosingNodeCallItem creates a CallHierarchyItem representing the function call at loc.
 func enclosingNodeCallItem(ctx context.Context, snapshot Snapshot, pkgPath PackagePath, loc protocol.Location) (protocol.CallHierarchyItem, error) {
 	// Parse the file containing the reference.
-	fh, err := snapshot.ReadFile(ctx, loc.URI.SpanURI())
+	fh, err := snapshot.ReadFile(ctx, loc.URI)
 	if err != nil {
 		return protocol.CallHierarchyItem{}, err
 	}
@@ -170,7 +169,7 @@ outer:
 		Name:           name,
 		Kind:           kind,
 		Tags:           []protocol.SymbolTag{},
-		Detail:         fmt.Sprintf("%s • %s", pkgPath, filepath.Base(fh.URI().Filename())),
+		Detail:         fmt.Sprintf("%s • %s", pkgPath, filepath.Base(fh.URI().Path())),
 		URI:            loc.URI,
 		Range:          rng,
 		SelectionRange: rng,
@@ -214,7 +213,7 @@ func OutgoingCalls(ctx context.Context, snapshot Snapshot, fh FileHandle, pp pro
 		return nil, bug.Errorf("file not found for %d", obj.Pos())
 	}
 
-	uri := span.URIFromPath(declFile.Name())
+	uri := protocol.URIFromPath(declFile.Name())
 	offset, err := safetoken.Offset(declFile, obj.Pos())
 	if err != nil {
 		return nil, err
@@ -287,7 +286,7 @@ func OutgoingCalls(ctx context.Context, snapshot Snapshot, fh FileHandle, pp pro
 					Name:           obj.Name(),
 					Kind:           protocol.Function,
 					Tags:           []protocol.SymbolTag{},
-					Detail:         fmt.Sprintf("%s • %s", obj.Pkg().Path(), filepath.Base(loc.URI.SpanURI().Filename())),
+					Detail:         fmt.Sprintf("%s • %s", obj.Pkg().Path(), filepath.Base(loc.URI.Path())),
 					URI:            loc.URI,
 					Range:          loc.Range,
 					SelectionRange: loc.Range,

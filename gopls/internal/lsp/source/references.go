@@ -29,7 +29,6 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source/methodsets"
-	"golang.org/x/tools/gopls/internal/span"
 	"golang.org/x/tools/internal/event"
 )
 
@@ -106,7 +105,7 @@ func references(ctx context.Context, snapshot Snapshot, f FileHandle, pp protoco
 // declaration of the specified name and uri by searching among the
 // import declarations of all packages that directly import the target
 // package.
-func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI) ([]reference, error) {
+func packageReferences(ctx context.Context, snapshot Snapshot, uri protocol.DocumentURI) ([]reference, error) {
 	metas, err := snapshot.MetadataForFile(ctx, uri)
 	if err != nil {
 		return nil, err
@@ -206,7 +205,7 @@ func packageReferences(ctx context.Context, snapshot Snapshot, uri span.URI) ([]
 }
 
 // ordinaryReferences computes references for all ordinary objects (not package declarations).
-func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp protocol.Position) ([]reference, error) {
+func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri protocol.DocumentURI, pp protocol.Position) ([]reference, error) {
 	// Strategy: use the reference information computed by the
 	// type checker to find the declaration. First type-check this
 	// package to find the declaration, then type check the
@@ -259,7 +258,7 @@ func ordinaryReferences(ctx context.Context, snapshot Snapshot, uri span.URI, pp
 	// Find metadata of all packages containing the object's defining file.
 	// This may include the query pkg, and possibly other variants.
 	declPosn := safetoken.StartPosition(pkg.FileSet(), obj.Pos())
-	declURI := span.URIFromPath(declPosn.Filename)
+	declURI := protocol.URIFromPath(declPosn.Filename)
 	variants, err := snapshot.MetadataForFile(ctx, declURI)
 	if err != nil {
 		return nil, err
