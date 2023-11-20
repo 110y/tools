@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/fillstruct"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/infertypeargs"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/stubmethods"
@@ -20,16 +21,17 @@ import (
 	"golang.org/x/tools/gopls/internal/lsp/mod"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/imports"
 )
 
-func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionParams) ([]protocol.CodeAction, error) {
+func (s *server) CodeAction(ctx context.Context, params *protocol.CodeActionParams) ([]protocol.CodeAction, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.codeAction")
 	defer done()
 
-	snapshot, fh, ok, release, err := s.beginFileRequest(ctx, params.TextDocument.URI, source.UnknownKind)
+	snapshot, fh, ok, release, err := s.beginFileRequest(ctx, params.TextDocument.URI, file.UnknownKind)
 	defer release()
 	if !ok {
 		return nil, err
@@ -76,7 +78,7 @@ func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 	}
 
 	switch kind {
-	case source.Mod:
+	case file.Mod:
 		var actions []protocol.CodeAction
 
 		fixes, err := s.codeActionsMatchingDiagnostics(ctx, fh.URI(), snapshot, params.Context.Diagnostics, want)
@@ -108,7 +110,7 @@ func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 
 		return actions, nil
 
-	case source.Go:
+	case file.Go:
 		diagnostics := params.Context.Diagnostics
 
 		// Don't suggest fixes for generated files, since they are generally
@@ -223,7 +225,7 @@ func (s *server) codeAction(ctx context.Context, params *protocol.CodeActionPara
 					}
 					cmd, err := command.NewApplyFixCommand(d.Message, command.ApplyFixArgs{
 						URI:   pgf.URI,
-						Fix:   source.StubMethods,
+						Fix:   string(settings.StubMethods),
 						Range: pd.Range,
 					})
 					if err != nil {
@@ -377,7 +379,7 @@ func refactorExtract(ctx context.Context, snapshot source.Snapshot, pgf *source.
 	if _, ok, methodOk, _ := source.CanExtractFunction(pgf.Tok, start, end, pgf.Src, pgf.File); ok {
 		cmd, err := command.NewApplyFixCommand("Extract function", command.ApplyFixArgs{
 			URI:   puri,
-			Fix:   source.ExtractFunction,
+			Fix:   string(settings.ExtractFunction),
 			Range: rng,
 		})
 		if err != nil {
@@ -387,7 +389,7 @@ func refactorExtract(ctx context.Context, snapshot source.Snapshot, pgf *source.
 		if methodOk {
 			cmd, err := command.NewApplyFixCommand("Extract method", command.ApplyFixArgs{
 				URI:   puri,
-				Fix:   source.ExtractMethod,
+				Fix:   string(settings.ExtractMethod),
 				Range: rng,
 			})
 			if err != nil {
@@ -399,7 +401,7 @@ func refactorExtract(ctx context.Context, snapshot source.Snapshot, pgf *source.
 	if _, _, ok, _ := source.CanExtractVariable(start, end, pgf.File); ok {
 		cmd, err := command.NewApplyFixCommand("Extract variable", command.ApplyFixArgs{
 			URI:   puri,
-			Fix:   source.ExtractVariable,
+			Fix:   string(settings.ExtractVariable),
 			Range: rng,
 		})
 		if err != nil {
@@ -418,7 +420,7 @@ func refactorExtract(ctx context.Context, snapshot source.Snapshot, pgf *source.
 	return actions, nil
 }
 
-func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.Package, pgf *source.ParsedGoFile, fh source.FileHandle, rng protocol.Range) (_ []protocol.CodeAction, rerr error) {
+func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.Package, pgf *source.ParsedGoFile, fh file.Handle, rng protocol.Range) (_ []protocol.CodeAction, rerr error) {
 	// golang/go#61693: code actions were refactored to run outside of the
 	// analysis framework, but as a result they lost their panic recovery.
 	//
@@ -462,7 +464,7 @@ func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.P
 	if _, ok, _ := source.CanInvertIfCondition(pgf.File, start, end); ok {
 		cmd, err := command.NewApplyFixCommand("Invert if condition", command.ApplyFixArgs{
 			URI:   pgf.URI,
-			Fix:   source.InvertIfCondition,
+			Fix:   string(settings.InvertIfCondition),
 			Range: rng,
 		})
 		if err != nil {
@@ -484,7 +486,7 @@ func refactorRewrite(ctx context.Context, snapshot source.Snapshot, pkg source.P
 			}
 			cmd, err := command.NewApplyFixCommand(d.Message, command.ApplyFixArgs{
 				URI:   pgf.URI,
-				Fix:   source.FillStruct,
+				Fix:   string(settings.FillStruct),
 				Range: rng,
 			})
 			if err != nil {
@@ -574,14 +576,14 @@ func canRemoveParameter(pkg source.Package, pgf *source.ParsedGoFile, rng protoc
 }
 
 // refactorInline returns inline actions available at the specified range.
-func refactorInline(ctx context.Context, snapshot source.Snapshot, pkg source.Package, pgf *source.ParsedGoFile, fh source.FileHandle, rng protocol.Range) ([]protocol.CodeAction, error) {
+func refactorInline(ctx context.Context, snapshot source.Snapshot, pkg source.Package, pgf *source.ParsedGoFile, fh file.Handle, rng protocol.Range) ([]protocol.CodeAction, error) {
 	var commands []protocol.Command
 
 	// If range is within call expression, offer inline action.
 	if _, fn, err := source.EnclosingStaticCall(pkg, pgf, rng); err == nil {
 		cmd, err := command.NewApplyFixCommand(fmt.Sprintf("Inline call to %s", fn.Name()), command.ApplyFixArgs{
 			URI:   pgf.URI,
-			Fix:   source.InlineCall,
+			Fix:   string(settings.InlineCall),
 			Range: rng,
 		})
 		if err != nil {
@@ -602,7 +604,7 @@ func refactorInline(ctx context.Context, snapshot source.Snapshot, pkg source.Pa
 	return actions, nil
 }
 
-func documentChanges(fh source.FileHandle, edits []protocol.TextEdit) []protocol.DocumentChanges {
+func documentChanges(fh file.Handle, edits []protocol.TextEdit) []protocol.DocumentChanges {
 	return []protocol.DocumentChanges{
 		{
 			TextDocumentEdit: &protocol.TextDocumentEdit{

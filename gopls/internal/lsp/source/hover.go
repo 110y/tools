@@ -25,8 +25,10 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/types/typeutil"
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/tokeninternal"
 	"golang.org/x/tools/internal/typeparams"
@@ -61,7 +63,7 @@ type HoverJSON struct {
 }
 
 // Hover implements the "textDocument/hover" RPC for Go files.
-func Hover(ctx context.Context, snapshot Snapshot, fh FileHandle, position protocol.Position) (*protocol.Hover, error) {
+func Hover(ctx context.Context, snapshot Snapshot, fh file.Handle, position protocol.Position) (*protocol.Hover, error) {
 	ctx, done := event.Start(ctx, "source.Hover")
 	defer done()
 
@@ -88,7 +90,7 @@ func Hover(ctx context.Context, snapshot Snapshot, fh FileHandle, position proto
 // hover computes hover information at the given position. If we do not support
 // hovering at the position, it returns _, nil, nil: an error is only returned
 // if the position is valid but we fail to compute hover information.
-func hover(ctx context.Context, snapshot Snapshot, fh FileHandle, pp protocol.Position) (protocol.Range, *HoverJSON, error) {
+func hover(ctx context.Context, snapshot Snapshot, fh file.Handle, pp protocol.Position) (protocol.Range, *HoverJSON, error) {
 	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 	if err != nil {
 		return protocol.Range{}, nil, err
@@ -634,7 +636,7 @@ func hoverLit(pgf *ParsedGoFile, lit *ast.BasicLit, pos token.Pos) (protocol.Ran
 
 // hoverEmbed computes hover information for a filepath.Match pattern.
 // Assumes that the pattern is relative to the location of fh.
-func hoverEmbed(fh FileHandle, rng protocol.Range, pattern string) (protocol.Range, *HoverJSON, error) {
+func hoverEmbed(fh file.Handle, rng protocol.Range, pattern string) (protocol.Range, *HoverJSON, error) {
 	s := &strings.Builder{}
 
 	dir := filepath.Dir(fh.URI().Path())
@@ -846,15 +848,15 @@ func parseFull(ctx context.Context, snapshot Snapshot, fset *token.FileSet, pos 
 	return pgf, fullPos, nil
 }
 
-func formatHover(h *HoverJSON, options *Options) (string, error) {
+func formatHover(h *HoverJSON, options *settings.Options) (string, error) {
 	signature := formatSignature(h, options)
 
 	switch options.HoverKind {
-	case SingleLine:
+	case settings.SingleLine:
 		return h.SingleLine, nil
-	case NoDocumentation:
+	case settings.NoDocumentation:
 		return signature, nil
-	case Structured:
+	case settings.Structured:
 		b, err := json.Marshal(h)
 		if err != nil {
 			return "", err
@@ -885,7 +887,7 @@ func formatHover(h *HoverJSON, options *Options) (string, error) {
 	return b.String(), nil
 }
 
-func formatSignature(h *HoverJSON, options *Options) string {
+func formatSignature(h *HoverJSON, options *settings.Options) string {
 	signature := h.Signature
 	if signature != "" && options.PreferredContentFormat == protocol.Markdown {
 		signature = fmt.Sprintf("```go\n%s\n```", signature)
@@ -893,7 +895,7 @@ func formatSignature(h *HoverJSON, options *Options) string {
 	return signature
 }
 
-func formatLink(h *HoverJSON, options *Options) string {
+func formatLink(h *HoverJSON, options *settings.Options) string {
 	if !options.LinksInHover || options.LinkTarget == "" || h.LinkPath == "" {
 		return ""
 	}
@@ -917,12 +919,12 @@ func BuildLink(target, path, anchor string) string {
 	return link + "#" + anchor
 }
 
-func formatDoc(h *HoverJSON, options *Options) string {
+func formatDoc(h *HoverJSON, options *settings.Options) string {
 	var doc string
 	switch options.HoverKind {
-	case SynopsisDocumentation:
+	case settings.SynopsisDocumentation:
 		doc = h.Synopsis
-	case FullDocumentation:
+	case settings.FullDocumentation:
 		doc = h.FullDocumentation
 	}
 	if options.PreferredContentFormat == protocol.Markdown {

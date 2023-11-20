@@ -14,11 +14,13 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/event"
 )
 
-func SignatureHelp(ctx context.Context, snapshot Snapshot, fh FileHandle, position protocol.Position) (*protocol.SignatureInformation, int, error) {
+func SignatureHelp(ctx context.Context, snapshot Snapshot, fh file.Handle, position protocol.Position) (*protocol.SignatureInformation, int, error) {
 	ctx, done := event.Start(ctx, "source.SignatureHelp")
 	defer done()
 
@@ -181,7 +183,7 @@ func activeParameter(callExpr *ast.CallExpr, numParams int, variadic bool, pos t
 	return activeParam
 }
 
-func stringToSigInfoDocumentation(s string, options *Options) *protocol.Or_SignatureInformation_documentation {
+func stringToSigInfoDocumentation(s string, options *settings.Options) *protocol.Or_SignatureInformation_documentation {
 	v := s
 	k := protocol.PlainText
 	if options.PreferredContentFormat == protocol.Markdown {

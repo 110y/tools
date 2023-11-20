@@ -17,9 +17,11 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/vulncheck/govulncheck"
 	"golang.org/x/tools/internal/event"
 )
@@ -58,7 +60,7 @@ func VulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot) (ma
 	return collectDiagnostics(ctx, snapshot, ModVulnerabilityDiagnostics)
 }
 
-func collectDiagnostics(ctx context.Context, snapshot source.Snapshot, diagFn func(context.Context, source.Snapshot, source.FileHandle) ([]*source.Diagnostic, error)) (map[protocol.DocumentURI][]*source.Diagnostic, error) {
+func collectDiagnostics(ctx context.Context, snapshot source.Snapshot, diagFn func(context.Context, source.Snapshot, file.Handle) ([]*source.Diagnostic, error)) (map[protocol.DocumentURI][]*source.Diagnostic, error) {
 	g, ctx := errgroup.WithContext(ctx)
 	cpulimit := runtime.GOMAXPROCS(0)
 	g.SetLimit(cpulimit)
@@ -93,7 +95,7 @@ func collectDiagnostics(ctx context.Context, snapshot source.Snapshot, diagFn fu
 }
 
 // ModParseDiagnostics reports diagnostics from parsing the mod file.
-func ModParseDiagnostics(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle) (diagnostics []*source.Diagnostic, err error) {
+func ModParseDiagnostics(ctx context.Context, snapshot source.Snapshot, fh file.Handle) (diagnostics []*source.Diagnostic, err error) {
 	pm, err := snapshot.ParseMod(ctx, fh)
 	if err != nil {
 		if pm == nil || len(pm.ParseErrors) == 0 {
@@ -105,7 +107,7 @@ func ModParseDiagnostics(ctx context.Context, snapshot source.Snapshot, fh sourc
 }
 
 // ModTidyDiagnostics reports diagnostics from running go mod tidy.
-func ModTidyDiagnostics(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle) (diagnostics []*source.Diagnostic, err error) {
+func ModTidyDiagnostics(ctx context.Context, snapshot source.Snapshot, fh file.Handle) (diagnostics []*source.Diagnostic, err error) {
 	pm, err := snapshot.ParseMod(ctx, fh) // memoized
 	if err != nil {
 		return nil, nil // errors reported by ModDiagnostics above
@@ -128,7 +130,7 @@ func ModTidyDiagnostics(ctx context.Context, snapshot source.Snapshot, fh source
 
 // ModUpgradeDiagnostics adds upgrade quick fixes for individual modules if the upgrades
 // are recorded in the view.
-func ModUpgradeDiagnostics(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle) (upgradeDiagnostics []*source.Diagnostic, err error) {
+func ModUpgradeDiagnostics(ctx context.Context, snapshot source.Snapshot, fh file.Handle) (upgradeDiagnostics []*source.Diagnostic, err error) {
 	pm, err := snapshot.ParseMod(ctx, fh)
 	if err != nil {
 		// Don't return an error if there are parse error diagnostics to be shown, but also do not
@@ -176,7 +178,7 @@ const upgradeCodeActionPrefix = "Upgrade to "
 
 // ModVulnerabilityDiagnostics adds diagnostics for vulnerabilities in individual modules
 // if the vulnerability is recorded in the view.
-func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle) (vulnDiagnostics []*source.Diagnostic, err error) {
+func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, fh file.Handle) (vulnDiagnostics []*source.Diagnostic, err error) {
 	pm, err := snapshot.ParseMod(ctx, fh)
 	if err != nil {
 		// Don't return an error if there are parse error diagnostics to be shown, but also do not
@@ -189,7 +191,7 @@ func ModVulnerabilityDiagnostics(ctx context.Context, snapshot source.Snapshot, 
 
 	diagSource := source.Govulncheck
 	vs := snapshot.Vulnerabilities(fh.URI())[fh.URI()]
-	if vs == nil && snapshot.Options().Vulncheck == source.ModeVulncheckImports {
+	if vs == nil && snapshot.Options().Vulncheck == settings.ModeVulncheckImports {
 		vs, err = snapshot.ModVuln(ctx, fh.URI())
 		if err != nil {
 			return nil, err
@@ -495,7 +497,7 @@ func href(vulnID string) string {
 	return fmt.Sprintf("https://pkg.go.dev/vuln/%s", vulnID)
 }
 
-func getUpgradeCodeAction(fh source.FileHandle, req *modfile.Require, version string) (protocol.Command, error) {
+func getUpgradeCodeAction(fh file.Handle, req *modfile.Require, version string) (protocol.Command, error) {
 	cmd, err := command.NewUpgradeDependencyCommand(upgradeTitle(version), command.DependencyArgs{
 		URI:        fh.URI(),
 		AddRequire: false,

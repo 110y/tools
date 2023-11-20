@@ -29,10 +29,12 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 	goplsastutil "golang.org/x/tools/gopls/internal/astutil"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/snippet"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/fuzzy"
 	"golang.org/x/tools/internal/imports"
@@ -107,10 +109,9 @@ type completionOptions struct {
 	documentation         bool
 	fullDocumentation     bool
 	placeholders          bool
-	literal               bool
 	snippets              bool
 	postfix               bool
-	matcher               source.Matcher
+	matcher               settings.Matcher
 	budget                time.Duration
 	completeFunctionCalls bool
 }
@@ -177,7 +178,7 @@ type completer struct {
 	completionContext completionContext
 
 	// fh is a handle to the file associated with this completion request.
-	fh source.FileHandle
+	fh file.Handle
 
 	// filename is the name of the file associated with this completion request.
 	filename string
@@ -346,9 +347,9 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 
 func (c *completer) setMatcherFromPrefix(prefix string) {
 	switch c.opts.matcher {
-	case source.Fuzzy:
+	case settings.Fuzzy:
 		c.matcher = fuzzy.NewMatcher(prefix)
-	case source.CaseSensitive:
+	case settings.CaseSensitive:
 		c.matcher = prefixMatcher(prefix)
 	default:
 		c.matcher = insensitivePrefixMatcher(strings.ToLower(prefix))
@@ -442,7 +443,7 @@ func (e ErrIsDefinition) Error() string {
 // The selection is computed based on the preceding identifier and can be used by
 // the client to score the quality of the completion. For instance, some clients
 // may tolerate imperfect matches as valid completion results, since users may make typos.
-func Completion(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle, protoPos protocol.Position, protoContext protocol.CompletionContext) ([]CompletionItem, *Selection, error) {
+func Completion(ctx context.Context, snapshot source.Snapshot, fh file.Handle, protoPos protocol.Position, protoContext protocol.CompletionContext) ([]CompletionItem, *Selection, error) {
 	ctx, done := event.Start(ctx, "completion.Completion")
 	defer done()
 
@@ -545,10 +546,9 @@ func Completion(ctx context.Context, snapshot source.Snapshot, fh source.FileHan
 		opts: &completionOptions{
 			matcher:               opts.Matcher,
 			unimported:            opts.CompleteUnimported,
-			documentation:         opts.CompletionDocumentation && opts.HoverKind != source.NoDocumentation,
-			fullDocumentation:     opts.HoverKind == source.FullDocumentation,
+			documentation:         opts.CompletionDocumentation && opts.HoverKind != settings.NoDocumentation,
+			fullDocumentation:     opts.HoverKind == settings.FullDocumentation,
 			placeholders:          opts.UsePlaceholders,
-			literal:               opts.LiteralCompletions && opts.InsertTextFormat == protocol.SnippetTextFormat,
 			budget:                opts.CompletionBudget,
 			snippets:              opts.InsertTextFormat == protocol.SnippetTextFormat,
 			postfix:               opts.ExperimentalPostfixCompletions,

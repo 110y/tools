@@ -32,11 +32,13 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/filecache"
 	"golang.org/x/tools/gopls/internal/lsp/frob"
 	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/facts"
@@ -154,7 +156,7 @@ import (
 //   Steps:
 //   - define a narrow driver.Snapshot interface with only these methods:
 //        Metadata(PackageID) source.Metadata
-//        ReadFile(Context, URI) (source.FileHandle, error)
+//        ReadFile(Context, URI) (file.Handle, error)
 //        View() *View // for Options
 //   - share cache.{goVersionRx,parseGoImpl}
 
@@ -169,7 +171,7 @@ const AnalysisProgressTitle = "Analyzing Dependencies"
 // The analyzers list must be duplicate free; order does not matter.
 //
 // Notifications of progress may be sent to the optional reporter.
-func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, analyzers []*source.Analyzer, reporter *progress.Tracker) ([]*source.Diagnostic, error) {
+func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, analyzers []*settings.Analyzer, reporter *progress.Tracker) ([]*source.Diagnostic, error) {
 	start := time.Now() // for progress reporting
 
 	var tagStr string // sorted comma-separated list of PackageIDs
@@ -188,7 +190,7 @@ func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 
 	// Filter and sort enabled root analyzers.
 	// A disabled analyzer may still be run if required by another.
-	toSrc := make(map[*analysis.Analyzer]*source.Analyzer)
+	toSrc := make(map[*analysis.Analyzer]*settings.Analyzer)
 	var enabled []*analysis.Analyzer // enabled subset + transitive requirements
 	for _, a := range analyzers {
 		if a.IsEnabled(snapshot.Options()) {
@@ -289,7 +291,7 @@ func (snapshot *snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 			// Load the contents of each compiled Go file through
 			// the snapshot's cache. (These are all cache hits as
 			// files are pre-loaded following packages.Load)
-			an.files = make([]source.FileHandle, len(m.CompiledGoFiles))
+			an.files = make([]file.Handle, len(m.CompiledGoFiles))
 			for i, uri := range m.CompiledGoFiles {
 				fh, err := snapshot.ReadFile(ctx, uri)
 				if err != nil {
@@ -503,7 +505,7 @@ func (an *analysisNode) decrefPreds() {
 type analysisNode struct {
 	fset            *token.FileSet              // file set shared by entire batch (DAG)
 	m               *source.Metadata            // metadata for this package
-	files           []source.FileHandle         // contents of CompiledGoFiles
+	files           []file.Handle               // contents of CompiledGoFiles
 	analyzers       []*analysis.Analyzer        // set of analyzers to run
 	preds           []*analysisNode             // graph edges:
 	succs           map[PackageID]*analysisNode //   (preds -> self -> succs)
@@ -578,10 +580,10 @@ func (an *analysisNode) _import() (*types.Package, error) {
 // analyzeSummary is a gob-serializable summary of successfully
 // applying a list of analyzers to a package.
 type analyzeSummary struct {
-	Export         []byte      // encoded types of package
-	DeepExportHash source.Hash // hash of reflexive transitive closure of export data
-	Compiles       bool        // transitively free of list/parse/type errors
-	Actions        actionMap   // maps analyzer stablename to analysis results (*actionSummary)
+	Export         []byte    // encoded types of package
+	DeepExportHash file.Hash // hash of reflexive transitive closure of export data
+	Compiles       bool      // transitively free of list/parse/type errors
+	Actions        actionMap // maps analyzer stablename to analysis results (*actionSummary)
 }
 
 // actionMap defines a stable Gob encoding for a map.
@@ -626,8 +628,8 @@ func (m *actionMap) GobDecode(data []byte) error {
 // actionSummary is a gob-serializable summary of one possibly failed analysis action.
 // If Err is non-empty, the other fields are undefined.
 type actionSummary struct {
-	Facts       []byte      // the encoded facts.Set
-	FactsHash   source.Hash // hash(Facts)
+	Facts       []byte    // the encoded facts.Set
+	FactsHash   file.Hash // hash(Facts)
 	Diagnostics []gobDiagnostic
 	Err         string // "" => success
 }
@@ -735,7 +737,7 @@ func (an *analysisNode) cacheKey() [sha256.Size]byte {
 	// file names and contents
 	fmt.Fprintf(hasher, "files: %d\n", len(an.files))
 	for _, fh := range an.files {
-		fmt.Fprintln(hasher, fh.FileIdentity())
+		fmt.Fprintln(hasher, fh.Identity())
 	}
 
 	// vdeps, in PackageID order
@@ -1103,8 +1105,8 @@ type analysisPackage struct {
 	types          *types.Package
 	compiles       bool // package is transitively free of list/parse/type errors
 	factsDecoder   *facts.Decoder
-	export         []byte      // encoding of types.Package
-	deepExportHash source.Hash // reflexive transitive hash of export data
+	export         []byte    // encoding of types.Package
+	deepExportHash file.Hash // reflexive transitive hash of export data
 	typesInfo      *types.Info
 	typeErrors     []types.Error
 	typesSizes     types.Sizes
@@ -1368,7 +1370,7 @@ func (act *action) exec() (interface{}, *actionSummary, error) {
 	return result, &actionSummary{
 		Diagnostics: diagnostics,
 		Facts:       factsdata,
-		FactsHash:   source.HashOf(factsdata),
+		FactsHash:   file.HashOf(factsdata),
 	}, nil
 }
 

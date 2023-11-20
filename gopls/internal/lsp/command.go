@@ -22,12 +22,14 @@ import (
 	"golang.org/x/mod/modfile"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/cache"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/debug"
 	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/gopls/internal/vulncheck/scan"
@@ -37,7 +39,7 @@ import (
 	"golang.org/x/tools/internal/xcontext"
 )
 
-func (s *server) executeCommand(ctx context.Context, params *protocol.ExecuteCommandParams) (interface{}, error) {
+func (s *server) ExecuteCommand(ctx context.Context, params *protocol.ExecuteCommandParams) (interface{}, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.executeCommand")
 	defer done()
 
@@ -92,7 +94,7 @@ type commandConfig struct {
 // for details.
 type commandDeps struct {
 	snapshot source.Snapshot    // present if cfg.forURI was set
-	fh       source.FileHandle  // present if cfg.forURI was set
+	fh       file.Handle        // present if cfg.forURI was set
 	work     *progress.WorkDone // present cfg.progress was set
 }
 
@@ -124,7 +126,7 @@ func (c *commandHandler) run(ctx context.Context, cfg commandConfig, run command
 	if cfg.forURI != "" {
 		var ok bool
 		var release func()
-		deps.snapshot, deps.fh, ok, release, err = c.s.beginFileRequest(ctx, cfg.forURI, source.UnknownKind)
+		deps.snapshot, deps.fh, ok, release, err = c.s.beginFileRequest(ctx, cfg.forURI, file.UnknownKind)
 		defer release()
 		if !ok {
 			if err != nil {
@@ -185,7 +187,7 @@ func (c *commandHandler) ApplyFix(ctx context.Context, args command.ApplyFixArgs
 		// Note: no progress here. Applying fixes should be quick.
 		forURI: args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		edits, err := source.ApplyFix(ctx, args.Fix, deps.snapshot, deps.fh, args.Range)
+		edits, err := source.ApplyFix(ctx, settings.Fix(args.Fix), deps.snapshot, deps.fh, args.Range)
 		if err != nil {
 			return err
 		}
@@ -316,7 +318,7 @@ func (c *commandHandler) UpdateGoSum(ctx context.Context, args command.URIArgs) 
 		progress: "Updating go.sum",
 	}, func(ctx context.Context, deps commandDeps) error {
 		for _, uri := range args.URIs {
-			snapshot, fh, ok, release, err := c.s.beginFileRequest(ctx, uri, source.UnknownKind)
+			snapshot, fh, ok, release, err := c.s.beginFileRequest(ctx, uri, file.UnknownKind)
 			defer release()
 			if !ok {
 				return err
@@ -338,7 +340,7 @@ func (c *commandHandler) Tidy(ctx context.Context, args command.URIArgs) error {
 		progress:    "Running go mod tidy",
 	}, func(ctx context.Context, deps commandDeps) error {
 		for _, uri := range args.URIs {
-			snapshot, fh, ok, release, err := c.s.beginFileRequest(ctx, uri, source.UnknownKind)
+			snapshot, fh, ok, release, err := c.s.beginFileRequest(ctx, uri, file.UnknownKind)
 			defer release()
 			if !ok {
 				return err
@@ -382,7 +384,7 @@ func (c *commandHandler) EditGoDirective(ctx context.Context, args command.EditG
 		requireSave: true, // if go.mod isn't saved it could cause a problem
 		forURI:      args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		snapshot, fh, ok, release, err := c.s.beginFileRequest(ctx, args.URI, source.UnknownKind)
+		snapshot, fh, ok, release, err := c.s.beginFileRequest(ctx, args.URI, file.UnknownKind)
 		defer release()
 		if !ok {
 			return err
@@ -944,7 +946,7 @@ type pkgLoadConfig struct {
 func (c *commandHandler) FetchVulncheckResult(ctx context.Context, arg command.URIArg) (map[protocol.DocumentURI]*vulncheck.Result, error) {
 	ret := map[protocol.DocumentURI]*vulncheck.Result{}
 	err := c.run(ctx, commandConfig{forURI: arg.URI}, func(ctx context.Context, deps commandDeps) error {
-		if deps.snapshot.Options().Vulncheck == source.ModeVulncheckImports {
+		if deps.snapshot.Options().Vulncheck == settings.ModeVulncheckImports {
 			for _, modfile := range deps.snapshot.ModFiles() {
 				res, err := deps.snapshot.ModVuln(ctx, modfile)
 				if err != nil {

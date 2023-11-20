@@ -9,17 +9,19 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/source/completion"
 	"golang.org/x/tools/gopls/internal/lsp/template"
 	"golang.org/x/tools/gopls/internal/lsp/work"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 )
 
-func (s *server) completion(ctx context.Context, params *protocol.CompletionParams) (_ *protocol.CompletionList, rerr error) {
+func (s *server) Completion(ctx context.Context, params *protocol.CompletionParams) (_ *protocol.CompletionList, rerr error) {
 	recordLatency := telemetry.StartLatencyTimer("completion")
 	defer func() {
 		recordLatency(ctx, rerr)
@@ -28,7 +30,7 @@ func (s *server) completion(ctx context.Context, params *protocol.CompletionPara
 	ctx, done := event.Start(ctx, "lsp.Server.completion", tag.URI.Of(params.TextDocument.URI))
 	defer done()
 
-	snapshot, fh, ok, release, err := s.beginFileRequest(ctx, params.TextDocument.URI, source.UnknownKind)
+	snapshot, fh, ok, release, err := s.beginFileRequest(ctx, params.TextDocument.URI, file.UnknownKind)
 	defer release()
 	if !ok {
 		return nil, err
@@ -36,17 +38,17 @@ func (s *server) completion(ctx context.Context, params *protocol.CompletionPara
 	var candidates []completion.CompletionItem
 	var surrounding *completion.Selection
 	switch snapshot.FileKind(fh) {
-	case source.Go:
+	case file.Go:
 		candidates, surrounding, err = completion.Completion(ctx, snapshot, fh, params.Position, params.Context)
-	case source.Mod:
+	case file.Mod:
 		candidates, surrounding = nil, nil
-	case source.Work:
+	case file.Work:
 		cl, err := work.Completion(ctx, snapshot, fh, params.Position)
 		if err != nil {
 			break
 		}
 		return cl, nil
-	case source.Tmpl:
+	case file.Tmpl:
 		var cl *protocol.CompletionList
 		cl, err = template.Completion(ctx, snapshot, fh, params.Position, params.Context)
 		if err != nil {
@@ -72,7 +74,7 @@ func (s *server) completion(ctx context.Context, params *protocol.CompletionPara
 	// When using deep completions/fuzzy matching, report results as incomplete so
 	// client fetches updated completions after every key stroke.
 	options := snapshot.Options()
-	incompleteResults := options.DeepCompletion || options.Matcher == source.Fuzzy
+	incompleteResults := options.DeepCompletion || options.Matcher == settings.Fuzzy
 
 	items := toProtocolCompletionItems(candidates, rng, options)
 
@@ -82,7 +84,7 @@ func (s *server) completion(ctx context.Context, params *protocol.CompletionPara
 	}, nil
 }
 
-func toProtocolCompletionItems(candidates []completion.CompletionItem, rng protocol.Range, options *source.Options) []protocol.CompletionItem {
+func toProtocolCompletionItems(candidates []completion.CompletionItem, rng protocol.Range, options *settings.Options) []protocol.CompletionItem {
 	var (
 		items                  = make([]protocol.CompletionItem, 0, len(candidates))
 		numDeepCompletionsSeen int

@@ -12,12 +12,13 @@ import (
 	"strings"
 
 	"golang.org/x/tools/gopls/internal/astutil"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 )
 
 // symbolize returns the result of symbolizing the file identified by uri, using a cache.
-func (s *snapshot) symbolize(ctx context.Context, uri protocol.DocumentURI) ([]source.Symbol, error) {
+func (s *Snapshot) symbolize(ctx context.Context, uri protocol.DocumentURI) ([]source.Symbol, error) {
 
 	s.mu.Lock()
 	entry, hit := s.symbolizeHandles.Get(uri)
@@ -34,10 +35,10 @@ func (s *snapshot) symbolize(ctx context.Context, uri protocol.DocumentURI) ([]s
 		if err != nil {
 			return nil, err
 		}
-		type symbolHandleKey source.Hash
-		key := symbolHandleKey(fh.FileIdentity().Hash)
+		type symbolHandleKey file.Hash
+		key := symbolHandleKey(fh.Identity().Hash)
 		promise, release := s.store.Promise(key, func(ctx context.Context, arg interface{}) interface{} {
-			symbols, err := symbolizeImpl(ctx, arg.(*snapshot), fh)
+			symbols, err := symbolizeImpl(ctx, arg.(*Snapshot), fh)
 			return symbolizeResult{symbols, err}
 		})
 
@@ -58,7 +59,7 @@ func (s *snapshot) symbolize(ctx context.Context, uri protocol.DocumentURI) ([]s
 }
 
 // symbolizeImpl reads and parses a file and extracts symbols from it.
-func symbolizeImpl(ctx context.Context, snapshot *snapshot, fh source.FileHandle) ([]source.Symbol, error) {
+func symbolizeImpl(ctx context.Context, snapshot *Snapshot, fh file.Handle) ([]source.Symbol, error) {
 	pgfs, err := snapshot.view.parseCache.parseFiles(ctx, token.NewFileSet(), source.ParseFull, false, fh)
 	if err != nil {
 		return nil, err

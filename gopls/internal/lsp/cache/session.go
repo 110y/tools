@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/lsp/source/typerefs"
@@ -110,11 +111,8 @@ func (s *Session) NewView(ctx context.Context, folder *Folder) (*View, source.Sn
 // TODO(rfindley): clarify that createView can never be cancelled (with the
 // possible exception of server shutdown).
 // On success, the caller becomes responsible for calling the release function once.
-func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *Folder, seqID uint64) (*View, *snapshot, func(), error) {
+func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *Folder, seqID uint64) (*View, *Snapshot, func(), error) {
 	index := atomic.AddInt64(&viewIndex, 1)
-
-	gowork, _ := def.GOWORK()
-	wsModFiles, wsModFilesErr := computeWorkspaceModFiles(ctx, def.gomod, gowork, def.effectiveGO111MODULE(), s)
 
 	// We want a true background context and not a detached context here
 	// the spans need to be unrelated and no tag values should pollute it.
@@ -149,30 +147,28 @@ func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *F
 			},
 		},
 	}
-	v.snapshot = &snapshot{
-		sequenceID:           seqID,
-		globalID:             nextSnapshotID(),
-		view:                 v,
-		backgroundCtx:        backgroundCtx,
-		cancel:               cancel,
-		store:                s.cache.store,
-		packages:             new(persistent.Map[PackageID, *packageHandle]),
-		meta:                 new(metadataGraph),
-		files:                newFileMap(),
-		activePackages:       new(persistent.Map[PackageID, *Package]),
-		symbolizeHandles:     new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
-		shouldLoad:           new(persistent.Map[PackageID, []PackagePath]),
-		unloadableFiles:      new(persistent.Set[protocol.DocumentURI]),
-		parseModHandles:      new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
-		parseWorkHandles:     new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
-		modTidyHandles:       new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
-		modVulnHandles:       new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
-		modWhyHandles:        new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
-		workspaceModFiles:    wsModFiles,
-		workspaceModFilesErr: wsModFilesErr,
-		pkgIndex:             typerefs.NewPackageIndex(),
-		moduleUpgrades:       new(persistent.Map[protocol.DocumentURI, map[string]string]),
-		vulns:                new(persistent.Map[protocol.DocumentURI, *vulncheck.Result]),
+	v.snapshot = &Snapshot{
+		sequenceID:       seqID,
+		globalID:         nextSnapshotID(),
+		view:             v,
+		backgroundCtx:    backgroundCtx,
+		cancel:           cancel,
+		store:            s.cache.store,
+		packages:         new(persistent.Map[PackageID, *packageHandle]),
+		meta:             new(metadataGraph),
+		files:            newFileMap(),
+		activePackages:   new(persistent.Map[PackageID, *Package]),
+		symbolizeHandles: new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
+		shouldLoad:       new(persistent.Map[PackageID, []PackagePath]),
+		unloadableFiles:  new(persistent.Set[protocol.DocumentURI]),
+		parseModHandles:  new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
+		parseWorkHandles: new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
+		modTidyHandles:   new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
+		modVulnHandles:   new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
+		modWhyHandles:    new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
+		pkgIndex:         typerefs.NewPackageIndex(),
+		moduleUpgrades:   new(persistent.Map[protocol.DocumentURI, map[string]string]),
+		vulns:            new(persistent.Map[protocol.DocumentURI, *vulncheck.Result]),
 	}
 	// Save one reference in the view.
 	v.releaseSnapshot = v.snapshot.Acquire()
@@ -313,7 +309,7 @@ func (s *Session) updateViewLocked(ctx context.Context, view *View, def *viewDef
 	}
 
 	var (
-		snapshot *snapshot
+		snapshot *Snapshot
 		release  func()
 		err      error
 	)
@@ -388,7 +384,7 @@ func (s *Session) ResetView(ctx context.Context, uri protocol.DocumentURI) (*Vie
 // TODO(rfindley): what happens if this function fails? It must leave us in a
 // broken state, which we should surface to the user, probably as a request to
 // restart gopls.
-func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModification) (map[source.Snapshot][]protocol.DocumentURI, func(), error) {
+func (s *Session) DidModifyFiles(ctx context.Context, changes []file.Modification) (map[source.Snapshot][]protocol.DocumentURI, func(), error) {
 	s.viewMu.Lock()
 	defer s.viewMu.Unlock()
 
@@ -412,18 +408,21 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 	checkViews := false
 
 	for _, c := range changes {
+		// Any on-disk change to a go.work file causes a re-diagnosis.
+		//
 		// TODO(rfindley): go.work files need not be named "go.work" -- we need to
-		// check each view's source.
-		if isGoMod(c.URI) || isGoWork(c.URI) {
-			// Change, InvalidateMetadata, and UnknownFileAction actions do not cause
-			// us to re-evaluate views.
-			redoViews := (c.Action != source.Change &&
-				c.Action != source.UnknownFileAction)
-
-			if redoViews {
-				checkViews = true
-				break
-			}
+		// check each view's source to handle the case of an explicit GOWORK value.
+		// Write a test that fails, and fix this.
+		if isGoWork(c.URI) && (c.Action == file.Save || c.OnDisk) {
+			checkViews = true
+			break
+		}
+		// Opening/Close/Create/Delete of go.mod files all trigger
+		// re-evaluation of Views. Changes do not as they can't affect the set of
+		// Views.
+		if isGoMod(c.URI) && c.Action != file.Change && c.Action != file.Save {
+			checkViews = true
+			break
 		}
 	}
 
@@ -444,7 +443,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 				// TODO(rfindley): consider surfacing this error more loudly. We
 				// could report a bug, but it's not really a bug.
 				event.Error(ctx, "fetching workspace information", err)
-			} else if *info != *view.viewDefinition {
+			} else if !viewDefinitionsEqual(view.viewDefinition, info) {
 				if _, err := s.updateViewLocked(ctx, view, info, view.folder); err != nil {
 					// More catastrophic failure. The view may or may not still exist.
 					// The best we can do is log and move on.
@@ -455,7 +454,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 	}
 
 	// Collect information about views affected by these changes.
-	views := make(map[*View]map[protocol.DocumentURI]source.FileHandle)
+	views := make(map[*View]map[protocol.DocumentURI]file.Handle)
 	affectedViews := map[protocol.DocumentURI][]*View{}
 	for _, c := range changes {
 		// Build the list of affected views.
@@ -488,7 +487,7 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 			// Make sure that the file is added to the view's seenFiles set.
 			view.markKnown(c.URI)
 			if _, ok := views[view]; !ok {
-				views[view] = make(map[protocol.DocumentURI]source.FileHandle)
+				views[view] = make(map[protocol.DocumentURI]file.Handle)
 			}
 			views[view][c.URI] = fh
 		}
@@ -534,11 +533,11 @@ func (s *Session) DidModifyFiles(ctx context.Context, changes []source.FileModif
 // ExpandModificationsToDirectories returns the set of changes with the
 // directory changes removed and expanded to include all of the files in
 // the directory.
-func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes []source.FileModification) []source.FileModification {
-	var snapshots []*snapshot
+func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes []file.Modification) []file.Modification {
+	var snapshots []*Snapshot
 	s.viewMu.Lock()
 	for _, v := range s.views {
-		snapshot, release, err := v.getSnapshot()
+		snapshot, release, err := v.Snapshot()
 		if err != nil {
 			continue // view is shut down; continue with others
 		}
@@ -552,7 +551,7 @@ func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes 
 	//
 	// There may be other files in the directory, but if we haven't read them yet
 	// we don't need to invalidate them.
-	var result []source.FileModification
+	var result []file.Modification
 	for _, c := range changes {
 		expanded := make(map[protocol.DocumentURI]bool)
 		for _, snapshot := range snapshots {
@@ -564,7 +563,7 @@ func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes 
 			result = append(result, c)
 		} else {
 			for uri := range expanded {
-				result = append(result, source.FileModification{
+				result = append(result, file.Modification{
 					URI:        uri,
 					Action:     c.Action,
 					LanguageID: "",
@@ -579,7 +578,7 @@ func (s *Session) ExpandModificationsToDirectories(ctx context.Context, changes 
 
 // Precondition: caller holds s.viewMu lock.
 // TODO(rfindley): move this to fs_overlay.go.
-func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileModification) error {
+func (fs *overlayFS) updateOverlays(ctx context.Context, changes []file.Modification) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
@@ -594,10 +593,10 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 		}
 
 		// Determine the file kind on open, otherwise, assume it has been cached.
-		var kind source.FileKind
+		var kind file.Kind
 		switch c.Action {
-		case source.Open:
-			kind = source.FileKindForLang(c.LanguageID)
+		case file.Open:
+			kind = file.KindForLang(c.LanguageID)
 		default:
 			if !ok {
 				return fmt.Errorf("updateOverlays: modifying unopened overlay %v", c.URI)
@@ -606,7 +605,7 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 		}
 
 		// Closing a file just deletes its overlay.
-		if c.Action == source.Close {
+		if c.Action == file.Close {
 			delete(fs.overlays, c.URI)
 			continue
 		}
@@ -615,7 +614,7 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 		// overlay. Saves and on-disk file changes don't come with the file's
 		// content.
 		text := c.Text
-		if text == nil && (c.Action == source.Save || c.OnDisk) {
+		if text == nil && (c.Action == file.Save || c.OnDisk) {
 			if !ok {
 				return fmt.Errorf("no known content for overlay for %s", c.Action)
 			}
@@ -623,15 +622,15 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 		}
 		// On-disk changes don't come with versions.
 		version := c.Version
-		if c.OnDisk || c.Action == source.Save {
+		if c.OnDisk || c.Action == file.Save {
 			version = o.version
 		}
-		hash := source.HashOf(text)
+		hash := file.HashOf(text)
 		var sameContentOnDisk bool
 		switch c.Action {
-		case source.Delete:
+		case file.Delete:
 			// Do nothing. sameContentOnDisk should be false.
-		case source.Save:
+		case file.Save:
 			// Make sure the version and content (if present) is the same.
 			if false && o.version != version { // Client no longer sends the version
 				return fmt.Errorf("updateOverlays: saving %s at version %v, currently at %v", c.URI, c.Version, o.version)
@@ -643,7 +642,7 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 		default:
 			fh := mustReadFile(ctx, fs.delegate, c.URI)
 			_, readErr := fh.Content()
-			sameContentOnDisk = (readErr == nil && fh.FileIdentity().Hash == hash)
+			sameContentOnDisk = (readErr == nil && fh.Identity().Hash == hash)
 		}
 		o = &Overlay{
 			uri:     c.URI,
@@ -663,7 +662,7 @@ func (fs *overlayFS) updateOverlays(ctx context.Context, changes []source.FileMo
 	return nil
 }
 
-func mustReadFile(ctx context.Context, fs source.FileSource, uri protocol.DocumentURI) source.FileHandle {
+func mustReadFile(ctx context.Context, fs file.Source, uri protocol.DocumentURI) file.Handle {
 	ctx = xcontext.Detach(ctx)
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
@@ -680,11 +679,11 @@ type brokenFile struct {
 	err error
 }
 
-func (b brokenFile) URI() protocol.DocumentURI         { return b.uri }
-func (b brokenFile) FileIdentity() source.FileIdentity { return source.FileIdentity{URI: b.uri} }
-func (b brokenFile) SameContentsOnDisk() bool          { return false }
-func (b brokenFile) Version() int32                    { return 0 }
-func (b brokenFile) Content() ([]byte, error)          { return nil, b.err }
+func (b brokenFile) URI() protocol.DocumentURI { return b.uri }
+func (b brokenFile) Identity() file.Identity   { return file.Identity{URI: b.uri} }
+func (b brokenFile) SameContentsOnDisk() bool  { return false }
+func (b brokenFile) Version() int32            { return 0 }
+func (b brokenFile) Content() ([]byte, error)  { return nil, b.err }
 
 // FileWatchingGlobPatterns returns a new set of glob patterns to
 // watch every directory known by the view. For views within a module,
@@ -695,7 +694,7 @@ func (s *Session) FileWatchingGlobPatterns(ctx context.Context) map[string]struc
 	defer s.viewMu.Unlock()
 	patterns := map[string]struct{}{}
 	for _, view := range s.views {
-		snapshot, release, err := view.getSnapshot()
+		snapshot, release, err := view.Snapshot()
 		if err != nil {
 			continue // view is shut down; continue with others
 		}

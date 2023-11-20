@@ -23,10 +23,12 @@ import (
 
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/typesinternal"
 )
@@ -35,7 +37,7 @@ import (
 // diagnostic, using the provided metadata and filesource.
 //
 // The slice of diagnostics may be empty.
-func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *source.Metadata, fs source.FileSource) ([]*source.Diagnostic, error) {
+func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *source.Metadata, fs file.Source) ([]*source.Diagnostic, error) {
 	if diag, err := parseGoListImportCycleError(ctx, e, m, fs); err != nil {
 		return nil, err
 	} else if diag != nil {
@@ -324,7 +326,7 @@ func decodeDiagnostics(data []byte) []*source.Diagnostic {
 }
 
 // toSourceDiagnostic converts a gobDiagnostic to "source" form.
-func toSourceDiagnostic(srcAnalyzer *source.Analyzer, gobDiag *gobDiagnostic) *source.Diagnostic {
+func toSourceDiagnostic(srcAnalyzer *settings.Analyzer, gobDiag *gobDiagnostic) *source.Diagnostic {
 	var related []protocol.DiagnosticRelatedInformation
 	for _, gobRelated := range gobDiag.Related {
 		related = append(related, protocol.DiagnosticRelatedInformation(gobRelated))
@@ -333,21 +335,6 @@ func toSourceDiagnostic(srcAnalyzer *source.Analyzer, gobDiag *gobDiagnostic) *s
 	kinds := srcAnalyzer.ActionKind
 	if len(srcAnalyzer.ActionKind) == 0 {
 		kinds = append(kinds, protocol.QuickFix)
-	}
-	fixes := suggestedAnalysisFixes(gobDiag, kinds)
-	if srcAnalyzer.Fix != "" {
-		cmd, err := command.NewApplyFixCommand(gobDiag.Message, command.ApplyFixArgs{
-			URI:   gobDiag.Location.URI,
-			Range: gobDiag.Location.Range,
-			Fix:   srcAnalyzer.Fix,
-		})
-		if err != nil {
-			// JSON marshalling of these argument values cannot fail.
-			log.Fatalf("internal error in NewApplyFixCommand: %v", err)
-		}
-		for _, kind := range kinds {
-			fixes = append(fixes, source.SuggestedFixFromCommand(cmd, kind))
-		}
 	}
 
 	severity := srcAnalyzer.Severity
@@ -366,18 +353,34 @@ func toSourceDiagnostic(srcAnalyzer *source.Analyzer, gobDiag *gobDiagnostic) *s
 		Related:  related,
 		Tags:     srcAnalyzer.Tag,
 	}
-	if srcAnalyzer.FixesDiagnostic(diag) {
+	if source.CanFix(srcAnalyzer, diag) {
+		fixes := suggestedAnalysisFixes(gobDiag, kinds)
+		if srcAnalyzer.Fix != "" {
+			cmd, err := command.NewApplyFixCommand(gobDiag.Message, command.ApplyFixArgs{
+				URI:   gobDiag.Location.URI,
+				Range: gobDiag.Location.Range,
+				Fix:   string(srcAnalyzer.Fix),
+			})
+			if err != nil {
+				// JSON marshalling of these argument values cannot fail.
+				log.Fatalf("internal error in NewApplyFixCommand: %v", err)
+			}
+			for _, kind := range kinds {
+				fixes = append(fixes, source.SuggestedFixFromCommand(cmd, kind))
+			}
+		}
 		diag.SuggestedFixes = fixes
 	}
 
 	// If the fixes only delete code, assume that the diagnostic is reporting dead code.
-	if onlyDeletions(fixes) {
+	if onlyDeletions(diag.SuggestedFixes) {
 		diag.Tags = append(diag.Tags, protocol.Unnecessary)
 	}
 	return diag
 }
 
-// onlyDeletions returns true if all of the suggested fixes are deletions.
+// onlyDeletions returns true if fixes is non-empty and all of the suggested
+// fixes are deletions.
 func onlyDeletions(fixes []source.SuggestedFix) bool {
 	for _, fix := range fixes {
 		if fix.Command != nil {
@@ -509,7 +512,7 @@ func splitFileLineCol(s string) (file string, line, col8 int) {
 // an import cycle, returning a diagnostic if successful.
 //
 // If the error is not detected as an import cycle error, it returns nil, nil.
-func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *source.Metadata, fs source.FileSource) (*source.Diagnostic, error) {
+func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *source.Metadata, fs file.Source) (*source.Diagnostic, error) {
 	re := regexp.MustCompile(`(.*): import stack: \[(.+)\]`)
 	matches := re.FindStringSubmatch(strings.TrimSpace(e.Msg))
 	if len(matches) < 3 {
@@ -558,7 +561,7 @@ func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *sourc
 // It returns an error if the file could not be read.
 //
 // TODO(rfindley): eliminate this helper.
-func parseGoURI(ctx context.Context, fs source.FileSource, uri protocol.DocumentURI, mode parser.Mode) (*source.ParsedGoFile, error) {
+func parseGoURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI, mode parser.Mode) (*source.ParsedGoFile, error) {
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, err
@@ -570,7 +573,7 @@ func parseGoURI(ctx context.Context, fs source.FileSource, uri protocol.Document
 // source fs.
 //
 // It returns an error if the file could not be read.
-func parseModURI(ctx context.Context, fs source.FileSource, uri protocol.DocumentURI) (*source.ParsedModule, error) {
+func parseModURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI) (*source.ParsedModule, error) {
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, err

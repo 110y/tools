@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:generate go run ./helper -d protocol/tsserver.go -o server_gen.go -u .
-
 // Package lsp defines gopls' implementation of the LSP server
 // interface, [protocol.Server]. Call [NewServer] to create an instance.
 //
@@ -18,19 +16,23 @@ import (
 	"os"
 	"sync"
 
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/cache"
 	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/event"
-	"golang.org/x/tools/internal/jsonrpc2"
 )
 
 const concurrentAnalyses = 1
 
 // NewServer creates an LSP server and binds it to handle incoming client
 // messages on the supplied stream.
-func NewServer(session *cache.Session, client protocol.ClientCloser, options *source.Options) protocol.Server {
+func NewServer(session *cache.Session, client protocol.ClientCloser, options *settings.Options) protocol.Server {
+	// If this assignment fails to compile after a protocol
+	// upgrade, it means that one or more new methods need new
+	// stub declarations in unimplemented.go.
 	return &server{
 		diagnostics:           map[protocol.DocumentURI]*fileReports{},
 		gcOptimizationDetails: make(map[source.PackageID]struct{}),
@@ -123,17 +125,17 @@ type server struct {
 
 	// Track most recently requested options.
 	optionsMu sync.Mutex
-	options   *source.Options
+	options   *settings.Options
 }
 
-func (s *server) workDoneProgressCancel(ctx context.Context, params *protocol.WorkDoneProgressCancelParams) error {
+func (s *server) WorkDoneProgressCancel(ctx context.Context, params *protocol.WorkDoneProgressCancelParams) error {
 	ctx, done := event.Start(ctx, "lsp.Server.workDoneProgressCancel")
 	defer done()
 
 	return s.progress.Cancel(params.Token)
 }
 
-func (s *server) nonstandardRequest(ctx context.Context, method string, params interface{}) (interface{}, error) {
+func (s *server) NonstandardRequest(ctx context.Context, method string, params interface{}) (interface{}, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.nonstandardRequest")
 	defer done()
 
@@ -143,8 +145,8 @@ func (s *server) nonstandardRequest(ctx context.Context, method string, params i
 		// TODO(adonovan): opt: parallelize FileDiagnostics(URI...), either
 		// by calling it in multiple goroutines or, better, by making
 		// the relevant APIs accept a set of URIs/packages.
-		for _, file := range paramMap["files"].([]interface{}) {
-			snapshot, fh, ok, release, err := s.beginFileRequest(ctx, protocol.DocumentURI(file.(string)), source.UnknownKind)
+		for _, f := range paramMap["files"].([]interface{}) {
+			snapshot, fh, ok, release, err := s.beginFileRequest(ctx, protocol.DocumentURI(f.(string)), file.UnknownKind)
 			defer release()
 			if !ok {
 				return nil, err
@@ -180,7 +182,7 @@ func (s *server) nonstandardRequest(ctx context.Context, method string, params i
 // efficient to compute the set of packages and TypeCheck and
 // Analyze them all at once. Or instead support textDocument/diagnostic
 // (golang/go#60122).
-func (s *server) diagnoseFile(ctx context.Context, snapshot source.Snapshot, uri protocol.DocumentURI) (source.FileHandle, []*source.Diagnostic, error) {
+func (s *server) diagnoseFile(ctx context.Context, snapshot source.Snapshot, uri protocol.DocumentURI) (file.Handle, []*source.Diagnostic, error) {
 	fh, err := snapshot.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, nil, err
@@ -202,8 +204,4 @@ func (s *server) diagnoseFile(ctx context.Context, snapshot source.Snapshot, uri
 	s.storeDiagnostics(snapshot, uri, typeCheckSource, td, true)
 	s.storeDiagnostics(snapshot, uri, analysisSource, ad, true)
 	return fh, append(td, ad...), nil
-}
-
-func notImplemented(method string) error {
-	return fmt.Errorf("%w: %q not yet implemented", jsonrpc2.ErrMethodNotFound, method)
 }

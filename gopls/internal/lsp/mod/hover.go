@@ -13,15 +13,17 @@ import (
 
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/semver"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/gopls/internal/vulncheck/govulncheck"
 	"golang.org/x/tools/gopls/internal/vulncheck/osv"
 	"golang.org/x/tools/internal/event"
 )
 
-func Hover(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle, position protocol.Position) (*protocol.Hover, error) {
+func Hover(ctx context.Context, snapshot source.Snapshot, fh file.Handle, position protocol.Position) (*protocol.Hover, error) {
 	var found bool
 	for _, uri := range snapshot.ModFiles() {
 		if fh.URI() == uri {
@@ -55,7 +57,7 @@ func Hover(ctx context.Context, snapshot source.Snapshot, fh source.FileHandle, 
 	return hoverOnRequireStatement(ctx, pm, offset, snapshot, fh)
 }
 
-func hoverOnRequireStatement(ctx context.Context, pm *source.ParsedModule, offset int, snapshot source.Snapshot, fh source.FileHandle) (*protocol.Hover, error) {
+func hoverOnRequireStatement(ctx context.Context, pm *source.ParsedModule, offset int, snapshot source.Snapshot, fh file.Handle) (*protocol.Hover, error) {
 	// Confirm that the cursor is at the position of a require statement.
 	var req *modfile.Require
 	var startOffset, endOffset int
@@ -84,7 +86,7 @@ func hoverOnRequireStatement(ctx context.Context, pm *source.ParsedModule, offse
 	// Get the vulnerability info.
 	fromGovulncheck := true
 	vs := snapshot.Vulnerabilities(fh.URI())[fh.URI()]
-	if vs == nil && snapshot.Options().Vulncheck == source.ModeVulncheckImports {
+	if vs == nil && snapshot.Options().Vulncheck == settings.ModeVulncheckImports {
 		var err error
 		vs, err = snapshot.ModVuln(ctx, fh.URI())
 		if err != nil {
@@ -126,7 +128,7 @@ func hoverOnRequireStatement(ctx context.Context, pm *source.ParsedModule, offse
 	}, nil
 }
 
-func hoverOnModuleStatement(ctx context.Context, pm *source.ParsedModule, offset int, snapshot source.Snapshot, fh source.FileHandle) (*protocol.Hover, bool) {
+func hoverOnModuleStatement(ctx context.Context, pm *source.ParsedModule, offset int, snapshot source.Snapshot, fh file.Handle) (*protocol.Hover, bool) {
 	module := pm.File.Module
 	if module == nil {
 		return nil, false // no module stmt
@@ -142,7 +144,7 @@ func hoverOnModuleStatement(ctx context.Context, pm *source.ParsedModule, offset
 	fromGovulncheck := true
 	vs := snapshot.Vulnerabilities(fh.URI())[fh.URI()]
 
-	if vs == nil && snapshot.Options().Vulncheck == source.ModeVulncheckImports {
+	if vs == nil && snapshot.Options().Vulncheck == settings.ModeVulncheckImports {
 		vs, err = snapshot.ModVuln(ctx, fh.URI())
 		if err != nil {
 			return nil, false
@@ -164,7 +166,7 @@ func hoverOnModuleStatement(ctx context.Context, pm *source.ParsedModule, offset
 	}, true
 }
 
-func formatHeader(modpath string, options *source.Options) string {
+func formatHeader(modpath string, options *settings.Options) string {
 	var b strings.Builder
 	// Write the heading as an H3.
 	b.WriteString("#### " + modpath)
@@ -243,7 +245,7 @@ func fixedVersion(fixed string) string {
 	return "Fixed in " + fixed + "."
 }
 
-func formatVulnerabilities(affecting, nonaffecting []*govulncheck.Finding, osvs map[string]*osv.Entry, options *source.Options, fromGovulncheck bool) string {
+func formatVulnerabilities(affecting, nonaffecting []*govulncheck.Finding, osvs map[string]*osv.Entry, options *settings.Options, fromGovulncheck bool) string {
 	if len(osvs) == 0 || (len(affecting) == 0 && len(nonaffecting) == 0) {
 		return ""
 	}
@@ -325,7 +327,7 @@ func vulnerablePkgsInfo(findings []*govulncheck.Finding, useMarkdown bool) strin
 	return b.String()
 }
 
-func formatExplanation(text string, req *modfile.Require, options *source.Options, isPrivate bool) string {
+func formatExplanation(text string, req *modfile.Require, options *settings.Options, isPrivate bool) string {
 	text = strings.TrimSuffix(text, "\n")
 	splt := strings.Split(text, "\n")
 	length := len(splt)

@@ -18,16 +18,18 @@ import (
 	"sync"
 
 	"golang.org/x/tools/gopls/internal/bug"
+	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/goversion"
 	"golang.org/x/tools/gopls/internal/lsp/debug"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/source"
+	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/jsonrpc2"
 )
 
-func (s *server) initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
+func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitialize) (*protocol.InitializeResult, error) {
 	ctx, done := event.Start(ctx, "lsp.Server.initialize")
 	defer done()
 
@@ -62,7 +64,7 @@ func (s *server) initialize(ctx context.Context, params *protocol.ParamInitializ
 	// eliminate this defer.
 	defer func() { s.SetOptions(options) }()
 
-	if err := s.handleOptionResults(ctx, source.SetOptions(options, params.InitializationOptions)); err != nil {
+	if err := s.handleOptionResults(ctx, settings.SetOptions(options, params.InitializationOptions)); err != nil {
 		return nil, err
 	}
 	options.ForClientCapabilities(params.ClientInfo, params.Capabilities)
@@ -200,7 +202,7 @@ See https://github.com/golang/go/issues/45732 for more information.`,
 	}, nil
 }
 
-func (s *server) initialized(ctx context.Context, params *protocol.InitializedParams) error {
+func (s *server) Initialized(ctx context.Context, params *protocol.InitializedParams) error {
 	ctx, done := event.Start(ctx, "lsp.Server.initialized")
 	defer done()
 
@@ -450,7 +452,7 @@ func (s *server) registerWatchedDirectoriesLocked(ctx context.Context, patterns 
 // Options returns the current server options.
 //
 // The caller must not modify the result.
-func (s *server) Options() *source.Options {
+func (s *server) Options() *settings.Options {
 	s.optionsMu.Lock()
 	defer s.optionsMu.Unlock()
 	return s.options
@@ -459,13 +461,13 @@ func (s *server) Options() *source.Options {
 // SetOptions sets the current server options.
 //
 // The caller must not subsequently modify the options.
-func (s *server) SetOptions(opts *source.Options) {
+func (s *server) SetOptions(opts *settings.Options) {
 	s.optionsMu.Lock()
 	defer s.optionsMu.Unlock()
 	s.options = opts
 }
 
-func (s *server) fetchFolderOptions(ctx context.Context, folder protocol.DocumentURI) (*source.Options, error) {
+func (s *server) fetchFolderOptions(ctx context.Context, folder protocol.DocumentURI) (*settings.Options, error) {
 	if opts := s.Options(); !opts.ConfigurationSupported {
 		return opts, nil
 	}
@@ -482,7 +484,7 @@ func (s *server) fetchFolderOptions(ctx context.Context, folder protocol.Documen
 
 	folderOpts := s.Options().Clone()
 	for _, config := range configs {
-		if err := s.handleOptionResults(ctx, source.SetOptions(folderOpts, config)); err != nil {
+		if err := s.handleOptionResults(ctx, settings.SetOptions(folderOpts, config)); err != nil {
 			return nil, err
 		}
 	}
@@ -499,13 +501,13 @@ func (s *server) eventuallyShowMessage(ctx context.Context, msg *protocol.ShowMe
 	return nil
 }
 
-func (s *server) handleOptionResults(ctx context.Context, results source.OptionResults) error {
+func (s *server) handleOptionResults(ctx context.Context, results settings.OptionResults) error {
 	var warnings, errors []string
 	for _, result := range results {
 		switch result.Error.(type) {
 		case nil:
 			// nothing to do
-		case *source.SoftError:
+		case *settings.SoftError:
 			warnings = append(warnings, result.Error.Error())
 		default:
 			errors = append(errors, result.Error.Error())
@@ -517,7 +519,7 @@ func (s *server) handleOptionResults(ctx context.Context, results source.OptionR
 	// Having stable content for the message allows clients to de-duplicate. This
 	// matters because we may send duplicate warnings for clients that support
 	// dynamic configuration: one for the initial settings, and then more for the
-	// individual view settings.
+	// individual viewsettings.
 	var msgs []string
 	msgType := protocol.Warning
 	if len(errors) > 0 {
@@ -548,7 +550,7 @@ func (s *server) handleOptionResults(ctx context.Context, results source.OptionR
 // We don't want to return errors for benign conditions like wrong file type,
 // so callers should do if !ok { return err } rather than if err != nil.
 // The returned cleanup function is non-nil even in case of false/error result.
-func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI, expectKind source.FileKind) (source.Snapshot, source.FileHandle, bool, func(), error) {
+func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI, expectKind file.Kind) (source.Snapshot, file.Handle, bool, func(), error) {
 	uri := pURI
 	if !uri.IsFile() {
 		// Not a file URI. Stop processing the request, but don't return an error.
@@ -567,7 +569,7 @@ func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI
 		release()
 		return nil, nil, false, func() {}, err
 	}
-	if expectKind != source.UnknownKind && snapshot.FileKind(fh) != expectKind {
+	if expectKind != file.UnknownKind && snapshot.FileKind(fh) != expectKind {
 		// Wrong kind of file. Nothing to do.
 		release()
 		return nil, nil, false, func() {}, nil
@@ -577,7 +579,7 @@ func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI
 
 // shutdown implements the 'shutdown' LSP handler. It releases resources
 // associated with the server and waits for all ongoing work to complete.
-func (s *server) shutdown(ctx context.Context) error {
+func (s *server) Shutdown(ctx context.Context) error {
 	ctx, done := event.Start(ctx, "lsp.Server.shutdown")
 	defer done()
 
@@ -599,7 +601,7 @@ func (s *server) shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *server) exit(ctx context.Context) error {
+func (s *server) Exit(ctx context.Context) error {
 	ctx, done := event.Start(ctx, "lsp.Server.exit")
 	defer done()
 
