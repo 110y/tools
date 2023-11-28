@@ -94,16 +94,13 @@ func (s *server) Initialize(ctx context.Context, params *protocol.ParamInitializ
 		}
 	}
 	for _, folder := range folders {
-		uri := protocol.URIFromURI(folder.URI)
-		if !uri.IsFile() {
-			continue
+		if folder.URI == "" {
+			return nil, fmt.Errorf("empty WorkspaceFolder.URI")
+		}
+		if _, err := protocol.ParseDocumentURI(folder.URI); err != nil {
+			return nil, fmt.Errorf("invalid WorkspaceFolder.URI: %v", err)
 		}
 		s.pendingFolders = append(s.pendingFolders, folder)
-	}
-	// gopls only supports URIs with a file:// scheme, so if we have no
-	// workspace folders with a supported scheme, fail to initialize.
-	if len(folders) > 0 && len(s.pendingFolders) == 0 {
-		return nil, fmt.Errorf("unsupported URI schemes: %v (gopls only supports file URIs)", folders)
 	}
 
 	var codeActionProvider interface{} = true
@@ -219,9 +216,8 @@ func (s *server) Initialized(ctx context.Context, params *protocol.InitializedPa
 	}
 	s.notifications = nil
 
-	if err := s.addFolders(ctx, s.pendingFolders); err != nil {
-		return err
-	}
+	s.addFolders(ctx, s.pendingFolders)
+
 	s.pendingFolders = nil
 	s.checkViewGoVersions()
 
@@ -289,7 +285,13 @@ func go1Point() int {
 	return -1
 }
 
-func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFolder) error {
+// addFolders adds the specified list of "folders" (that's Windows for
+// directories) to the session. It does not return an error, though it
+// may report an error to the client over LSP if one or more folders
+// had problems.
+//
+// addFolders must be called only with valid file URIs.
+func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFolder) {
 	originalViews := len(s.session.Views())
 	viewErrors := make(map[protocol.DocumentURI]error)
 
@@ -306,9 +308,9 @@ func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFol
 	// Only one view gets to have a workspace.
 	var nsnapshots sync.WaitGroup // number of unfinished snapshot initializations
 	for _, folder := range folders {
-		uri := protocol.URIFromURI(folder.URI)
-		// Ignore non-file URIs.
-		if !uri.IsFile() {
+		uri, err := protocol.ParseDocumentURI(folder.URI)
+		if err != nil {
+			bug.Reportf("addFolders: invalid folder URI: %v", err)
 			continue
 		}
 		work := s.progress.Start(ctx, "Setting up workspace", "Loading packages...", nil, nil)
@@ -352,17 +354,14 @@ func (s *server) addFolders(ctx context.Context, folders []protocol.WorkspaceFol
 		event.Error(ctx, "failed to register for file watching notifications", err)
 	}
 
+	// Report any errors using the protocol.
 	if len(viewErrors) > 0 {
 		errMsg := fmt.Sprintf("Error loading workspace folders (expected %v, got %v)\n", len(folders), len(s.session.Views())-originalViews)
 		for uri, err := range viewErrors {
 			errMsg += fmt.Sprintf("failed to load view for %s: %v\n", uri, err)
 		}
-		return s.client.ShowMessage(ctx, &protocol.ShowMessageParams{
-			Type:    protocol.Error,
-			Message: errMsg,
-		})
+		showMessage(ctx, s.client, protocol.Error, errMsg)
 	}
-	return nil
 }
 
 // updateWatchedDirectories compares the current set of directories to watch
@@ -550,12 +549,7 @@ func (s *server) handleOptionResults(ctx context.Context, results settings.Optio
 // We don't want to return errors for benign conditions like wrong file type,
 // so callers should do if !ok { return err } rather than if err != nil.
 // The returned cleanup function is non-nil even in case of false/error result.
-func (s *server) beginFileRequest(ctx context.Context, pURI protocol.DocumentURI, expectKind file.Kind) (*cache.Snapshot, file.Handle, bool, func(), error) {
-	uri := pURI
-	if !uri.IsFile() {
-		// Not a file URI. Stop processing the request, but don't return an error.
-		return nil, nil, false, func() {}, nil
-	}
+func (s *server) beginFileRequest(ctx context.Context, uri protocol.DocumentURI, expectKind file.Kind) (*cache.Snapshot, file.Handle, bool, func(), error) {
 	view, err := s.session.ViewOf(uri)
 	if err != nil {
 		return nil, nil, false, func() {}, err
