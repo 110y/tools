@@ -21,12 +21,13 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/file"
+	"golang.org/x/tools/gopls/internal/lsp/analysis/embeddirective"
+	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/lsp/source"
 	"golang.org/x/tools/gopls/internal/settings"
+	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/internal/typesinternal"
 )
 
@@ -34,16 +35,16 @@ import (
 // diagnostic, using the provided metadata and filesource.
 //
 // The slice of diagnostics may be empty.
-func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *Metadata, fs file.Source) ([]*source.Diagnostic, error) {
-	if diag, err := parseGoListImportCycleError(ctx, e, m, fs); err != nil {
+func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, mp *metadata.Package, fs file.Source) ([]*Diagnostic, error) {
+	if diag, err := parseGoListImportCycleError(ctx, e, mp, fs); err != nil {
 		return nil, err
 	} else if diag != nil {
-		return []*source.Diagnostic{diag}, nil
+		return []*Diagnostic{diag}, nil
 	}
 
 	// Parse error location and attempt to convert to protocol form.
 	loc, err := func() (protocol.Location, error) {
-		filename, line, col8 := parseGoListError(e, m.LoadDir)
+		filename, line, col8 := parseGoListError(e, mp.LoadDir)
 		uri := protocol.URIFromPath(filename)
 
 		fh, err := fs.ReadFile(ctx, uri)
@@ -82,27 +83,27 @@ func goPackagesErrorDiagnostics(ctx context.Context, e packages.Error, m *Metada
 	if err != nil {
 		// Unable to parse a valid position.
 		// Apply the error to all files to be safe.
-		var diags []*source.Diagnostic
-		for _, uri := range m.CompiledGoFiles {
-			diags = append(diags, &source.Diagnostic{
+		var diags []*Diagnostic
+		for _, uri := range mp.CompiledGoFiles {
+			diags = append(diags, &Diagnostic{
 				URI:      uri,
 				Severity: protocol.SeverityError,
-				Source:   source.ListError,
+				Source:   ListError,
 				Message:  e.Msg,
 			})
 		}
 		return diags, nil
 	}
-	return []*source.Diagnostic{{
+	return []*Diagnostic{{
 		URI:      loc.URI,
 		Range:    loc.Range,
 		Severity: protocol.SeverityError,
-		Source:   source.ListError,
+		Source:   ListError,
 		Message:  e.Msg,
 	}}, nil
 }
 
-func parseErrorDiagnostics(pkg *syntaxPackage, errList scanner.ErrorList) ([]*source.Diagnostic, error) {
+func parseErrorDiagnostics(pkg *syntaxPackage, errList scanner.ErrorList) ([]*Diagnostic, error) {
 	// The first parser error is likely the root cause of the problem.
 	if errList.Len() <= 0 {
 		return nil, fmt.Errorf("no errors in %v", errList)
@@ -116,11 +117,11 @@ func parseErrorDiagnostics(pkg *syntaxPackage, errList scanner.ErrorList) ([]*so
 	if err != nil {
 		return nil, err
 	}
-	return []*source.Diagnostic{{
+	return []*Diagnostic{{
 		URI:      pgf.URI,
 		Range:    rng,
 		Severity: protocol.SeverityError,
-		Source:   source.ParseError,
+		Source:   ParseError,
 		Message:  e.Msg,
 	}}, nil
 }
@@ -128,7 +129,7 @@ func parseErrorDiagnostics(pkg *syntaxPackage, errList scanner.ErrorList) ([]*so
 var importErrorRe = regexp.MustCompile(`could not import ([^\s]+)`)
 var unsupportedFeatureRe = regexp.MustCompile(`.*require.* go(\d+\.\d+) or later`)
 
-func goGetQuickFixes(moduleMode bool, uri protocol.DocumentURI, pkg string) []source.SuggestedFix {
+func goGetQuickFixes(moduleMode bool, uri protocol.DocumentURI, pkg string) []SuggestedFix {
 	// Go get only supports module mode for now.
 	if !moduleMode {
 		return nil
@@ -143,10 +144,10 @@ func goGetQuickFixes(moduleMode bool, uri protocol.DocumentURI, pkg string) []so
 		bug.Reportf("internal error building 'go get package' fix: %v", err)
 		return nil
 	}
-	return []source.SuggestedFix{SuggestedFixFromCommand(cmd, protocol.QuickFix)}
+	return []SuggestedFix{SuggestedFixFromCommand(cmd, protocol.QuickFix)}
 }
 
-func editGoDirectiveQuickFix(moduleMode bool, uri protocol.DocumentURI, version string) []source.SuggestedFix {
+func editGoDirectiveQuickFix(moduleMode bool, uri protocol.DocumentURI, version string) []SuggestedFix {
 	// Go mod edit only supports module mode.
 	if !moduleMode {
 		return nil
@@ -160,11 +161,11 @@ func editGoDirectiveQuickFix(moduleMode bool, uri protocol.DocumentURI, version 
 		bug.Reportf("internal error constructing 'edit go directive' fix: %v", err)
 		return nil
 	}
-	return []source.SuggestedFix{SuggestedFixFromCommand(cmd, protocol.QuickFix)}
+	return []SuggestedFix{SuggestedFixFromCommand(cmd, protocol.QuickFix)}
 }
 
 // encodeDiagnostics gob-encodes the given diagnostics.
-func encodeDiagnostics(srcDiags []*source.Diagnostic) []byte {
+func encodeDiagnostics(srcDiags []*Diagnostic) []byte {
 	var gobDiags []gobDiagnostic
 	for _, srcDiag := range srcDiags {
 		var gobFixes []gobSuggestedFix
@@ -218,14 +219,14 @@ func encodeDiagnostics(srcDiags []*source.Diagnostic) []byte {
 }
 
 // decodeDiagnostics decodes the given gob-encoded diagnostics.
-func decodeDiagnostics(data []byte) []*source.Diagnostic {
+func decodeDiagnostics(data []byte) []*Diagnostic {
 	var gobDiags []gobDiagnostic
 	diagnosticsCodec.Decode(data, &gobDiags)
-	var srcDiags []*source.Diagnostic
+	var srcDiags []*Diagnostic
 	for _, gobDiag := range gobDiags {
-		var srcFixes []source.SuggestedFix
+		var srcFixes []SuggestedFix
 		for _, gobFix := range gobDiag.SuggestedFixes {
-			srcFix := source.SuggestedFix{
+			srcFix := SuggestedFix{
 				Title:      gobFix.Message,
 				ActionKind: gobFix.ActionKind,
 			}
@@ -254,13 +255,13 @@ func decodeDiagnostics(data []byte) []*source.Diagnostic {
 			srcRel := protocol.DiagnosticRelatedInformation(gobRel)
 			srcRelated = append(srcRelated, srcRel)
 		}
-		srcDiag := &source.Diagnostic{
+		srcDiag := &Diagnostic{
 			URI:            gobDiag.Location.URI,
 			Range:          gobDiag.Location.Range,
 			Severity:       gobDiag.Severity,
 			Code:           gobDiag.Code,
 			CodeHref:       gobDiag.CodeHref,
-			Source:         source.AnalyzerErrorKind(gobDiag.Source),
+			Source:         DiagnosticSource(gobDiag.Source),
 			Message:        gobDiag.Message,
 			Tags:           gobDiag.Tags,
 			Related:        srcRelated,
@@ -271,8 +272,41 @@ func decodeDiagnostics(data []byte) []*source.Diagnostic {
 	return srcDiags
 }
 
+// canFixFuncs maps an analyer to a function that determines whether or not a
+// fix is possible for the given diagnostic.
+//
+// TODO(rfindley): clean this up.
+var canFixFuncs = map[settings.Fix]func(*Diagnostic) bool{
+	settings.AddEmbedImport: fixedByImportingEmbed,
+}
+
+// fixedByImportingEmbed returns true if diag can be fixed by addEmbedImport.
+func fixedByImportingEmbed(diag *Diagnostic) bool {
+	if diag == nil {
+		return false
+	}
+	return diag.Message == embeddirective.MissingImportMessage
+}
+
+// canFix returns true if Analyzer.Fix can fix the Diagnostic.
+//
+// It returns true by default: only if the analyzer is configured explicitly to
+// ignore this diagnostic does it return false.
+//
+// TODO(rfindley): reconcile the semantics of 'Fix' and
+// 'suggestedAnalysisFixes'.
+func canFix(a *settings.Analyzer, d *Diagnostic) bool {
+	f, ok := canFixFuncs[a.Fix]
+	if !ok {
+		// See the above TODO: this doesn't make sense, but preserves pre-existing
+		// semantics.
+		return true
+	}
+	return f(d)
+}
+
 // toSourceDiagnostic converts a gobDiagnostic to "source" form.
-func toSourceDiagnostic(srcAnalyzer *settings.Analyzer, gobDiag *gobDiagnostic) *source.Diagnostic {
+func toSourceDiagnostic(srcAnalyzer *settings.Analyzer, gobDiag *gobDiagnostic) *Diagnostic {
 	var related []protocol.DiagnosticRelatedInformation
 	for _, gobRelated := range gobDiag.Related {
 		related = append(related, protocol.DiagnosticRelatedInformation(gobRelated))
@@ -288,18 +322,18 @@ func toSourceDiagnostic(srcAnalyzer *settings.Analyzer, gobDiag *gobDiagnostic) 
 		severity = protocol.SeverityWarning
 	}
 
-	diag := &source.Diagnostic{
+	diag := &Diagnostic{
 		URI:      gobDiag.Location.URI,
 		Range:    gobDiag.Location.Range,
 		Severity: severity,
 		Code:     gobDiag.Code,
 		CodeHref: gobDiag.CodeHref,
-		Source:   source.AnalyzerErrorKind(gobDiag.Source),
+		Source:   DiagnosticSource(gobDiag.Source),
 		Message:  gobDiag.Message,
 		Related:  related,
 		Tags:     srcAnalyzer.Tag,
 	}
-	if source.CanFix(srcAnalyzer, diag) {
+	if canFix(srcAnalyzer, diag) {
 		fixes := suggestedAnalysisFixes(gobDiag, kinds)
 		if srcAnalyzer.Fix != "" {
 			cmd, err := command.NewApplyFixCommand(gobDiag.Message, command.ApplyFixArgs{
@@ -327,7 +361,7 @@ func toSourceDiagnostic(srcAnalyzer *settings.Analyzer, gobDiag *gobDiagnostic) 
 
 // onlyDeletions returns true if fixes is non-empty and all of the suggested
 // fixes are deletions.
-func onlyDeletions(fixes []source.SuggestedFix) bool {
+func onlyDeletions(fixes []SuggestedFix) bool {
 	for _, fix := range fixes {
 		if fix.Command != nil {
 			return false
@@ -347,11 +381,20 @@ func onlyDeletions(fixes []source.SuggestedFix) bool {
 }
 
 func typesCodeHref(linkTarget string, code typesinternal.ErrorCode) string {
-	return source.BuildLink(linkTarget, "golang.org/x/tools/internal/typesinternal", code.String())
+	return BuildLink(linkTarget, "golang.org/x/tools/internal/typesinternal", code.String())
 }
 
-func suggestedAnalysisFixes(diag *gobDiagnostic, kinds []protocol.CodeActionKind) []source.SuggestedFix {
-	var fixes []source.SuggestedFix
+// BuildLink constructs a URL with the given target, path, and anchor.
+func BuildLink(target, path, anchor string) string {
+	link := fmt.Sprintf("https://%s/%s", target, path)
+	if anchor == "" {
+		return link
+	}
+	return link + "#" + anchor
+}
+
+func suggestedAnalysisFixes(diag *gobDiagnostic, kinds []protocol.CodeActionKind) []SuggestedFix {
+	var fixes []SuggestedFix
 	for _, fix := range diag.SuggestedFixes {
 		edits := make(map[protocol.DocumentURI][]protocol.TextEdit)
 		for _, e := range fix.TextEdits {
@@ -362,7 +405,7 @@ func suggestedAnalysisFixes(diag *gobDiagnostic, kinds []protocol.CodeActionKind
 			})
 		}
 		for _, kind := range kinds {
-			fixes = append(fixes, source.SuggestedFix{
+			fixes = append(fixes, SuggestedFix{
 				Title:      fix.Message,
 				Edits:      edits,
 				ActionKind: kind,
@@ -426,7 +469,7 @@ func splitFileLineCol(s string) (file string, line, col8 int) {
 // an import cycle, returning a diagnostic if successful.
 //
 // If the error is not detected as an import cycle error, it returns nil, nil.
-func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *Metadata, fs file.Source) (*source.Diagnostic, error) {
+func parseGoListImportCycleError(ctx context.Context, e packages.Error, mp *metadata.Package, fs file.Source) (*Diagnostic, error) {
 	re := regexp.MustCompile(`(.*): import stack: \[(.+)\]`)
 	matches := re.FindStringSubmatch(strings.TrimSpace(e.Msg))
 	if len(matches) < 3 {
@@ -441,8 +484,8 @@ func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *Metad
 	}
 	// Imports have quotation marks around them.
 	circImp := strconv.Quote(importList[1])
-	for _, uri := range m.CompiledGoFiles {
-		pgf, err := parseGoURI(ctx, fs, uri, source.ParseHeader)
+	for _, uri := range mp.CompiledGoFiles {
+		pgf, err := parseGoURI(ctx, fs, uri, ParseHeader)
 		if err != nil {
 			return nil, err
 		}
@@ -454,11 +497,11 @@ func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *Metad
 					return nil, nil
 				}
 
-				return &source.Diagnostic{
+				return &Diagnostic{
 					URI:      pgf.URI,
 					Range:    rng.Range(),
 					Severity: protocol.SeverityError,
-					Source:   source.ListError,
+					Source:   ListError,
 					Message:  msg,
 				}, nil
 			}
@@ -475,7 +518,7 @@ func parseGoListImportCycleError(ctx context.Context, e packages.Error, m *Metad
 // It returns an error if the file could not be read.
 //
 // TODO(rfindley): eliminate this helper.
-func parseGoURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI, mode parser.Mode) (*source.ParsedGoFile, error) {
+func parseGoURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI, mode parser.Mode) (*ParsedGoFile, error) {
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, err
@@ -487,7 +530,7 @@ func parseGoURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI, m
 // source fs.
 //
 // It returns an error if the file could not be read.
-func parseModURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI) (*source.ParsedModule, error) {
+func parseModURI(ctx context.Context, fs file.Source, uri protocol.DocumentURI) (*ParsedModule, error) {
 	fh, err := fs.ReadFile(ctx, uri)
 	if err != nil {
 		return nil, err

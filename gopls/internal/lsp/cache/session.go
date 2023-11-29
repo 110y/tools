@@ -15,11 +15,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/file"
+	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
+	"golang.org/x/tools/gopls/internal/lsp/cache/typerefs"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/lsp/source/typerefs"
 	"golang.org/x/tools/gopls/internal/persistent"
+	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/gocommand"
@@ -148,6 +149,22 @@ func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *F
 		}
 	}
 
+	var ignoreFilter *ignoreFilter
+	{
+		var dirs []string
+		if len(def.workspaceModFiles) == 0 {
+			for _, entry := range filepath.SplitList(def.gopath) {
+				dirs = append(dirs, filepath.Join(entry, "src"))
+			}
+		} else {
+			dirs = append(dirs, def.gomodcache)
+			for m := range def.workspaceModFiles {
+				dirs = append(dirs, filepath.Dir(m.Path()))
+			}
+		}
+		ignoreFilter = newIgnoreFilter(dirs)
+	}
+
 	v := &View{
 		id:                   strconv.FormatInt(index, 10),
 		gocmdRunner:          s.gocmdRunner,
@@ -156,6 +173,7 @@ func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *F
 		initializationSema:   make(chan struct{}, 1),
 		baseCtx:              baseCtx,
 		parseCache:           s.parseCache,
+		ignoreFilter:         ignoreFilter,
 		fs:                   s.overlayFS,
 		viewDefinition:       def,
 		importsState: &importsState{
@@ -175,7 +193,7 @@ func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *F
 		cancel:           cancel,
 		store:            s.cache.store,
 		packages:         new(persistent.Map[PackageID, *packageHandle]),
-		meta:             new(metadataGraph),
+		meta:             new(metadata.Graph),
 		files:            newFileMap(),
 		activePackages:   new(persistent.Map[PackageID, *Package]),
 		symbolizeHandles: new(persistent.Map[protocol.DocumentURI, *memoize.Promise]),
@@ -212,16 +230,24 @@ func (s *Session) createView(ctx context.Context, def *viewDefinition, folder *F
 	return v, snapshot, snapshot.Acquire(), nil
 }
 
-// ViewByName returns a view with a matching name, if the session has one.
-func (s *Session) ViewByName(name string) *View {
+// RemoveView removes from the session the view rooted at the specified directory.
+// It reports whether a view of that directory was removed.
+func (s *Session) RemoveView(dir protocol.DocumentURI) bool {
 	s.viewMu.Lock()
 	defer s.viewMu.Unlock()
 	for _, view := range s.views {
-		if view.Name() == name {
-			return view
+		if view.folder.Dir == dir {
+			i := s.dropView(view)
+			if i == -1 {
+				return false // can't happen
+			}
+			// delete this view... we don't care about order but we do want to make
+			// sure we can garbage collect the view
+			s.views = removeElement(s.views, i)
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // View returns the view with a matching id, if present.
@@ -292,20 +318,6 @@ func bestViewForURI(uri protocol.DocumentURI, views []*View) *View {
 	}
 	// TODO: are there any more heuristics we can use?
 	return views[0]
-}
-
-// RemoveView removes the view v from the session
-func (s *Session) RemoveView(view *View) {
-	s.viewMu.Lock()
-	defer s.viewMu.Unlock()
-
-	i := s.dropView(view)
-	if i == -1 { // error reported elsewhere
-		return
-	}
-	// delete this view... we don't care about order but we do want to make
-	// sure we can garbage collect the view
-	s.views = removeElement(s.views, i)
 }
 
 // updateViewLocked recreates the view with the given options.

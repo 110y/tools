@@ -29,6 +29,14 @@ import (
 // This error is sought by mod diagnostics.
 var ErrNoModOnDisk = errors.New("go.mod file is not on disk")
 
+// A TidiedModule contains the results of running `go mod tidy` on a module.
+type TidiedModule struct {
+	// Diagnostics representing changes made by `go mod tidy`.
+	Diagnostics []*Diagnostic
+	// The bytes of the go.mod file after it was tidied.
+	TidiedContent []byte
+}
+
 // ModTidy returns the go.mod file that would be obtained by running
 // "go mod tidy". Concurrent requests are combined into a single command.
 func (s *Snapshot) ModTidy(ctx context.Context, pm *ParsedModule) (*TidiedModule, error) {
@@ -229,16 +237,16 @@ func missingModuleDiagnostics(ctx context.Context, snapshot *Snapshot, pm *Parse
 		return nil, err
 	}
 	// TODO(adonovan): opt: opportunities for parallelism abound.
-	for _, m := range metas {
+	for _, mp := range metas {
 		// Read both lists of files of this package.
 		//
 		// Parallelism is not necessary here as the files will have already been
 		// pre-read at load time.
-		goFiles, err := readFiles(ctx, snapshot, m.GoFiles)
+		goFiles, err := readFiles(ctx, snapshot, mp.GoFiles)
 		if err != nil {
 			return nil, err
 		}
-		compiledGoFiles, err := readFiles(ctx, snapshot, m.CompiledGoFiles)
+		compiledGoFiles, err := readFiles(ctx, snapshot, mp.CompiledGoFiles)
 		if err != nil {
 			return nil, err
 		}

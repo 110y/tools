@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/hooks"
 	. "golang.org/x/tools/gopls/internal/lsp/regtest"
 	"golang.org/x/tools/gopls/internal/lsp/tests/compare"
+	"golang.org/x/tools/gopls/internal/util/bug"
 
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 )
@@ -986,7 +986,7 @@ require random.com v1.2.3
 `
 			var diagnostics []protocol.Diagnostic
 			for _, d := range d.Diagnostics {
-				if d.Range.Start.Line != uint32(pos.Line) {
+				if d.Range.Start.Line != pos.Line {
 					continue
 				}
 				diagnostics = append(diagnostics, d)

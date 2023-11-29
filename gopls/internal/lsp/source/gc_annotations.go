@@ -13,16 +13,18 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/tools/gopls/internal/lsp/cache"
+	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/internal/gocommand"
 )
 
-func GCOptimizationDetails(ctx context.Context, snapshot Snapshot, m *Metadata) (map[protocol.DocumentURI][]*Diagnostic, error) {
-	if len(m.CompiledGoFiles) == 0 {
+func GCOptimizationDetails(ctx context.Context, snapshot *cache.Snapshot, mp *metadata.Package) (map[protocol.DocumentURI][]*cache.Diagnostic, error) {
+	if len(mp.CompiledGoFiles) == 0 {
 		return nil, nil
 	}
-	pkgDir := filepath.Dir(m.CompiledGoFiles[0].Path())
+	pkgDir := filepath.Dir(mp.CompiledGoFiles[0].Path())
 	outDir := filepath.Join(os.TempDir(), fmt.Sprintf("gopls-%d.details", os.Getpid()))
 
 	if err := os.MkdirAll(outDir, 0700); err != nil {
@@ -49,7 +51,7 @@ func GCOptimizationDetails(ctx context.Context, snapshot Snapshot, m *Metadata) 
 		},
 		WorkingDir: pkgDir,
 	}
-	_, err = snapshot.RunGoCommandDirect(ctx, Normal, inv)
+	_, err = snapshot.RunGoCommandDirect(ctx, cache.Normal, inv)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +59,7 @@ func GCOptimizationDetails(ctx context.Context, snapshot Snapshot, m *Metadata) 
 	if err != nil {
 		return nil, err
 	}
-	reports := make(map[protocol.DocumentURI][]*Diagnostic)
+	reports := make(map[protocol.DocumentURI][]*cache.Diagnostic)
 	opts := snapshot.Options()
 	var parseError error
 	for _, fn := range files {
@@ -81,7 +83,7 @@ func GCOptimizationDetails(ctx context.Context, snapshot Snapshot, m *Metadata) 
 	return reports, parseError
 }
 
-func parseDetailsFile(filename string, options *settings.Options) (protocol.DocumentURI, []*Diagnostic, error) {
+func parseDetailsFile(filename string, options *settings.Options) (protocol.DocumentURI, []*cache.Diagnostic, error) {
 	buf, err := os.ReadFile(filename)
 	if err != nil {
 		return "", nil, err
@@ -89,7 +91,7 @@ func parseDetailsFile(filename string, options *settings.Options) (protocol.Docu
 	var (
 		uri         protocol.DocumentURI
 		i           int
-		diagnostics []*Diagnostic
+		diagnostics []*cache.Diagnostic
 	)
 	type metadata struct {
 		File string `json:"file,omitempty"`
@@ -135,12 +137,12 @@ func parseDetailsFile(filename string, options *settings.Options) (protocol.Docu
 				Message: ri.Message,
 			})
 		}
-		diagnostic := &Diagnostic{
+		diagnostic := &cache.Diagnostic{
 			URI:      uri,
 			Range:    zeroIndexedRange(d.Range),
 			Message:  msg,
 			Severity: d.Severity,
-			Source:   OptimizationDetailsError, // d.Source is always "go compiler" as of 1.16, use our own
+			Source:   cache.OptimizationDetailsError, // d.Source is always "go compiler" as of 1.16, use our own
 			Tags:     d.Tags,
 			Related:  related,
 		}

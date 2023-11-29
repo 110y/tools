@@ -13,67 +13,31 @@ import (
 	"go/types"
 	"sync"
 
+	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
+	"golang.org/x/tools/gopls/internal/lsp/cache/methodsets"
+	"golang.org/x/tools/gopls/internal/lsp/cache/parsego"
+	"golang.org/x/tools/gopls/internal/lsp/cache/xrefs"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/lsp/source"
-	"golang.org/x/tools/gopls/internal/lsp/source/methodsets"
-	"golang.org/x/tools/gopls/internal/lsp/source/xrefs"
 )
 
 // Temporary refactoring, reversing the source import:
 // Types
 type (
 	// Metadata.
-	PackageID   = source.PackageID
-	PackagePath = source.PackagePath
-	PackageName = source.PackageName
-	ImportPath  = source.ImportPath
-	Metadata    = source.Metadata
-
-	// Diagnostics.
-	Diagnostic   = source.Diagnostic
-	SuggestedFix = source.SuggestedFix
+	PackageID   = metadata.PackageID
+	PackagePath = metadata.PackagePath
+	PackageName = metadata.PackageName
+	ImportPath  = metadata.ImportPath
 
 	// Computed objects.
-	TidiedModule   = source.TidiedModule
-	ParsedGoFile   = source.ParsedGoFile
-	ParsedModule   = source.ParsedModule
-	ParsedWorkFile = source.ParsedWorkFile
-	Package_       = source.Package // renamed to avoid conflict
-	Symbol         = source.Symbol
-
-	XrefIndex_       = source.XrefIndex // renamed to avoid conflict
-	GlobalSnapshotID = source.GlobalSnapshotID
-	InvocationFlags  = source.InvocationFlags
-	CriticalError    = source.CriticalError
-	Filterer         = source.Filterer
+	ParsedGoFile = parsego.File
 )
 
 // Values
 var (
 	// Parse Modes
-	ParseFull            = source.ParseFull
-	SkipObjectResolution = source.SkipObjectResolution
-	ParseHeader          = source.ParseHeader
-
-	// Diagnostic sources.
-	ModTidyError = source.ModTidyError
-	ListError    = source.ListError
-	ParseError   = source.ParseError
-	TypeError    = source.TypeError
-
-	// Invocation flags.
-	Normal                = source.Normal
-	AllowNetwork          = source.AllowNetwork
-	LoadWorkspace         = source.LoadWorkspace
-	WriteTemporaryModFile = source.WriteTemporaryModFile
-)
-
-// Functions
-var (
-	IsValidImport                  = source.IsValidImport
-	RemoveIntermediateTestVariants = source.RemoveIntermediateTestVariants
-	IsCommandLineArguments         = source.IsCommandLineArguments
-	NewFilterer                    = source.NewFilterer
+	ParseHeader = parsego.ParseHeader
+	ParseFull   = parsego.ParseFull
 )
 
 // A Package is the union of package metadata and type checking results.
@@ -82,8 +46,9 @@ var (
 // loadDiagnostics, because the value of the snapshot.packages map is just the
 // package handle. Fix this.
 type Package struct {
-	m   *Metadata
-	pkg *syntaxPackage
+	metadata        *metadata.Package
+	loadDiagnostics []*Diagnostic
+	pkg             *syntaxPackage
 }
 
 // syntaxPackage contains parse trees and type information for a package.
@@ -93,9 +58,9 @@ type syntaxPackage struct {
 
 	// -- outputs --
 	fset            *token.FileSet // for now, same as the snapshot's FileSet
-	goFiles         []*source.ParsedGoFile
-	compiledGoFiles []*source.ParsedGoFile
-	diagnostics     []*source.Diagnostic
+	goFiles         []*ParsedGoFile
+	compiledGoFiles []*ParsedGoFile
+	diagnostics     []*Diagnostic
 	parseErrors     []scanner.ErrorList
 	typeErrors      []types.Error
 	types           *types.Package
@@ -123,9 +88,9 @@ func (p *syntaxPackage) methodsets() *methodsets.Index {
 	return p._methodsets
 }
 
-func (p *Package) String() string { return string(p.m.ID) }
+func (p *Package) String() string { return string(p.metadata.ID) }
 
-func (p *Package) Metadata() *Metadata { return p.m }
+func (p *Package) Metadata() *metadata.Package { return p.metadata }
 
 // A loadScope defines a package loading scope for use with go/packages.
 //
@@ -150,15 +115,15 @@ func (packageLoadScope) aScope() {}
 func (moduleLoadScope) aScope()  {}
 func (viewLoadScope) aScope()    {}
 
-func (p *Package) CompiledGoFiles() []*source.ParsedGoFile {
+func (p *Package) CompiledGoFiles() []*ParsedGoFile {
 	return p.pkg.compiledGoFiles
 }
 
-func (p *Package) File(uri protocol.DocumentURI) (*source.ParsedGoFile, error) {
+func (p *Package) File(uri protocol.DocumentURI) (*ParsedGoFile, error) {
 	return p.pkg.File(uri)
 }
 
-func (pkg *syntaxPackage) File(uri protocol.DocumentURI) (*source.ParsedGoFile, error) {
+func (pkg *syntaxPackage) File(uri protocol.DocumentURI) (*ParsedGoFile, error) {
 	for _, cgf := range pkg.compiledGoFiles {
 		if cgf.URI == uri {
 			return cgf, nil
@@ -196,7 +161,7 @@ func (p *Package) GetTypesInfo() *types.Info {
 // package. It returns nil if path is not among the transitive
 // dependencies of p, or if no symbols from that package were
 // referenced during the type-checking of p.
-func (p *Package) DependencyTypes(path source.PackagePath) *types.Package {
+func (p *Package) DependencyTypes(path PackagePath) *types.Package {
 	return p.pkg.importMap[path]
 }
 
@@ -208,9 +173,9 @@ func (p *Package) GetTypeErrors() []types.Error {
 	return p.pkg.typeErrors
 }
 
-func (p *Package) DiagnosticsForFile(ctx context.Context, s source.Snapshot, uri protocol.DocumentURI) ([]*source.Diagnostic, error) {
-	var diags []*source.Diagnostic
-	for _, diag := range p.m.Diagnostics {
+func (p *Package) DiagnosticsForFile(ctx context.Context, uri protocol.DocumentURI) ([]*Diagnostic, error) {
+	var diags []*Diagnostic
+	for _, diag := range p.loadDiagnostics {
 		if diag.URI == uri {
 			diags = append(diags, diag)
 		}

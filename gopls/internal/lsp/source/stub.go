@@ -18,11 +18,13 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/analysis/stubmethods"
+	"golang.org/x/tools/gopls/internal/lsp/cache"
+	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/lsp/safetoken"
+	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/tokeninternal"
 	"golang.org/x/tools/internal/typeparams"
@@ -31,7 +33,7 @@ import (
 // stubSuggestedFixFunc returns a suggested fix to declare the missing
 // methods of the concrete type that is assigned to an interface type
 // at the cursor position.
-func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh file.Handle, rng protocol.Range) ([]protocol.TextDocumentEdit, error) {
+func stubSuggestedFixFunc(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range) ([]protocol.TextDocumentEdit, error) {
 	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 	if err != nil {
 		return nil, fmt.Errorf("GetTypedFile: %w", err)
@@ -53,7 +55,7 @@ func stubSuggestedFixFunc(ctx context.Context, snapshot Snapshot, fh file.Handle
 }
 
 // stub returns a suggested fix to declare the missing methods of si.Concrete.
-func stub(ctx context.Context, snapshot Snapshot, si *stubmethods.StubInfo) (*token.FileSet, *analysis.SuggestedFix, error) {
+func stub(ctx context.Context, snapshot *cache.Snapshot, si *stubmethods.StubInfo) (*token.FileSet, *analysis.SuggestedFix, error) {
 	// A function-local type cannot be stubbed
 	// since there's nowhere to put the methods.
 	conc := si.Concrete.Obj()
@@ -73,7 +75,7 @@ func stub(ctx context.Context, snapshot Snapshot, si *stubmethods.StubInfo) (*to
 	// Build import environment for the declaring file.
 	importEnv := make(map[ImportPath]string) // value is local name
 	for _, imp := range declPGF.File.Imports {
-		importPath := UnquoteImportPath(imp)
+		importPath := metadata.UnquoteImportPath(imp)
 		var name string
 		if imp.Name != nil {
 			name = imp.Name.Name

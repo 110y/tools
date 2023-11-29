@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"log"
@@ -31,14 +32,15 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/gopls/internal/astutil"
-	"golang.org/x/tools/gopls/internal/bug"
 	"golang.org/x/tools/gopls/internal/file"
+	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
 	"golang.org/x/tools/gopls/internal/lsp/filecache"
-	"golang.org/x/tools/gopls/internal/lsp/frob"
 	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	"golang.org/x/tools/gopls/internal/settings"
+	"golang.org/x/tools/gopls/internal/util/astutil"
+	"golang.org/x/tools/gopls/internal/util/bug"
+	"golang.org/x/tools/gopls/internal/util/frob"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/event/tag"
 	"golang.org/x/tools/internal/facts"
@@ -171,7 +173,7 @@ const AnalysisProgressTitle = "Analyzing Dependencies"
 // The analyzers list must be duplicate free; order does not matter.
 //
 // Notifications of progress may be sent to the optional reporter.
-func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, analyzers []*settings.Analyzer, reporter *progress.Tracker) ([]*Diagnostic, error) {
+func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, analyzers []*settings.Analyzer, reporter *progress.Tracker) ([]*Diagnostic, error) {
 	start := time.Now() // for progress reporting
 
 	var tagStr string // sorted comma-separated list of PackageIDs
@@ -193,7 +195,7 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 	toSrc := make(map[*analysis.Analyzer]*settings.Analyzer)
 	var enabled []*analysis.Analyzer // enabled subset + transitive requirements
 	for _, a := range analyzers {
-		if a.IsEnabled(snapshot.Options()) {
+		if a.IsEnabled(s.Options()) {
 			toSrc[a.Analyzer] = a
 			enabled = append(enabled, a.Analyzer)
 		}
@@ -244,8 +246,8 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 	makeNode = func(from *analysisNode, id PackageID) (*analysisNode, error) {
 		an, ok := nodes[id]
 		if !ok {
-			m := snapshot.Metadata(id)
-			if m == nil {
+			mp := s.Metadata(id)
+			if mp == nil {
 				return nil, bug.Errorf("no metadata for %s", id)
 			}
 
@@ -253,7 +255,7 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 
 			an = &analysisNode{
 				fset:        fset,
-				m:           m,
+				mp:          mp,
 				analyzers:   facty, // all nodes run at least the facty analyzers
 				allDeps:     make(map[PackagePath]*analysisNode),
 				exportDeps:  make(map[PackagePath]*analysisNode),
@@ -264,8 +266,8 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 			// -- recursion --
 
 			// Build subgraphs for dependencies.
-			an.succs = make(map[PackageID]*analysisNode, len(m.DepsByPkgPath))
-			for _, depID := range m.DepsByPkgPath {
+			an.succs = make(map[PackageID]*analysisNode, len(mp.DepsByPkgPath))
+			for _, depID := range mp.DepsByPkgPath {
 				dep, err := makeNode(an, depID)
 				if err != nil {
 					return nil, err
@@ -281,7 +283,7 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 
 			// -- postorder --
 
-			an.allDeps[m.PkgPath] = an // add self entry (reflexive transitive closure)
+			an.allDeps[mp.PkgPath] = an // add self entry (reflexive transitive closure)
 
 			// Add leaf nodes (no successors) directly to queue.
 			if len(an.succs) == 0 {
@@ -291,9 +293,9 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 			// Load the contents of each compiled Go file through
 			// the snapshot's cache. (These are all cache hits as
 			// files are pre-loaded following packages.Load)
-			an.files = make([]file.Handle, len(m.CompiledGoFiles))
-			for i, uri := range m.CompiledGoFiles {
-				fh, err := snapshot.ReadFile(ctx, uri)
+			an.files = make([]file.Handle, len(mp.CompiledGoFiles))
+			for i, uri := range mp.CompiledGoFiles {
+				fh, err := s.ReadFile(ctx, uri)
 				if err != nil {
 					return nil, err
 				}
@@ -323,8 +325,8 @@ func (snapshot *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]unit, 
 	// Now that we have read all files,
 	// we no longer need the snapshot.
 	// (but options are needed for progress reporting)
-	options := snapshot.Options()
-	snapshot = nil
+	options := s.Options()
+	s = nil
 
 	// Progress reporting. If supported, gopls reports progress on analysis
 	// passes that are taking a long time.
@@ -504,7 +506,7 @@ func (an *analysisNode) decrefPreds() {
 // type-checking and analyzing syntax (miss).
 type analysisNode struct {
 	fset            *token.FileSet              // file set shared by entire batch (DAG)
-	m               *Metadata                   // metadata for this package
+	mp              *metadata.Package           // metadata for this package
 	files           []file.Handle               // contents of CompiledGoFiles
 	analyzers       []*analysis.Analyzer        // set of analyzers to run
 	preds           []*analysisNode             // graph edges:
@@ -521,19 +523,19 @@ type analysisNode struct {
 	typesErr  error          // an error producing type information
 }
 
-func (an *analysisNode) String() string { return string(an.m.ID) }
+func (an *analysisNode) String() string { return string(an.mp.ID) }
 
 // _import imports this node's types.Package from export data, if not already done.
 // Precondition: analysis was a success.
 // Postcondition: an.types and an.exportDeps are populated.
 func (an *analysisNode) _import() (*types.Package, error) {
 	an.typesOnce.Do(func() {
-		if an.m.PkgPath == "unsafe" {
+		if an.mp.PkgPath == "unsafe" {
 			an.types = types.Unsafe
 			return
 		}
 
-		an.types = types.NewPackage(string(an.m.PkgPath), string(an.m.Name))
+		an.types = types.NewPackage(string(an.mp.PkgPath), string(an.mp.Name))
 
 		// getPackages recursively imports each dependency
 		// referenced by the export data, in parallel.
@@ -544,7 +546,7 @@ func (an *analysisNode) _import() (*types.Package, error) {
 				dep, ok := an.allDeps[path]
 				if !ok {
 					// This early return bypasses Wait; that's ok.
-					return fmt.Errorf("%s: unknown dependency %q", an.m, path)
+					return fmt.Errorf("%s: unknown dependency %q", an.mp, path)
 				}
 				an.exportDeps[path] = dep // record, for later fact decoding
 				if dep == an {
@@ -566,12 +568,12 @@ func (an *analysisNode) _import() (*types.Package, error) {
 			}
 			return g.Wait()
 		}
-		pkg, err := gcimporter.IImportShallow(an.fset, getPackages, an.summary.Export, string(an.m.PkgPath), bug.Reportf)
+		pkg, err := gcimporter.IImportShallow(an.fset, getPackages, an.summary.Export, string(an.mp.PkgPath), bug.Reportf)
 		if err != nil {
-			an.typesErr = bug.Errorf("%s: invalid export data: %v", an.m, err)
+			an.typesErr = bug.Errorf("%s: invalid export data: %v", an.mp, err)
 			an.types = nil
 		} else if pkg != an.types {
-			log.Fatalf("%s: inconsistent packages", an.m)
+			log.Fatalf("%s: inconsistent packages", an.mp)
 		}
 	})
 	return an.types, an.typesErr
@@ -682,7 +684,7 @@ func (an *analysisNode) runCached(ctx context.Context) (*analyzeSummary, error) 
 
 			data := analyzeSummaryCodec.Encode(summary)
 			if false {
-				log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.m.ID)
+				log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.mp.ID)
 			}
 			if err := filecache.Set(cacheKind, key, data); err != nil {
 				event.Error(ctx, "internal error updating analysis shared cache", err)
@@ -716,22 +718,22 @@ func (an *analysisNode) cacheKey() [sha256.Size]byte {
 	}
 
 	// package metadata
-	m := an.m
-	fmt.Fprintf(hasher, "package: %s %s %s\n", m.ID, m.Name, m.PkgPath)
+	mp := an.mp
+	fmt.Fprintf(hasher, "package: %s %s %s\n", mp.ID, mp.Name, mp.PkgPath)
 	// We can ignore m.DepsBy{Pkg,Import}Path: although the logic
 	// uses those fields, we account for them by hashing vdeps.
 
 	// type sizes
-	wordSize := an.m.TypesSizes.Sizeof(types.Typ[types.Int])
-	maxAlign := an.m.TypesSizes.Alignof(types.NewPointer(types.Typ[types.Int64]))
+	wordSize := an.mp.TypesSizes.Sizeof(types.Typ[types.Int])
+	maxAlign := an.mp.TypesSizes.Alignof(types.NewPointer(types.Typ[types.Int64]))
 	fmt.Fprintf(hasher, "sizes: %d %d\n", wordSize, maxAlign)
 
 	// metadata errors: used for 'compiles' field
-	fmt.Fprintf(hasher, "errors: %d", len(m.Errors))
+	fmt.Fprintf(hasher, "errors: %d", len(mp.Errors))
 
 	// module Go version
-	if m.Module != nil && m.Module.GoVersion != "" {
-		fmt.Fprintf(hasher, "go %s\n", m.Module.GoVersion)
+	if mp.Module != nil && mp.Module.GoVersion != "" {
+		fmt.Fprintf(hasher, "go %s\n", mp.Module.GoVersion)
 	}
 
 	// file names and contents
@@ -748,7 +750,7 @@ func (an *analysisNode) cacheKey() [sha256.Size]byte {
 	sort.Strings(depIDs) // TODO(adonovan): avoid conversions by using slices.Sort[PackageID]
 	for _, depID := range depIDs {
 		vdep := an.succs[PackageID(depID)]
-		fmt.Fprintf(hasher, "dep: %s\n", vdep.m.PkgPath)
+		fmt.Fprintf(hasher, "dep: %s\n", vdep.mp.PkgPath)
 		fmt.Fprintf(hasher, "export: %s\n", vdep.summary.DeepExportHash)
 
 		// action results: errors and facts
@@ -795,7 +797,7 @@ func (an *analysisNode) run(ctx context.Context) (*analyzeSummary, error) {
 				// as cached ASTs require the global FileSet.
 				// ast.Object resolution is unfortunately an implied part of the
 				// go/analysis contract.
-				pgf, err := parseGoImpl(ctx, an.fset, fh, ParseFull&^SkipObjectResolution, false)
+				pgf, err := parseGoImpl(ctx, an.fset, fh, ParseFull&^parser.SkipObjectResolution, false)
 				parsed[i] = pgf
 				return err
 			})
@@ -910,19 +912,19 @@ func (an *analysisNode) run(ctx context.Context) (*analyzeSummary, error) {
 
 // Postcondition: analysisPackage.types and an.exportDeps are populated.
 func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
-	m := an.m
+	mp := an.mp
 
 	if false { // debugging
-		log.Println("typeCheck", m.ID)
+		log.Println("typeCheck", mp.ID)
 	}
 
 	pkg := &analysisPackage{
-		m:        m,
+		mp:       mp,
 		fset:     an.fset,
 		parsed:   parsed,
 		files:    make([]*ast.File, len(parsed)),
-		compiles: len(m.Errors) == 0, // false => list error
-		types:    types.NewPackage(string(m.PkgPath), string(m.Name)),
+		compiles: len(mp.Errors) == 0, // false => list error
+		types:    types.NewPackage(string(mp.PkgPath), string(mp.Name)),
 		typesInfo: &types.Info{
 			Types:      make(map[ast.Expr]types.TypeAndValue),
 			Defs:       make(map[*ast.Ident]types.Object),
@@ -931,13 +933,13 @@ func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
 			Selections: make(map[*ast.SelectorExpr]*types.Selection),
 			Scopes:     make(map[ast.Node]*types.Scope),
 		},
-		typesSizes: m.TypesSizes,
+		typesSizes: mp.TypesSizes,
 	}
 	typeparams.InitInstanceInfo(pkg.typesInfo)
 	versions.InitFileVersions(pkg.typesInfo)
 
 	// Unsafe has no syntax.
-	if m.PkgPath == "unsafe" {
+	if mp.PkgPath == "unsafe" {
 		pkg.types = types.Unsafe
 		return pkg
 	}
@@ -956,7 +958,7 @@ func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
 	}
 
 	cfg := &types.Config{
-		Sizes: m.TypesSizes,
+		Sizes: mp.TypesSizes,
 		Error: func(e error) {
 			pkg.compiles = false // type error
 
@@ -978,7 +980,7 @@ func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
 			// are swallowed, these packages may be confusing.
 
 			// Map ImportPath to ID.
-			id, ok := m.DepsByImpPath[ImportPath(importPath)]
+			id, ok := mp.DepsByImpPath[ImportPath(importPath)]
 			if !ok {
 				// The import syntax is inconsistent with the metadata.
 				// This could be because the import declaration was
@@ -1000,7 +1002,7 @@ func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
 			}
 
 			// (Duplicates logic from check.go.)
-			if !IsValidImport(an.m.PkgPath, dep.m.PkgPath) {
+			if !metadata.IsValidImport(an.mp.PkgPath, dep.mp.PkgPath) {
 				return nil, fmt.Errorf("invalid use of internal package %s", importPath)
 			}
 
@@ -1009,8 +1011,8 @@ func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
 	}
 
 	// Set Go dialect.
-	if m.Module != nil && m.Module.GoVersion != "" {
-		goVersion := "go" + m.Module.GoVersion
+	if mp.Module != nil && mp.Module.GoVersion != "" {
+		goVersion := "go" + mp.Module.GoVersion
 		// types.NewChecker panics if GoVersion is invalid.
 		// An unparsable mod file should probably stop us
 		// before we get here, but double check just in case.
@@ -1050,21 +1052,21 @@ func (an *analysisNode) typeCheck(parsed []*ParsedGoFile) *analysisPackage {
 	// this package and each dependency referenced by it.
 	// Also, populate exportDeps.
 	hash := sha256.New()
-	fmt.Fprintf(hash, "%s %d\n", m.PkgPath, len(export))
+	fmt.Fprintf(hash, "%s %d\n", mp.PkgPath, len(export))
 	hash.Write(export)
 	paths, err := readShallowManifest(export)
 	if err != nil {
 		log.Fatalf("internal error: bad export data: %v", err)
 	}
 	for _, path := range paths {
-		dep, ok := an.allDeps[PackagePath(path)]
+		dep, ok := an.allDeps[path]
 		if !ok {
 			log.Fatalf("%s: missing dependency: %q", an, path)
 		}
-		fmt.Fprintf(hash, "%s %s\n", dep.m.PkgPath, dep.summary.DeepExportHash)
-		an.exportDeps[PackagePath(path)] = dep
+		fmt.Fprintf(hash, "%s %s\n", dep.mp.PkgPath, dep.summary.DeepExportHash)
+		an.exportDeps[path] = dep
 	}
-	an.exportDeps[m.PkgPath] = an // self
+	an.exportDeps[mp.PkgPath] = an // self
 	hash.Sum(pkg.deepExportHash[:0])
 
 	return pkg
@@ -1098,7 +1100,7 @@ func readShallowManifest(export []byte) ([]PackagePath, error) {
 // analysisPackage contains information about a package, including
 // syntax trees, used transiently during its type-checking and analysis.
 type analysisPackage struct {
-	m              *Metadata
+	mp             *metadata.Package
 	fset           *token.FileSet // local to this package
 	parsed         []*ParsedGoFile
 	files          []*ast.File // same as parsed[i].File
@@ -1131,7 +1133,7 @@ type action struct {
 }
 
 func (act *action) String() string {
-	return fmt.Sprintf("%s@%s", act.a.Name, act.pkg.m.ID)
+	return fmt.Sprintf("%s@%s", act.a.Name, act.pkg.mp.ID)
 }
 
 // execActions executes a set of action graph nodes in parallel.
@@ -1195,7 +1197,7 @@ func (act *action) exec() (interface{}, *actionSummary, error) {
 
 	// Were there list/parse/type errors that might prevent analysis?
 	if !pkg.compiles && !analyzer.RunDespiteErrors {
-		return nil, nil, fmt.Errorf("skipping analysis %q because package %q does not compile", analyzer.Name, pkg.m.ID)
+		return nil, nil, fmt.Errorf("skipping analysis %q because package %q does not compile", analyzer.Name, pkg.mp.ID)
 	}
 	// Inv: package is well-formed enough to proceed with analysis.
 
@@ -1234,7 +1236,7 @@ func (act *action) exec() (interface{}, *actionSummary, error) {
 			return nil, nil
 		}
 
-		id, ok := pkg.m.DepsByPkgPath[PackagePath(pkgPath)]
+		id, ok := pkg.mp.DepsByPkgPath[PackagePath(pkgPath)]
 		if !ok {
 			// This may mean imp was synthesized by the type
 			// checker because it failed to import it for any reason

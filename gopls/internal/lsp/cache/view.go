@@ -25,8 +25,8 @@ import (
 	"golang.org/x/mod/semver"
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/pathutil"
 	"golang.org/x/tools/gopls/internal/settings"
+	"golang.org/x/tools/gopls/internal/util/pathutil"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/gocommand"
@@ -44,7 +44,7 @@ import (
 // Folders must not be mutated, as they may be shared across multiple views.
 type Folder struct {
 	Dir     protocol.DocumentURI
-	Name    string
+	Name    string // decorative name for UI; not necessarily unique
 	Options *settings.Options
 }
 
@@ -84,6 +84,9 @@ type View struct {
 	// should be removed.
 	knownFilesMu sync.Mutex
 	knownFiles   map[protocol.DocumentURI]bool
+
+	// ignoreFilter is used for fast checking of ignored files.
+	ignoreFilter *ignoreFilter
 
 	// initCancelFirstAttempt can be used to terminate the view's first
 	// attempt at initialization.
@@ -501,6 +504,8 @@ func viewEnv(v *View) string {
 	return buf.String()
 }
 
+// RunProcessEnvFunc runs fn with the process env for this snapshot's view.
+// Note: the process env contains cached module and filesystem state.
 func (s *Snapshot) RunProcessEnvFunc(ctx context.Context, fn func(context.Context, *imports.Options) error) error {
 	return s.view.importsState.runProcessEnvFunc(ctx, s, fn)
 }
@@ -669,22 +674,7 @@ func (s *Snapshot) IgnoredFile(uri protocol.DocumentURI) bool {
 		}
 	}
 
-	s.ignoreFilterOnce.Do(func() {
-		var dirs []string
-		if len(s.view.workspaceModFiles) == 0 {
-			for _, entry := range filepath.SplitList(s.view.gopath) {
-				dirs = append(dirs, filepath.Join(entry, "src"))
-			}
-		} else {
-			dirs = append(dirs, s.view.gomodcache)
-			for m := range s.view.workspaceModFiles {
-				dirs = append(dirs, filepath.Dir(m.Path()))
-			}
-		}
-		s.ignoreFilter = newIgnoreFilter(dirs)
-	})
-
-	return s.ignoreFilter.ignored(uri.Path())
+	return s.view.ignoreFilter.ignored(uri.Path())
 }
 
 // An ignoreFilter implements go list's exclusion rules via its 'ignored' method.
@@ -942,8 +932,8 @@ func (v *View) Invalidate(ctx context.Context, changed StateChange) (*Snapshot, 
 }
 
 func getViewDefinition(ctx context.Context, runner *gocommand.Runner, fs file.Source, folder *Folder) (*viewDefinition, error) {
-	if err := checkPathCase(folder.Dir.Path()); err != nil {
-		return nil, fmt.Errorf("invalid workspace folder path: %w; check that the casing of the configured workspace folder path agrees with the casing reported by the operating system", err)
+	if err := checkPathValid(folder.Dir.Path()); err != nil {
+		return nil, fmt.Errorf("invalid workspace folder path: %w; check that the spelling of the configured workspace folder path agrees with the spelling reported by the operating system", err)
 	}
 	def := new(viewDefinition)
 	var err error
@@ -1069,10 +1059,18 @@ func findRootPattern(ctx context.Context, dir, basename string, fs file.Source) 
 	return "", nil
 }
 
-// OS-specific path case check, for case-insensitive filesystems.
-var checkPathCase = defaultCheckPathCase
+// checkPathValid performs an OS-specific path validity check. The
+// implementation varies for filesystems that are case-insensitive
+// (e.g. macOS, Windows), and for those that disallow certain file
+// names (e.g. path segments ending with a period on Windows, or
+// reserved names such as "com"; see
+// https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file).
+var checkPathValid = defaultCheckPathValid
 
-func defaultCheckPathCase(path string) error {
+// CheckPathValid checks whether a directory is suitable as a workspace folder.
+func CheckPathValid(dir string) error { return checkPathValid(dir) }
+
+func defaultCheckPathValid(path string) error {
 	return nil
 }
 

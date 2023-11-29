@@ -11,10 +11,10 @@ import (
 	"regexp"
 	"testing"
 
-	"golang.org/x/tools/gopls/internal/lsp"
 	"golang.org/x/tools/gopls/internal/lsp/command"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
 	. "golang.org/x/tools/gopls/internal/lsp/regtest"
+	"golang.org/x/tools/gopls/internal/server"
 )
 
 // Test that gopls prompts for telemetry only when it is supposed to.
@@ -44,8 +44,8 @@ func main() {
 					WithOptions(
 						Modes(Default), // no need to run this in all modes
 						EnvVars{
-							lsp.GoplsConfigDirEnvvar:        t.TempDir(),
-							lsp.FakeTelemetryModefileEnvvar: modeFile,
+							server.GoplsConfigDirEnvvar:        t.TempDir(),
+							server.FakeTelemetryModefileEnvvar: modeFile,
 						},
 						Settings{
 							"telemetryPrompt": enabled,
@@ -57,7 +57,7 @@ func main() {
 							expectation = Not(expectation)
 						}
 						env.OnceMet(
-							CompletedWork(lsp.TelemetryPromptWorkTitle, 1, true),
+							CompletedWork(server.TelemetryPromptWorkTitle, 1, true),
 							expectation,
 						)
 					})
@@ -82,16 +82,17 @@ func main() {
 `
 
 	tests := []struct {
+		name     string // subtest name
 		response string // response to choose for the telemetry dialog
 		wantMode string // resulting telemetry mode
 		wantMsg  string // substring contained in the follow-up popup (if empty, no popup is expected)
 	}{
-		{lsp.TelemetryYes, "on", "uploading is now enabled"},
-		{lsp.TelemetryNo, "", ""},
-		{"", "", ""},
+		{"yes", server.TelemetryYes, "on", "uploading is now enabled"},
+		{"no", server.TelemetryNo, "", ""},
+		{"empty", "", "", ""},
 	}
 	for _, test := range tests {
-		t.Run(fmt.Sprintf("response=%s", test.response), func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			modeFile := filepath.Join(t.TempDir(), "mode")
 			msgRE := regexp.MustCompile(".*Would you like to enable Go telemetry?")
 			respond := func(m *protocol.ShowMessageRequestParams) (*protocol.MessageActionItem, error) {
@@ -110,8 +111,8 @@ func main() {
 			WithOptions(
 				Modes(Default), // no need to run this in all modes
 				EnvVars{
-					lsp.GoplsConfigDirEnvvar:        t.TempDir(),
-					lsp.FakeTelemetryModefileEnvvar: modeFile,
+					server.GoplsConfigDirEnvvar:        t.TempDir(),
+					server.FakeTelemetryModefileEnvvar: modeFile,
 				},
 				Settings{
 					"telemetryPrompt": true,
@@ -123,7 +124,7 @@ func main() {
 					postConditions = append(postConditions, ShownMessage(test.wantMsg))
 				}
 				env.OnceMet(
-					CompletedWork(lsp.TelemetryPromptWorkTitle, 1, true),
+					CompletedWork(server.TelemetryPromptWorkTitle, 1, true),
 					postConditions...,
 				)
 				gotMode := ""
@@ -165,8 +166,8 @@ func main() {
 		WithOptions(
 			Modes(Default), // no need to run this in all modes
 			EnvVars{
-				lsp.GoplsConfigDirEnvvar:        configDir,
-				lsp.FakeTelemetryModefileEnvvar: modeFile,
+				server.GoplsConfigDirEnvvar:        configDir,
+				server.FakeTelemetryModefileEnvvar: modeFile,
 			},
 			Settings{
 				"telemetryPrompt": true,
@@ -178,7 +179,7 @@ func main() {
 				expectation = Not(expectation)
 			}
 			env.OnceMet(
-				CompletedWork(lsp.TelemetryPromptWorkTitle, 1, true),
+				CompletedWork(server.TelemetryPromptWorkTitle, 1, true),
 				expectation,
 			)
 		})
@@ -202,8 +203,8 @@ func main() {
 	WithOptions(
 		Modes(Default), // no need to run this in all modes
 		EnvVars{
-			lsp.GoplsConfigDirEnvvar:        t.TempDir(),
-			lsp.FakeTelemetryModefileEnvvar: modeFile,
+			server.GoplsConfigDirEnvvar:        t.TempDir(),
+			server.FakeTelemetryModefileEnvvar: modeFile,
 		},
 		Settings{
 			// off because we are testing
@@ -224,7 +225,7 @@ func main() {
 		}
 		expectation := ShownMessageRequest(".*Would you like to enable Go telemetry?")
 		env.OnceMet(
-			CompletedWork(lsp.TelemetryPromptWorkTitle, 2, true),
+			CompletedWork(server.TelemetryPromptWorkTitle, 2, true),
 			expectation,
 		)
 	})
