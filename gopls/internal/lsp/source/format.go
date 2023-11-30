@@ -19,7 +19,7 @@ import (
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/lsp/cache"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/lsp/safetoken"
+	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
@@ -332,8 +332,4 @@ func protocolEditsFromSource(src []byte, edits []diff.Edit) ([]protocol.TextEdit
 		})
 	}
 	return result, nil
-}
-
-func ToProtocolEdits(m *protocol.Mapper, edits []diff.Edit) ([]protocol.TextEdit, error) {
-	return protocol.EditsFromDiffEdits(m, edits)
 }

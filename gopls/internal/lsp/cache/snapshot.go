@@ -31,18 +31,18 @@ import (
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/types/objectpath"
 	"golang.org/x/tools/gopls/internal/file"
-	"golang.org/x/tools/gopls/internal/immutable"
+	"golang.org/x/tools/gopls/internal/filecache"
 	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
 	"golang.org/x/tools/gopls/internal/lsp/cache/methodsets"
 	"golang.org/x/tools/gopls/internal/lsp/cache/typerefs"
 	"golang.org/x/tools/gopls/internal/lsp/cache/xrefs"
 	"golang.org/x/tools/gopls/internal/lsp/command"
-	"golang.org/x/tools/gopls/internal/lsp/filecache"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
-	"golang.org/x/tools/gopls/internal/persistent"
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/util/bug"
+	"golang.org/x/tools/gopls/internal/util/immutable"
 	"golang.org/x/tools/gopls/internal/util/pathutil"
+	"golang.org/x/tools/gopls/internal/util/persistent"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/internal/constraints"
 	"golang.org/x/tools/internal/event"
@@ -1717,7 +1717,7 @@ func (s *Snapshot) reloadOrphanedOpenFiles(ctx context.Context) error {
 // TODO(rfindley): reconcile the definition of "orphaned" here with
 // reloadOrphanedFiles. The latter does not include files with
 // command-line-arguments packages.
-func (s *Snapshot) OrphanedFileDiagnostics(ctx context.Context) (map[protocol.DocumentURI]*Diagnostic, error) {
+func (s *Snapshot) OrphanedFileDiagnostics(ctx context.Context) (map[protocol.DocumentURI][]*Diagnostic, error) {
 	if err := s.awaitLoaded(ctx); err != nil {
 		return nil, err
 	}
@@ -1763,7 +1763,9 @@ searchOverlays:
 		}
 	}
 
-	diagnostics := make(map[protocol.DocumentURI]*Diagnostic)
+	// Note: diagnostics holds a slice for consistency with other diagnostic
+	// funcs.
+	diagnostics := make(map[protocol.DocumentURI][]*Diagnostic)
 	for _, fh := range files {
 		// Only warn about orphaned files if the file is well-formed enough to
 		// actually be part of a package.
@@ -1914,7 +1916,7 @@ https://github.com/golang/tools/blob/master/gopls/doc/settings.md#buildflags-str
 				bug.Reportf("failed to bundle quick fixes for %v", d)
 			}
 			// Only report diagnostics if we detect an actual exclusion.
-			diagnostics[fh.URI()] = d
+			diagnostics[fh.URI()] = append(diagnostics[fh.URI()], d)
 		}
 	}
 	return diagnostics, nil
