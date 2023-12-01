@@ -30,7 +30,7 @@ import (
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/util/browser"
 	bugpkg "golang.org/x/tools/gopls/internal/util/bug"
-	"golang.org/x/tools/internal/constraints"
+	"golang.org/x/tools/gopls/internal/util/constraints"
 	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/jsonrpc2"
 	"golang.org/x/tools/internal/tool"
@@ -298,6 +298,7 @@ func (app *Application) featureCommands() []tool.Application {
 		&check{app: app},
 		&codelens{app: app},
 		&definition{app: app},
+		&execute{app: app},
 		&foldingRanges{app: app},
 		&format{app: app},
 		&highlight{app: app},
