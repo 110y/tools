@@ -70,9 +70,10 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			// TODO(golang/go#36602): add better handling for methods, if we enable methods
 			// we will get false positives if a struct is potentially implementing
 			// an interface.
-			if f.Recv != nil {
-				return
-			}
+			// 110y: Make this analyzer work with methods.
+			// if f.Recv != nil {
+			//     return
+			// }
 
 			// Ignore functions in _test.go files to reduce false positives.
 			if file := pass.Fset.File(n.Pos()); file != nil && strings.HasSuffix(file.Name(), "_test.go") {
