@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
-	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
@@ -76,9 +75,10 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			// }
 
 			// Ignore functions in _test.go files to reduce false positives.
-			if file := pass.Fset.File(n.Pos()); file != nil && strings.HasSuffix(file.Name(), "_test.go") {
-				return
-			}
+			// 110y: Make this analyzer work even test files.
+			// if file := pass.Fset.File(n.Pos()); file != nil && strings.HasSuffix(file.Name(), "_test.go") {
+			//     return
+			// }
 		case *ast.FuncLit:
 			fieldList, body = f.Type.Params, f.Body
 		}
@@ -91,7 +91,8 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		case *ast.ReturnStmt:
 			if !inspectWrappers {
 				// Ignore functions that only contain a return statement to reduce false positives.
-				return
+				// 110y: Make this analyzer work even if the function only contains a return statement.
+				// return
 			}
 		case *ast.ExprStmt:
 			callExpr, ok := expr.X.(*ast.CallExpr)
