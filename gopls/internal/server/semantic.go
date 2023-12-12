@@ -97,7 +97,7 @@ func (s *server) semanticTokens(ctx context.Context, td protocol.TextDocumentIde
 		var err error
 		start, end, err = pgf.RangePos(*rng)
 		if err != nil {
-			return nil, fmt.Errorf("range span (%w) error for %s", err, pgf.File.Name)
+			return nil, err // e.g. invalid range
 		}
 	} else {
 		tok := pgf.Tok
@@ -373,7 +373,7 @@ func (e *encoded) inspector(n ast.Node) bool {
 	case *ast.IncDecStmt:
 		e.token(x.TokPos, len(x.Tok.String()), tokOperator, nil)
 	case *ast.IndexExpr:
-	case *typeparams.IndexListExpr:
+	case *ast.IndexListExpr:
 	case *ast.InterfaceType:
 		e.token(x.Interface, len("interface"), tokKeyword, nil)
 	case *ast.KeyValueExpr:
@@ -509,7 +509,7 @@ func (e *encoded) ident(x *ast.Ident) {
 		var mods []string
 		if _, ok := y.Type().(*types.Basic); ok {
 			mods = []string{"defaultLibrary"}
-		} else if _, ok := y.Type().(*typeparams.TypeParam); ok {
+		} else if _, ok := y.Type().(*types.TypeParam); ok {
 			tok(x.Pos(), len(x.String()), tokTypeParam, mods)
 			break
 		}
@@ -593,9 +593,8 @@ func (e *encoded) unkIdent(x *ast.Ident) (tokenType, []string) {
 		*ast.ReturnStmt, *ast.ChanType, *ast.SendStmt,
 		*ast.ForStmt,      // possibly incomplete
 		*ast.IfStmt,       /* condition */
-		*ast.KeyValueExpr: // either key or value
-		return tokVariable, nil
-	case *typeparams.IndexListExpr:
+		*ast.KeyValueExpr, // either key or value
+		*ast.IndexListExpr:
 		return tokVariable, nil
 	case *ast.Ellipsis:
 		return tokType, nil

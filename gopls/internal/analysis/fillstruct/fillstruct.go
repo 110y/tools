@@ -29,7 +29,6 @@ import (
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/fuzzy"
-	"golang.org/x/tools/internal/typeparams"
 )
 
 const Doc = `note incomplete struct initializations
@@ -345,6 +344,8 @@ func indent(str, ind []byte) []byte {
 //
 // The reasoning here is that users will call fillstruct with the intention of
 // initializing the struct, in which case setting these fields to nil has no effect.
+//
+// populateValue returns nil if the value cannot be filled.
 func populateValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 	switch u := typ.Underlying().(type) {
 	case *types.Basic:
@@ -357,6 +358,8 @@ func populateValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 			return &ast.BasicLit{Kind: token.STRING, Value: `""`}
 		case u.Kind() == types.UnsafePointer:
 			return ast.NewIdent("nil")
+		case u.Kind() == types.Invalid:
+			return nil
 		default:
 			panic(fmt.Sprintf("unknown basic type %v", u))
 		}
@@ -478,14 +481,18 @@ func populateValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 				},
 			}
 		default:
+			x := populateValue(f, pkg, u.Elem())
+			if x == nil {
+				return nil
+			}
 			return &ast.UnaryExpr{
 				Op: token.AND,
-				X:  populateValue(f, pkg, u.Elem()),
+				X:  x,
 			}
 		}
 
 	case *types.Interface:
-		if param, ok := typ.(*typeparams.TypeParam); ok {
+		if param, ok := typ.(*types.TypeParam); ok {
 			// *new(T) is the zero value of a type parameter T.
 			// TODO(adonovan): one could give a more specific zero
 			// value if the type has a core type that is, say,

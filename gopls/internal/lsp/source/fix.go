@@ -130,9 +130,11 @@ func suggestedFixToEdits(ctx context.Context, snapshot *cache.Snapshot, fset *to
 		if err != nil {
 			return nil, err
 		}
-		te.Edits = append(te.Edits, protocol.TextEdit{
-			Range:   rng,
-			NewText: string(edit.NewText),
+		te.Edits = append(te.Edits, protocol.Or_TextDocumentEdit_edits_Elem{
+			Value: protocol.TextEdit{
+				Range:   rng,
+				NewText: string(edit.NewText),
+			},
 		})
 	}
 	var edits []protocol.TextDocumentEdit
@@ -165,7 +167,7 @@ func addEmbedImport(ctx context.Context, snapshot *cache.Snapshot, fh file.Handl
 	for _, e := range protoEdits {
 		start, end, err := pgf.RangePos(e.Range)
 		if err != nil {
-			return nil, fmt.Errorf("map range: %w", err)
+			return nil, err // e.g. invalid range
 		}
 		edits = append(edits, analysis.TextEdit{
 			Pos:     start,

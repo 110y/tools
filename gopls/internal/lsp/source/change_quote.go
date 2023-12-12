@@ -27,8 +27,7 @@ import (
 func ConvertStringLiteral(pgf *ParsedGoFile, fh file.Handle, rng protocol.Range) (protocol.CodeAction, bool) {
 	startPos, endPos, err := pgf.RangePos(rng)
 	if err != nil {
-		bug.Reportf("(file=%v).RangePos(%v) failed: %v", pgf.URI, rng, err)
-		return protocol.CodeAction{}, false
+		return protocol.CodeAction{}, false // e.g. invalid range
 	}
 	path, _ := astutil.PathEnclosingInterval(pgf.File, startPos, endPos)
 	lit, ok := path[0].(*ast.BasicLit)
@@ -86,7 +85,7 @@ func ConvertStringLiteral(pgf *ParsedGoFile, fh file.Handle, rng protocol.Range)
 							Version:                fh.Version(),
 							TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: fh.URI()},
 						},
-						Edits: pedits,
+						Edits: protocol.AsAnnotatedTextEdits(pedits),
 					},
 				},
 			},

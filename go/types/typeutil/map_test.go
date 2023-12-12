@@ -178,10 +178,6 @@ func TestMap(t *testing.T) {
 }
 
 func TestMapGenerics(t *testing.T) {
-	if !typeparams.Enabled {
-		t.Skip("type params are not enabled at this Go version")
-	}
-
 	const src = `
 package p
 
@@ -281,7 +277,7 @@ var Issue56048b = Issue56048_Ib.m
 		CI      = C.Underlying().(*types.Interface)
 		I       = scope.Lookup("I").Type()
 		II      = I.Underlying().(*types.Interface)
-		U       = CI.EmbeddedType(0).(*typeparams.Union)
+		U       = CI.EmbeddedType(0).(*types.Union)
 		Fa1     = scope.Lookup("Fa1").Type().(*types.Signature)
 		Fa2     = scope.Lookup("Fa2").Type().(*types.Signature)
 		Fa1P    = typeparams.ForSignature(Fa1).At(0)
