@@ -34,7 +34,6 @@ import (
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/tokeninternal"
-	"golang.org/x/tools/internal/typeparams"
 )
 
 // HoverJSON contains information used by hover. It is also the JSON returned
@@ -273,7 +272,7 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 	{
 		linkMeta = findFileInDeps(snapshot, pkg.Metadata(), declPGF.URI)
 		if linkMeta == nil {
-			return protocol.Range{}, nil, bug.Errorf("no metadata for %s", declPGF.URI)
+			return protocol.Range{}, nil, bug.Errorf("no package data for %s", declPGF.URI)
 		}
 
 		// For package names, we simply link to their imported package.
@@ -283,7 +282,10 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 			impID := linkMeta.DepsByPkgPath[PackagePath(pkgName.Imported().Path())]
 			linkMeta = snapshot.Metadata(impID)
 			if linkMeta == nil {
-				return protocol.Range{}, nil, bug.Errorf("no metadata for %s", declPGF.URI)
+				// Broken imports have fake package paths, so it is not a bug if we
+				// don't have metadata. As of writing, there is no way to distinguish
+				// broken imports from a true bug where expected metadata is missing.
+				return protocol.Range{}, nil, fmt.Errorf("no package data for %s", declPGF.URI)
 			}
 		} else {
 			// For all others, check whether the object is in the package scope, or
@@ -679,7 +681,7 @@ func hoverEmbed(fh file.Handle, rng protocol.Range, pattern string) (protocol.Ra
 func inferredSignatureString(obj types.Object, qf types.Qualifier, inferred *types.Signature) string {
 	// If the signature type was inferred, prefer the inferred signature with a
 	// comment showing the generic signature.
-	if sig, _ := obj.Type().(*types.Signature); sig != nil && typeparams.ForSignature(sig).Len() > 0 && inferred != nil {
+	if sig, _ := obj.Type().(*types.Signature); sig != nil && sig.TypeParams().Len() > 0 && inferred != nil {
 		obj2 := types.NewFunc(obj.Pos(), obj.Pkg(), obj.Name(), inferred)
 		str := types.ObjectString(obj2, qf)
 		// Try to avoid overly long lines.

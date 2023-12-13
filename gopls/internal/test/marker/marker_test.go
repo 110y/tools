@@ -53,12 +53,37 @@ var update = flag.Bool("update", false, "if set, update test data during marker 
 func TestMain(m *testing.M) {
 	bug.PanicOnBugs = true
 	testenv.ExitIfSmallMachine()
+	// Disable GOPACKAGESDRIVER, as it can cause spurious test failures.
+	os.Setenv("GOPACKAGESDRIVER", "off")
 	os.Exit(m.Run())
 }
 
 // Test runs the marker tests from the testdata directory.
 //
 // See package documentation for details on how marker tests work.
+//
+// These tests were inspired by (and in many places copied from) a previous
+// iteration of the marker tests built on top of the packagestest framework.
+// Key design decisions motivating this reimplementation are as follows:
+//   - The old tests had a single global session, causing interaction at a
+//     distance and several awkward workarounds.
+//   - The old tests could not be safely parallelized, because certain tests
+//     manipulated the server options
+//   - Relatedly, the old tests did not have a logic grouping of assertions into
+//     a single unit, resulting in clusters of files serving clusters of
+//     entangled assertions.
+//   - The old tests used locations in the source as test names and as the
+//     identity of golden content, meaning that a single edit could change the
+//     name of an arbitrary number of subtests, and making it difficult to
+//     manually edit golden content.
+//   - The old tests did not hew closely to LSP concepts, resulting in, for
+//     example, each marker implementation doing its own position
+//     transformations, and inventing its own mechanism for configuration.
+//   - The old tests had an ad-hoc session initialization process. The integration
+//     test environment has had more time devoted to its initialization, and has a
+//     more convenient API.
+//   - The old tests lacked documentation, and often had failures that were hard
+//     to understand. By starting from scratch, we can revisit these aspects.
 func Test(t *testing.T) {
 	// The marker tests must be able to run go/packages.Load.
 	testenv.NeedsGoPackages(t)
@@ -232,6 +257,9 @@ func (m marker) ctx() context.Context { return m.run.env.Ctx }
 func (m marker) T() testing.TB { return m.run.env.T }
 
 // server returns the LSP server for the marker test run.
+func (m marker) editor() *fake.Editor { return m.run.env.Editor }
+
+// server returns the LSP server for the marker test run.
 func (m marker) server() protocol.Server { return m.run.env.Editor.Server }
 
 // uri returns the URI of the file containing the marker.
@@ -251,7 +279,7 @@ func (mark marker) path() string {
 
 // mapper returns a *protocol.Mapper for the current file.
 func (mark marker) mapper() *protocol.Mapper {
-	mapper, err := mark.run.env.Editor.Mapper(mark.path())
+	mapper, err := mark.editor().Mapper(mark.path())
 	if err != nil {
 		mark.T().Fatalf("failed to get mapper for current mark: %v", err)
 	}
@@ -418,6 +446,7 @@ var actionMarkerFuncs = map[string]func(marker){
 	"format":           actionMarkerFunc(formatMarker),
 	"highlight":        actionMarkerFunc(highlightMarker),
 	"hover":            actionMarkerFunc(hoverMarker),
+	"hovererr":         actionMarkerFunc(hoverErrMarker),
 	"implementation":   actionMarkerFunc(implementationMarker),
 	"incomingcalls":    actionMarkerFunc(incomingCallsMarker),
 	"inlayhints":       actionMarkerFunc(inlayhintsMarker),
@@ -1456,10 +1485,6 @@ func highlightMarker(mark marker, src protocol.Location, dsts ...protocol.Locati
 	}
 }
 
-// hoverMarker implements the @hover marker, running textDocument/hover at the
-// given src location and asserting that the resulting hover is over the dst
-// location (typically a span surrounding src), and that the markdown content
-// matches the golden content.
 func hoverMarker(mark marker, src, dst protocol.Location, sc stringMatcher) {
 	content, gotDst := mark.run.env.Hover(src)
 	if gotDst != dst {
@@ -1470,6 +1495,11 @@ func hoverMarker(mark marker, src, dst protocol.Location, sc stringMatcher) {
 		gotMD = content.Value
 	}
 	sc.check(mark, gotMD)
+}
+
+func hoverErrMarker(mark marker, src protocol.Location, em stringMatcher) {
+	_, _, err := mark.editor().Hover(mark.ctx(), src)
+	em.checkErr(mark, err)
 }
 
 // locMarker implements the @loc marker. It is executed before other
