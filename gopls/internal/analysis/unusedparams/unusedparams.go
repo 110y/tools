@@ -88,14 +88,16 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				// return
 			}
 		case *ast.ExprStmt:
-			callExpr, ok := expr.X.(*ast.CallExpr)
+			// 110y: Make this analyzer work even if the function only contains single expression.
+			_, ok := expr.X.(*ast.CallExpr)
 			if !ok || len(body.List) > 1 {
 				break
 			}
 			// Ignore functions that only contain a panic statement to reduce false positives.
-			if fun, ok := callExpr.Fun.(*ast.Ident); ok && fun.Name == "panic" {
-				return
-			}
+			// 110y: Make this analyzer work even if the function only contains a panic statement.
+			// if fun, ok := callExpr.Fun.(*ast.Ident); ok && fun.Name == "panic" {
+			//     return
+			// }
 		}
 
 		// Get the useful data from each field.
