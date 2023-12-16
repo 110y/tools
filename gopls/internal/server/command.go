@@ -34,8 +34,10 @@ import (
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/gopls/internal/util/bug"
+	"golang.org/x/tools/gopls/internal/util/maps"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/gopls/internal/vulncheck/scan"
+	"golang.org/x/tools/internal/diff"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/gocommand"
 	"golang.org/x/tools/internal/tokeninternal"
@@ -385,12 +387,16 @@ func (c *commandHandler) Vendor(ctx context.Context, args command.URIArg) error 
 		// If golang/go#44119 is resolved, go mod vendor will instead modify
 		// modules.txt in-place. In that case we could theoretically allow this
 		// command to run concurrently.
+		stderr := new(bytes.Buffer)
 		err := deps.snapshot.RunGoCommandPiped(ctx, cache.Normal|cache.AllowNetwork, &gocommand.Invocation{
 			Verb:       "mod",
 			Args:       []string{"vendor"},
 			WorkingDir: filepath.Dir(args.URI.Path()),
-		}, &bytes.Buffer{}, &bytes.Buffer{})
-		return err
+		}, &bytes.Buffer{}, stderr)
+		if err != nil {
+			return fmt.Errorf("running go mod vendor failed: %v\nstderr:\n%s", err, stderr.String())
+		}
+		return nil
 	})
 }
 
@@ -485,7 +491,7 @@ func dropDependency(snapshot *cache.Snapshot, pm *cache.ParsedModule, modulePath
 		return nil, err
 	}
 	// Calculate the edits to be made due to the change.
-	diff := snapshot.Options().ComputeEdits(string(pm.Mapper.Content), string(newContent))
+	diff := diff.Bytes(pm.Mapper.Content, newContent)
 	return protocol.EditsFromDiffEdits(pm.Mapper, diff)
 }
 
@@ -688,7 +694,7 @@ func collectFileEdits(ctx context.Context, snapshot *cache.Snapshot, uri protoco
 	}
 
 	m := protocol.NewMapper(fh.URI(), oldContent)
-	diff := snapshot.Options().ComputeEdits(string(oldContent), string(newContent))
+	diff := diff.Bytes(oldContent, newContent)
 	edits, err := protocol.EditsFromDiffEdits(m, diff)
 	if err != nil {
 		return nil, err
@@ -1318,8 +1324,9 @@ func (c *commandHandler) DiagnoseFiles(ctx context.Context, args command.Diagnos
 			// combine load/parse/type + analysis diagnostics
 			var td, ad []*cache.Diagnostic
 			combineDiagnostics(pkgDiags, adiags[uri], &td, &ad)
-			c.s.storeDiagnostics(snapshot, uri, typeCheckSource, td)
-			c.s.storeDiagnostics(snapshot, uri, analysisSource, ad)
+			diags := append(td, ad...)
+			byURI := func(d *cache.Diagnostic) protocol.DocumentURI { return d.URI }
+			c.s.updateDiagnostics(ctx, c.s.session.Views(), snapshot, maps.Group(diags, byURI), false)
 			diagnostics := append(td, ad...)
 
 			if err := c.s.client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
