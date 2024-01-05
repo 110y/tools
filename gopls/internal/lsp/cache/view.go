@@ -410,33 +410,25 @@ func (s *Session) UpdateFolders(ctx context.Context, newFolders []*Folder) error
 // viewEnv returns a string describing the environment of a newly created view.
 //
 // It must not be called concurrently with any other view methods.
-//
-// TODO(golang/go#57979): revisit this function and its uses once the dust
-// settles.
+// TODO(rfindley): rethink this function, or inline sole call.
 func viewEnv(v *View) string {
-	env := v.folder.Options.EnvSlice()
-	buildFlags := append([]string{}, v.folder.Options.BuildFlags...)
-
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, `go info for %v
-(go dir %s)
+(view type %v)
+(root dir %s)
 (go version %s)
-(valid build configuration = %v)
 (build flags: %v)
+(go env: %+v)
+(env overlay: %v)
 `,
 		v.folder.Dir.Path(),
+		v.typ,
 		v.root.Path(),
 		strings.TrimRight(v.folder.Env.GoVersionOutput, "\n"),
-		v.snapshot.validBuildConfiguration(),
-		buildFlags,
+		v.folder.Options.BuildFlags,
+		*v.folder.Env,
+		v.envOverlay,
 	)
-
-	for _, v := range env {
-		s := strings.SplitN(v, "=", 2)
-		if len(s) != 2 {
-			continue
-		}
-	}
 
 	return buf.String()
 }
@@ -616,7 +608,24 @@ func (v *View) Snapshot() (*Snapshot, func(), error) {
 	return v.snapshot, v.snapshot.Acquire(), nil
 }
 
+// initialize loads the metadata (and currently, file contents, due to
+// golang/go#57558) for the main package query of the View, which depends on
+// the view type (see ViewType). If s.initialized is already true, initialize
+// is a no op.
+//
+// The first attempt--which populates the first snapshot for a new view--must
+// be allowed to run to completion without being cancelled.
+//
+// Subsequent attempts are triggered by conditions where gopls can't enumerate
+// specific packages that require reloading, such as a change to a go.mod file.
+// These attempts may be cancelled, and then retried by a later call.
+//
+// Postcondition: if ctx was not cancelled, s.initialized is true, s.initialErr
+// holds the error resulting from initialization, if any, and s.metadata holds
+// the resulting metadata graph.
 func (s *Snapshot) initialize(ctx context.Context, firstAttempt bool) {
+	// Acquire initializationSema, which is
+	// (in effect) a mutex with a timeout.
 	select {
 	case <-ctx.Done():
 		return
@@ -635,25 +644,7 @@ func (s *Snapshot) initialize(ctx context.Context, firstAttempt bool) {
 		return
 	}
 
-	s.loadWorkspace(ctx, firstAttempt)
-}
-
-func (s *Snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadErr error) {
-	// A failure is retryable if it may have been due to context cancellation,
-	// and this is not the initial workspace load (firstAttempt==true).
-	//
-	// The IWL runs on a detached context with a long (~10m) timeout, so
-	// if the context was canceled we consider loading to have failed
-	// permanently.
-	retryableFailure := func() bool {
-		return loadErr != nil && ctx.Err() != nil && !firstAttempt
-	}
 	defer func() {
-		if !retryableFailure() {
-			s.mu.Lock()
-			s.initialized = true
-			s.mu.Unlock()
-		}
 		if firstAttempt {
 			close(s.view.initialWorkspaceLoad)
 		}
@@ -676,8 +667,6 @@ func (s *Snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 		})
 	}
 
-	// TODO(rfindley): this should be predicated on the s.view.moduleMode().
-	// There is no point loading ./... if we have an empty go.work.
 	if len(s.view.workspaceModFiles) > 0 {
 		for modURI := range s.view.workspaceModFiles {
 			// Verify that the modfile is valid before trying to load it.
@@ -691,7 +680,7 @@ func (s *Snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 			fh, err := s.ReadFile(ctx, modURI)
 			if err != nil {
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return
 				}
 				addError(modURI, err)
 				continue
@@ -699,7 +688,7 @@ func (s *Snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 			parsed, err := s.ParseMod(ctx, fh)
 			if err != nil {
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return
 				}
 				addError(modURI, err)
 				continue
@@ -715,7 +704,7 @@ func (s *Snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 			scopes = append(scopes, moduleLoadScope{dir: moduleDir, modulePath: parsed.File.Module.Mod.Path})
 		}
 	} else {
-		scopes = append(scopes, viewLoadScope("LOAD_VIEW"))
+		scopes = append(scopes, viewLoadScope{})
 	}
 
 	// If we're loading anything, ensure we also load builtin,
@@ -724,43 +713,47 @@ func (s *Snapshot) loadWorkspace(ctx context.Context, firstAttempt bool) (loadEr
 	if len(scopes) > 0 {
 		scopes = append(scopes, packageLoadScope("builtin"))
 	}
-	loadErr = s.load(ctx, true, scopes...)
+	loadErr := s.load(ctx, true, scopes...)
 
-	if retryableFailure() {
-		return loadErr
+	// A failure is retryable if it may have been due to context cancellation,
+	// and this is not the initial workspace load (firstAttempt==true).
+	//
+	// The IWL runs on a detached context with a long (~10m) timeout, so
+	// if the context was canceled we consider loading to have failed
+	// permanently.
+	if loadErr != nil && ctx.Err() != nil && !firstAttempt {
+		return
 	}
 
-	var criticalErr *CriticalError
+	var initialErr *InitializationError
 	switch {
 	case loadErr != nil && ctx.Err() != nil:
 		event.Error(ctx, fmt.Sprintf("initial workspace load: %v", loadErr), loadErr)
-		criticalErr = &CriticalError{
+		initialErr = &InitializationError{
 			MainError: loadErr,
 		}
 	case loadErr != nil:
 		event.Error(ctx, "initial workspace load failed", loadErr)
 		extractedDiags := s.extractGoCommandErrors(ctx, loadErr)
-		criticalErr = &CriticalError{
+		initialErr = &InitializationError{
 			MainError:   loadErr,
-			Diagnostics: maps.Group(append(modDiagnostics, extractedDiags...), byURI),
+			Diagnostics: maps.Group(extractedDiags, byURI),
 		}
-	case len(modDiagnostics) == 1:
-		criticalErr = &CriticalError{
-			MainError:   fmt.Errorf(modDiagnostics[0].Message),
-			Diagnostics: maps.Group(modDiagnostics, byURI),
+	case s.view.workspaceModFilesErr != nil:
+		initialErr = &InitializationError{
+			MainError: s.view.workspaceModFilesErr,
 		}
-	case len(modDiagnostics) > 1:
-		criticalErr = &CriticalError{
-			MainError:   fmt.Errorf("error loading module names"),
-			Diagnostics: maps.Group(modDiagnostics, byURI),
+	case len(modDiagnostics) > 0:
+		initialErr = &InitializationError{
+			MainError: fmt.Errorf(modDiagnostics[0].Message),
 		}
 	}
 
-	// Lock the snapshot when setting the initialized error.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.initializedErr = criticalErr
-	return loadErr
+
+	s.initialized = true
+	s.initialErr = initialErr
 }
 
 // A StateChange describes external state changes that may affect a snapshot.
@@ -891,22 +884,9 @@ func defineView(ctx context.Context, fs file.Source, folder *Folder, forFile fil
 
 	// When deriving the best view for a given file, we only want to search
 	// up the directory hierarchy for modfiles.
-	//
-	// If forURI is unset, we still use the legacy heuristic of scanning for
-	// nested modules (this will be removed as part of golang/go#57979).
-	if forFile != nil {
-		def.gomod, err = findRootPattern(ctx, dirURI, "go.mod", fs)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// filterFunc is the path filter function for this workspace folder. Notably,
-		// it is relative to folder (which is specified by the user), not root.
-		filterFunc := relPathExcludedByFilterFunc(folder.Dir.Path(), folder.Env.GOMODCACHE, folder.Options.DirectoryFilters)
-		def.gomod, err = findWorkspaceModFile(ctx, folder.Dir, fs, filterFunc)
-		if err != nil {
-			return nil, err
-		}
+	def.gomod, err = findRootPattern(ctx, dirURI, "go.mod", fs)
+	if err != nil {
+		return nil, err
 	}
 
 	// Determine how we load and where to load package information for this view
@@ -1351,18 +1331,6 @@ func allFilesExcluded(files []string, filterFunc func(protocol.DocumentURI) bool
 		}
 	}
 	return true
-}
-
-// relPathExcludedByFilterFunc returns a func that filters paths relative to the
-// given folder according the given GOMODCACHE value and directory filters (see
-// settings.BuildOptions.DirectoryFilters).
-//
-// The resulting func returns true if the directory should be skipped.
-func relPathExcludedByFilterFunc(folder, gomodcache string, directoryFilters []string) func(string) bool {
-	filterer := buildFilterer(folder, gomodcache, directoryFilters)
-	return func(path string) bool {
-		return relPathExcludedByFilter(path, filterer)
-	}
 }
 
 func relPathExcludedByFilter(path string, filterer *Filterer) bool {
