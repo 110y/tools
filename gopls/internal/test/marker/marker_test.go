@@ -85,8 +85,11 @@ func TestMain(m *testing.M) {
 //   - The old tests lacked documentation, and often had failures that were hard
 //     to understand. By starting from scratch, we can revisit these aspects.
 func Test(t *testing.T) {
-	if testing.Short() && strings.HasPrefix(os.Getenv("GO_BUILDER_NAME"), "darwin-") {
-		t.Skip("golang/go#64473: skipping with -short: this test is too slow on darwin builders")
+	if testing.Short() {
+		builder := os.Getenv("GO_BUILDER_NAME")
+		if strings.HasPrefix(builder, "darwin-") || builder == "solaris-amd64-oraclerel" {
+			t.Skip("golang/go#64473: skipping with -short: this test is too slow on darwin and solaris builders")
+		}
 	}
 	// The marker tests must be able to run go/packages.Load.
 	testenv.NeedsGoPackages(t)
@@ -789,7 +792,7 @@ func newEnv(t *testing.T, cache *cache.Cache, files, proxyFiles map[string][]byt
 	// Put a debug instance in the context to prevent logging to stderr.
 	// See associated TODO in runner.go: we should revisit this pattern.
 	ctx := context.Background()
-	ctx = debug.WithInstance(ctx, "", "off")
+	ctx = debug.WithInstance(ctx, "off")
 
 	awaiter := integration.NewAwaiter(sandbox.Workdir)
 	ss := lsprpc.NewStreamServer(cache, false, hooks.Options)
