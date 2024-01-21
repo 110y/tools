@@ -1,6 +1,17 @@
-This test exercises the refactoring to remove unused parameters.
-See removeparam_resolve.txt for same test with resolve support.
+This test exercises the refactoring to remove unused parameters, with resolve support.
+See removeparam.txt for same test without resolve support.
 
+-- capabilities.json --
+{
+	"textDocument": {
+		"codeAction": {
+			"dataSupport": true,
+			"resolveSupport": {
+				"properties": ["edit"]
+			}
+		}
+	}
+}
 -- go.mod --
 module unused.mod
 
@@ -203,7 +214,7 @@ func _() {
 -- effects/effects.go --
 package effects
 
-func effects(x, y int) int { //@ diag("y", re"unused"), codeaction("y", "y", "refactor.rewrite", effects)
+func effects(x, y int) int { //@codeaction("y", "y", "refactor.rewrite", effects), diag("y", re"unused")
 	return x
 }
 
@@ -217,7 +228,7 @@ func _() {
 -- @effects/effects/effects.go --
 package effects
 
-func effects(x int) int { //@ diag("y", re"unused"), codeaction("y", "y", "refactor.rewrite", effects)
+func effects(x int) int { //@codeaction("y", "y", "refactor.rewrite", effects), diag("y", re"unused")
 	return x
 }
 

@@ -34,7 +34,6 @@ import (
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/telemetry"
 	"golang.org/x/tools/gopls/internal/util/bug"
-	"golang.org/x/tools/gopls/internal/util/maps"
 	"golang.org/x/tools/gopls/internal/vulncheck"
 	"golang.org/x/tools/gopls/internal/vulncheck/scan"
 	"golang.org/x/tools/internal/diff"
@@ -200,12 +199,13 @@ func (c *commandHandler) run(ctx context.Context, cfg commandConfig, run command
 	return runcmd()
 }
 
-func (c *commandHandler) ApplyFix(ctx context.Context, args command.ApplyFixArgs) error {
-	return c.run(ctx, commandConfig{
+func (c *commandHandler) ApplyFix(ctx context.Context, args command.ApplyFixArgs) (*protocol.WorkspaceEdit, error) {
+	var result *protocol.WorkspaceEdit
+	err := c.run(ctx, commandConfig{
 		// Note: no progress here. Applying fixes should be quick.
 		forURI: args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
-		edits, err := source.ApplyFix(ctx, settings.Fix(args.Fix), deps.snapshot, deps.fh, args.Range)
+		edits, err := source.ApplyFix(ctx, args.Fix, deps.snapshot, deps.fh, args.Range)
 		if err != nil {
 			return err
 		}
@@ -216,10 +216,15 @@ func (c *commandHandler) ApplyFix(ctx context.Context, args command.ApplyFixArgs
 				TextDocumentEdit: &edit,
 			})
 		}
+		edit := protocol.WorkspaceEdit{
+			DocumentChanges: changes,
+		}
+		if args.ResolveEdits {
+			result = &edit
+			return nil
+		}
 		r, err := c.s.client.ApplyEdit(ctx, &protocol.ApplyWorkspaceEditParams{
-			Edit: protocol.WorkspaceEdit{
-				DocumentChanges: changes,
-			},
+			Edit: edit,
 		})
 		if err != nil {
 			return err
@@ -229,6 +234,7 @@ func (c *commandHandler) ApplyFix(ctx context.Context, args command.ApplyFixArgs
 		}
 		return nil
 	})
+	return result, err
 }
 
 func (c *commandHandler) RegenerateCgo(ctx context.Context, args command.URIArg) error {
@@ -447,19 +453,7 @@ func (c *commandHandler) RemoveDependency(ctx context.Context, args command.Remo
 		}
 		response, err := c.s.client.ApplyEdit(ctx, &protocol.ApplyWorkspaceEditParams{
 			Edit: protocol.WorkspaceEdit{
-				DocumentChanges: []protocol.DocumentChanges{
-					{
-						TextDocumentEdit: &protocol.TextDocumentEdit{
-							TextDocument: protocol.OptionalVersionedTextDocumentIdentifier{
-								Version: deps.fh.Version(),
-								TextDocumentIdentifier: protocol.TextDocumentIdentifier{
-									URI: deps.fh.URI(),
-								},
-							},
-							Edits: protocol.AsAnnotatedTextEdits(edits),
-						},
-					},
-				},
+				DocumentChanges: documentChanges(deps.fh, edits),
 			},
 		})
 		if err != nil {
@@ -713,16 +707,9 @@ func applyFileEdits(ctx context.Context, cli protocol.Client, edits []protocol.T
 	if len(edits) == 0 {
 		return nil
 	}
-	documentChanges := []protocol.DocumentChanges{} // must be a slice
-	for _, change := range edits {
-		change := change
-		documentChanges = append(documentChanges, protocol.DocumentChanges{
-			TextDocumentEdit: &change,
-		})
-	}
 	response, err := cli.ApplyEdit(ctx, &protocol.ApplyWorkspaceEditParams{
 		Edit: protocol.WorkspaceEdit{
-			DocumentChanges: documentChanges,
+			DocumentChanges: protocol.TextDocumentEditsToDocumentChanges(edits),
 		},
 	})
 	if err != nil {
@@ -1267,8 +1254,9 @@ func showDocumentImpl(ctx context.Context, cli protocol.Client, url protocol.URI
 	}
 }
 
-func (c *commandHandler) ChangeSignature(ctx context.Context, args command.ChangeSignatureArgs) error {
-	return c.run(ctx, commandConfig{
+func (c *commandHandler) ChangeSignature(ctx context.Context, args command.ChangeSignatureArgs) (*protocol.WorkspaceEdit, error) {
+	var result *protocol.WorkspaceEdit
+	err := c.run(ctx, commandConfig{
 		forURI: args.RemoveParameter.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
 		// For now, gopls only supports removing unused parameters.
@@ -1276,10 +1264,15 @@ func (c *commandHandler) ChangeSignature(ctx context.Context, args command.Chang
 		if err != nil {
 			return err
 		}
+		edit := protocol.WorkspaceEdit{
+			DocumentChanges: changes,
+		}
+		if args.ResolveEdits {
+			result = &edit
+			return nil
+		}
 		r, err := c.s.client.ApplyEdit(ctx, &protocol.ApplyWorkspaceEditParams{
-			Edit: protocol.WorkspaceEdit{
-				DocumentChanges: changes,
-			},
+			Edit: edit,
 		})
 		if !r.Applied {
 			return fmt.Errorf("failed to apply edits: %v", r.FailureReason)
@@ -1287,6 +1280,7 @@ func (c *commandHandler) ChangeSignature(ctx context.Context, args command.Chang
 
 		return nil
 	})
+	return result, err
 }
 
 func (c *commandHandler) DiagnoseFiles(ctx context.Context, args command.DiagnoseFilesArgs) error {
@@ -1301,47 +1295,31 @@ func (c *commandHandler) DiagnoseFiles(ctx context.Context, args command.Diagnos
 		ctx, done := event.Start(ctx, "lsp.server.DiagnoseFiles")
 		defer done()
 
-		// TODO(adonovan): opt: parallelize the loop,
-		// grouping file URIs by package and making a
-		// single call to source.Analyze.
+		snapshots := make(map[*cache.Snapshot]bool)
 		for _, uri := range args.Files {
 			fh, snapshot, release, err := c.s.fileOf(ctx, uri)
 			if err != nil {
 				return err
 			}
-			defer release()
-			if snapshot.FileKind(fh) != file.Go {
+			if snapshots[snapshot] || snapshot.FileKind(fh) != file.Go {
+				release()
 				continue
 			}
-			pkg, _, err := source.NarrowestPackageForFile(ctx, snapshot, uri)
-			if err != nil {
-				return err
-			}
-			pkgDiags, err := pkg.DiagnosticsForFile(ctx, uri)
-			if err != nil {
-				return err
-			}
-			adiags, err := source.Analyze(ctx, snapshot, map[source.PackageID]unit{pkg.Metadata().ID: {}}, nil /* progress tracker */)
-			if err != nil {
-				return err
-			}
-
-			// combine load/parse/type + analysis diagnostics
-			var td, ad []*cache.Diagnostic
-			combineDiagnostics(pkgDiags, adiags[uri], &td, &ad)
-			diags := append(td, ad...)
-			byURI := func(d *cache.Diagnostic) protocol.DocumentURI { return d.URI }
-			c.s.updateDiagnostics(ctx, c.s.session.Views(), snapshot, maps.Group(diags, byURI), false)
-			diagnostics := append(td, ad...)
-
-			if err := c.s.client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
-				URI:         fh.URI(),
-				Version:     fh.Version(),
-				Diagnostics: toProtocolDiagnostics(diagnostics),
-			}); err != nil {
-				return err
-			}
+			defer release()
+			snapshots[snapshot] = true
 		}
+
+		var wg sync.WaitGroup
+		for snapshot := range snapshots {
+			snapshot := snapshot
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c.s.diagnoseSnapshot(snapshot, nil, 0)
+			}()
+		}
+		wg.Wait()
+
 		return nil
 	})
 }
