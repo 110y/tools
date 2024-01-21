@@ -163,9 +163,10 @@ func run(pass *analysis.Pass) (any, error) {
 			// Ignore exported functions and methods: we
 			// must assume they may be address-taken in
 			// another package.
-			if n.Name.IsExported() {
-				return true
-			}
+			// 110y: Make this analyzer work even for exported functions.
+			// if n.Name.IsExported() {
+			//     return true
+			// }
 
 			// Ignore methods that match the name of any
 			// interface method declared in this package,
@@ -251,16 +252,17 @@ func run(pass *analysis.Pass) (any, error) {
 			// reader that that's the case, so we allow it.
 			return true // func f() {}
 		case 1:
-			if stmt, ok := body.List[0].(*ast.ExprStmt); ok {
-				// We allow a panic body, as it is often a
-				// placeholder for a future implementation:
-				// 	func f() { panic(...) }
-				if call, ok := stmt.X.(*ast.CallExpr); ok {
-					if fun, ok := call.Fun.(*ast.Ident); ok && fun.Name == "panic" {
-						return true
-					}
-				}
-			}
+			// if stmt, ok := body.List[0].(*ast.ExprStmt); ok {
+			// We allow a panic body, as it is often a
+			// placeholder for a future implementation:
+			// 	func f() { panic(...) }
+			// 110y: Make this analyzer work even for panic.
+			// if call, ok := stmt.X.(*ast.CallExpr); ok {
+			//     if fun, ok := call.Fun.(*ast.Ident); ok && fun.Name == "panic" {
+			//         return true
+			//     }
+			// }
+			// }
 		}
 
 		// Report each unused parameter.
