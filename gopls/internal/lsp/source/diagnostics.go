@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/tools/gopls/internal/lsp/cache"
 	"golang.org/x/tools/gopls/internal/lsp/cache/metadata"
-	"golang.org/x/tools/gopls/internal/lsp/progress"
 	"golang.org/x/tools/gopls/internal/lsp/protocol"
+	"golang.org/x/tools/gopls/internal/progress"
 	"golang.org/x/tools/gopls/internal/settings"
 	"golang.org/x/tools/gopls/internal/util/maps"
 )
@@ -30,7 +30,6 @@ func Analyze(ctx context.Context, snapshot *cache.Snapshot, pkgIDs map[PackageID
 	categories := []map[string]*settings.Analyzer{
 		options.DefaultAnalyzers,
 		options.StaticcheckAnalyzers,
-		options.TypeErrorAnalyzers,
 	}
 
 	var analyzers []*settings.Analyzer
