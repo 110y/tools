@@ -7,8 +7,8 @@ package bench
 import (
 	"testing"
 
-	"golang.org/x/tools/gopls/internal/lsp/command"
-	"golang.org/x/tools/gopls/internal/lsp/protocol"
+	"golang.org/x/tools/gopls/internal/protocol"
+	"golang.org/x/tools/gopls/internal/protocol/command"
 	. "golang.org/x/tools/gopls/internal/test/integration"
 	"golang.org/x/tools/gopls/internal/test/integration/fake"
 )
@@ -27,7 +27,7 @@ func BenchmarkInitialWorkspaceLoad(b *testing.B) {
 		{"oracle", "dataintegration/data_type.go"},
 		{"pkgsite", "internal/frontend/server.go"},
 		{"starlark", "starlark/eval.go"},
-		{"tools", "internal/lsp/cache/snapshot.go"},
+		{"tools", "internal/cache/snapshot.go"},
 		{"hashiform", "internal/provider/provider.go"},
 	}
 

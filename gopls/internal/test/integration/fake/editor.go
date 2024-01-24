@@ -17,8 +17,8 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/tools/gopls/internal/lsp/command"
-	"golang.org/x/tools/gopls/internal/lsp/protocol"
+	"golang.org/x/tools/gopls/internal/protocol"
+	"golang.org/x/tools/gopls/internal/protocol/command"
 	"golang.org/x/tools/gopls/internal/test/integration/fake/glob"
 	"golang.org/x/tools/gopls/internal/util/pathutil"
 	"golang.org/x/tools/gopls/internal/util/slices"
@@ -73,7 +73,7 @@ func (b buffer) text() string {
 }
 
 // EditorConfig configures the editor's LSP session. This is similar to
-// source.UserOptions, but we use a separate type here so that we expose only
+// golang.UserOptions, but we use a separate type here so that we expose only
 // that configuration which we support.
 //
 // The zero value for EditorConfig is the default configuration.
