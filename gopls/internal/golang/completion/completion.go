@@ -1761,8 +1761,6 @@ func (c *completer) unimportedPackages(ctx context.Context, seen map[string]stru
 		count++
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-
 	var mu sync.Mutex
 	add := func(pkg imports.ImportFix) {
 		if ignoreUnimportedCompletion(&pkg) {
@@ -1778,7 +1776,6 @@ func (c *completer) unimportedPackages(ctx context.Context, seen map[string]stru
 		}
 
 		if count >= maxUnimportedPackageNames {
-			cancel()
 			return
 		}
 
@@ -1796,10 +1793,11 @@ func (c *completer) unimportedPackages(ctx context.Context, seen map[string]stru
 		})
 		count++
 	}
+
 	c.completionCallbacks = append(c.completionCallbacks, func(ctx context.Context, opts *imports.Options) error {
-		defer cancel()
 		return imports.GetAllCandidates(ctx, add, prefix, c.filename, c.pkg.GetTypes().Name(), opts.Env)
 	})
+
 	return nil
 }
 
