@@ -172,9 +172,10 @@ func run(pass *analysis.Pass) (any, error) {
 			// interface method declared in this package,
 			// as the method's signature may need to conform
 			// to the interface.
-			if n.Recv != nil && unexportedIMethodNames[n.Name.Name] {
-				return true
-			}
+			// 110y: Make this analyzer work even for the interface method.
+			// if n.Recv != nil && unexportedIMethodNames[n.Name.Name] {
+			//     return true
+			// }
 
 			fn = pass.TypesInfo.Defs[n.Name].(*types.Func)
 			ftype, body = n.Type, n.Body
@@ -227,9 +228,10 @@ func run(pass *analysis.Pass) (any, error) {
 
 		// Ignore address-taken functions and methods: unused
 		// parameters may be needed to conform to a func type.
-		if fn == nil || len(usesOutsideCall[fn]) > 0 {
-			return true
-		}
+		// 110y: Make this analyzer work even for address-taken functions.
+		// if fn == nil || len(usesOutsideCall[fn]) > 0 {
+		//     return true
+		// }
 
 		// If there are no parameters, there are no unused parameters.
 		if ftype.Params.NumFields() == 0 {
@@ -250,7 +252,8 @@ func run(pass *analysis.Pass) (any, error) {
 			// Empty body. Although the parameter is
 			// unnecessary, it's pretty obvious to the
 			// reader that that's the case, so we allow it.
-			return true // func f() {}
+			// 110y: Make this analyzer work even for empty body.
+			// return true // func f() {}
 		case 1:
 			// if stmt, ok := body.List[0].(*ast.ExprStmt); ok {
 			// We allow a panic body, as it is often a
