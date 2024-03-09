@@ -1,6 +1,6 @@
-Test of unimported completions respecting the effective Go version of the file.
+Test of imported completions respecting the effective Go version of the file.
 
-(See unprefixed file for same test of imported completions.)
+(See "un-" prefixed file for same test of unimported completions.)
 
 These symbols below were introduced to go/types in go1.22:
 
@@ -23,20 +23,20 @@ go 1.21
 -- a/a.go --
 package a
 
-// package-level func
+import "go/ast"
+import "go/token"
+import "go/types"
+
+// package-level decl
 var _ = types.Sat //@rankl("Sat", "Satisfies")
 var _ = types.Ali //@rankl("Ali", "!Alias")
 
-// (We don't offer completions of methods
-// of types from unimported packages, so the fact that
-// we don't implement std version filtering isn't evident.)
-
 // field
-var _ = new(types.Info).Use //@rankl("Use", "!Uses")
+var _ = new(types.Info).Use //@rankl("Use", "Uses")
 var _ = new(types.Info).Fil //@rankl("Fil", "!FileVersions")
 
 // method
-var _ = new(types.Checker).Obje //@rankl("Obje", "!ObjectOf")
+var _ = new(types.Checker).Obje //@rankl("Obje", "ObjectOf")
 var _ = new(types.Checker).PkgN //@rankl("PkgN", "!PkgNameOf")
 
 -- b/b.go --
@@ -44,6 +44,18 @@ var _ = new(types.Checker).PkgN //@rankl("PkgN", "!PkgNameOf")
 
 package a
 
+import "go/ast"
+import "go/token"
+import "go/types"
+
 // package-level decl
 var _ = types.Sat //@rankl("Sat", "Satisfies")
 var _ = types.Ali //@rankl("Ali", "Alias")
+
+// field
+var _ = new(types.Info).Use //@rankl("Use", "Uses")
+var _ = new(types.Info).Fil //@rankl("Fil", "FileVersions")
+
+// method
+var _ = new(types.Checker).Obje //@rankl("Obje", "ObjectOf")
+var _ = new(types.Checker).PkgN //@rankl("PkgN", "PkgNameOf")
