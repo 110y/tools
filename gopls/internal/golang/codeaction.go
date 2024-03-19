@@ -93,7 +93,8 @@ func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, 
 	// Code actions requiring type information.
 	if want[protocol.RefactorRewrite] ||
 		want[protocol.RefactorInline] ||
-		want[protocol.GoTest] {
+		want[protocol.GoTest] ||
+		want[protocol.GoDoc] {
 		pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 		if err != nil {
 			return nil, err
@@ -120,6 +121,19 @@ func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, 
 				return nil, err
 			}
 			actions = append(actions, fixes...)
+		}
+
+		if want[protocol.GoDoc] {
+			loc := protocol.Location{URI: pgf.URI, Range: rng}
+			cmd, err := command.NewDocCommand("View package documentation", loc)
+			if err != nil {
+				return nil, err
+			}
+			actions = append(actions, protocol.CodeAction{
+				Title:   cmd.Title,
+				Kind:    protocol.GoDoc,
+				Command: &cmd,
+			})
 		}
 	}
 	return actions, nil
@@ -387,12 +401,16 @@ func getRewriteCodeActions(ctx context.Context, pkg *cache.Package, snapshot *ca
 // indicated by the given [start, end) range.
 //
 // This is true if:
+//   - there are no parse or type errors, and
 //   - [start, end) is contained within an unused field or parameter name
 //   - ... of a non-method function declaration.
 //
 // (Note that the unusedparam analyzer also computes this property, but
 // much more precisely, allowing it to report its findings as diagnostics.)
 func canRemoveParameter(pkg *cache.Package, pgf *parsego.File, rng protocol.Range) bool {
+	if perrors, terrors := pkg.ParseErrors(), pkg.TypeErrors(); len(perrors) > 0 || len(terrors) > 0 {
+		return false // can't remove parameters from packages with errors
+	}
 	info, err := FindParam(pgf, rng)
 	if err != nil {
 		return false // e.g. invalid range
@@ -435,7 +453,7 @@ func getInlineCodeActions(pkg *cache.Package, pgf *parsego.File, rng protocol.Ra
 		return nil, err
 	}
 
-	// If range is within call expression, offer inline action.
+	// If range is within call expression, offer to inline the call.
 	var commands []protocol.Command
 	if _, fn, err := EnclosingStaticCall(pkg, pgf, start, end); err == nil {
 		cmd, err := command.NewApplyFixCommand(fmt.Sprintf("Inline call to %s", fn.Name()), command.ApplyFixArgs{
