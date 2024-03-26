@@ -26,8 +26,10 @@ import (
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
+	"golang.org/x/tools/internal/aliases"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/fuzzy"
+	"golang.org/x/tools/internal/typeparams"
 )
 
 // Diagnose computes diagnostics for fillable struct literals overlapping with
@@ -53,8 +55,8 @@ func Diagnose(inspect *inspector.Inspector, start, end token.Pos, pkg *types.Pac
 		}
 
 		// Find reference to the type declaration of the struct being initialized.
-		typ = deref(typ)
-		tStruct, ok := typ.Underlying().(*types.Struct)
+		typ = typeparams.Deref(typ)
+		tStruct, ok := typeparams.CoreType(typ).(*types.Struct)
 		if !ok {
 			return
 		}
@@ -150,7 +152,7 @@ func SuggestedFix(fset *token.FileSet, start, end token.Pos, content []byte, fil
 	}
 
 	// Find reference to the type declaration of the struct being initialized.
-	typ = deref(typ)
+	typ = typeparams.Deref(typ)
 	tStruct, ok := typ.Underlying().(*types.Struct)
 	if !ok {
 		return nil, nil, fmt.Errorf("%s is not a (pointer to) struct type",
@@ -447,7 +449,7 @@ func populateValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 		}
 
 	case *types.Pointer:
-		switch u.Elem().(type) {
+		switch aliases.Unalias(u.Elem()).(type) {
 		case *types.Basic:
 			return &ast.CallExpr{
 				Fun: &ast.Ident{
@@ -471,7 +473,7 @@ func populateValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 		}
 
 	case *types.Interface:
-		if param, ok := typ.(*types.TypeParam); ok {
+		if param, ok := aliases.Unalias(typ).(*types.TypeParam); ok {
 			// *new(T) is the zero value of a type parameter T.
 			// TODO(adonovan): one could give a more specific zero
 			// value if the type has a core type that is, say,
@@ -489,14 +491,4 @@ func populateValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 		return ast.NewIdent("nil")
 	}
 	return nil
-}
-
-func deref(t types.Type) types.Type {
-	for {
-		ptr, ok := t.Underlying().(*types.Pointer)
-		if !ok {
-			return t
-		}
-		t = ptr.Elem()
-	}
 }
