@@ -340,7 +340,7 @@ var GeneratedAPIJSON = &APIJSON{
 						},
 						{
 							Name:    "\"nilness\"",
-							Doc:     "check for redundant or impossible nil comparisons\n\nThe nilness checker inspects the control-flow graph of each function in\na package and reports nil pointer dereferences, degenerate nil\npointers, and panics with nil values. A degenerate comparison is of the form\nx==nil or x!=nil where x is statically known to be nil or non-nil. These are\noften a mistake, especially in control flow related to errors. Panics with nil\nvalues are checked because they are not detectable by\n\n\tif r := recover(); r != nil {\n\nThis check reports conditions such as:\n\n\tif f == nil { // impossible condition (f is a function)\n\t}\n\nand:\n\n\tp := &v\n\t...\n\tif p != nil { // tautological condition\n\t}\n\nand:\n\n\tif p == nil {\n\t\tprint(*p) // nil dereference\n\t}\n\nand:\n\n\tif p == nil {\n\t\tpanic(p)\n\t}",
+							Doc:     "check for redundant or impossible nil comparisons\n\nThe nilness checker inspects the control-flow graph of each function in\na package and reports nil pointer dereferences, degenerate nil\npointers, and panics with nil values. A degenerate comparison is of the form\nx==nil or x!=nil where x is statically known to be nil or non-nil. These are\noften a mistake, especially in control flow related to errors. Panics with nil\nvalues are checked because they are not detectable by\n\n\tif r := recover(); r != nil {\n\nThis check reports conditions such as:\n\n\tif f == nil { // impossible condition (f is a function)\n\t}\n\nand:\n\n\tp := &v\n\t...\n\tif p != nil { // tautological condition\n\t}\n\nand:\n\n\tif p == nil {\n\t\tprint(*p) // nil dereference\n\t}\n\nand:\n\n\tif p == nil {\n\t\tpanic(p)\n\t}\n\nSometimes the control flow may be quite complex, making bugs hard\nto spot. In the example below, the err.Error expression is\nguaranteed to panic because, after the first return, err must be\nnil. The intervening loop is just a distraction.\n\n\t...\n\terr := g.Wait()\n\tif err != nil {\n\t\treturn err\n\t}\n\tpartialSuccess := false\n\tfor _, err := range errs {\n\t\tif err == nil {\n\t\t\tpartialSuccess = true\n\t\t\tbreak\n\t\t}\n\t}\n\tif partialSuccess {\n\t\treportStatus(StatusMessage{\n\t\t\tCode:   code.ERROR,\n\t\t\tDetail: err.Error(), // \"nil dereference in dynamic method call\"\n\t\t})\n\t\treturn nil\n\t}\n\n...",
 							Default: "true",
 						},
 						{
@@ -471,7 +471,7 @@ var GeneratedAPIJSON = &APIJSON{
 						{
 							Name:    "\"unusedwrite\"",
 							Doc:     "checks for unused writes\n\nThe analyzer reports instances of writes to struct fields and\narrays that are never read. Specifically, when a struct object\nor an array is copied, its elements are copied implicitly by\nthe compiler, and any element write to this copy does nothing\nwith the original object.\n\nFor example:\n\n\ttype T struct { x int }\n\n\tfunc f(input []T) {\n\t\tfor i, v := range input {  // v is a copy\n\t\t\tv.x = i  // unused write to field x\n\t\t}\n\t}\n\nAnother example is about non-pointer receiver:\n\n\ttype T struct { x int }\n\n\tfunc (t T) f() {  // t is a copy\n\t\tt.x = i  // unused write to field x\n\t}",
-							Default: "false",
+							Default: "true",
 						},
 						{
 							Name:    "\"useany\"",
@@ -1121,7 +1121,7 @@ var GeneratedAPIJSON = &APIJSON{
 		},
 		{
 			Name:    "nilness",
-			Doc:     "check for redundant or impossible nil comparisons\n\nThe nilness checker inspects the control-flow graph of each function in\na package and reports nil pointer dereferences, degenerate nil\npointers, and panics with nil values. A degenerate comparison is of the form\nx==nil or x!=nil where x is statically known to be nil or non-nil. These are\noften a mistake, especially in control flow related to errors. Panics with nil\nvalues are checked because they are not detectable by\n\n\tif r := recover(); r != nil {\n\nThis check reports conditions such as:\n\n\tif f == nil { // impossible condition (f is a function)\n\t}\n\nand:\n\n\tp := &v\n\t...\n\tif p != nil { // tautological condition\n\t}\n\nand:\n\n\tif p == nil {\n\t\tprint(*p) // nil dereference\n\t}\n\nand:\n\n\tif p == nil {\n\t\tpanic(p)\n\t}",
+			Doc:     "check for redundant or impossible nil comparisons\n\nThe nilness checker inspects the control-flow graph of each function in\na package and reports nil pointer dereferences, degenerate nil\npointers, and panics with nil values. A degenerate comparison is of the form\nx==nil or x!=nil where x is statically known to be nil or non-nil. These are\noften a mistake, especially in control flow related to errors. Panics with nil\nvalues are checked because they are not detectable by\n\n\tif r := recover(); r != nil {\n\nThis check reports conditions such as:\n\n\tif f == nil { // impossible condition (f is a function)\n\t}\n\nand:\n\n\tp := &v\n\t...\n\tif p != nil { // tautological condition\n\t}\n\nand:\n\n\tif p == nil {\n\t\tprint(*p) // nil dereference\n\t}\n\nand:\n\n\tif p == nil {\n\t\tpanic(p)\n\t}\n\nSometimes the control flow may be quite complex, making bugs hard\nto spot. In the example below, the err.Error expression is\nguaranteed to panic because, after the first return, err must be\nnil. The intervening loop is just a distraction.\n\n\t...\n\terr := g.Wait()\n\tif err != nil {\n\t\treturn err\n\t}\n\tpartialSuccess := false\n\tfor _, err := range errs {\n\t\tif err == nil {\n\t\t\tpartialSuccess = true\n\t\t\tbreak\n\t\t}\n\t}\n\tif partialSuccess {\n\t\treportStatus(StatusMessage{\n\t\t\tCode:   code.ERROR,\n\t\t\tDetail: err.Error(), // \"nil dereference in dynamic method call\"\n\t\t})\n\t\treturn nil\n\t}\n\n...",
 			URL:     "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/nilness",
 			Default: true,
 		},
@@ -1274,9 +1274,10 @@ var GeneratedAPIJSON = &APIJSON{
 			URL:  "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedvariable",
 		},
 		{
-			Name: "unusedwrite",
-			Doc:  "checks for unused writes\n\nThe analyzer reports instances of writes to struct fields and\narrays that are never read. Specifically, when a struct object\nor an array is copied, its elements are copied implicitly by\nthe compiler, and any element write to this copy does nothing\nwith the original object.\n\nFor example:\n\n\ttype T struct { x int }\n\n\tfunc f(input []T) {\n\t\tfor i, v := range input {  // v is a copy\n\t\t\tv.x = i  // unused write to field x\n\t\t}\n\t}\n\nAnother example is about non-pointer receiver:\n\n\ttype T struct { x int }\n\n\tfunc (t T) f() {  // t is a copy\n\t\tt.x = i  // unused write to field x\n\t}",
-			URL:  "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unusedwrite",
+			Name:    "unusedwrite",
+			Doc:     "checks for unused writes\n\nThe analyzer reports instances of writes to struct fields and\narrays that are never read. Specifically, when a struct object\nor an array is copied, its elements are copied implicitly by\nthe compiler, and any element write to this copy does nothing\nwith the original object.\n\nFor example:\n\n\ttype T struct { x int }\n\n\tfunc f(input []T) {\n\t\tfor i, v := range input {  // v is a copy\n\t\t\tv.x = i  // unused write to field x\n\t\t}\n\t}\n\nAnother example is about non-pointer receiver:\n\n\ttype T struct { x int }\n\n\tfunc (t T) f() {  // t is a copy\n\t\tt.x = i  // unused write to field x\n\t}",
+			URL:     "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unusedwrite",
+			Default: true,
 		},
 		{
 			Name: "useany",
