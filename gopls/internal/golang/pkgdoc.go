@@ -19,9 +19,12 @@ package golang
 // - add option for doc.AllDecls: show non-exported symbols too.
 // - abbreviate long signatures by replacing parameters 4 onwards with "...".
 // - style the <li> bullets in the index as invisible.
-// - add push notifications (using hanging GET, server-side events,
-//   or polling) like didChange (=> auto reload)
-//   and server death (=> display "server disconnected" banner).
+// - add push notifications such as didChange -> reload.
+// - there appears to be a maximum file size beyond which the
+//   "source.doc" code action is not offered. Remove that.
+// - modify JS httpGET function to give a transient visual indication
+//   when clicking a source link that the editor is being navigated
+//   (in case it doesn't raise itself, like VS Code).
 
 import (
 	"bytes"
@@ -33,6 +36,7 @@ import (
 	"go/token"
 	"go/types"
 	"html"
+	"log"
 	"path/filepath"
 
 	"golang.org/x/tools/gopls/internal/cache"
@@ -41,6 +45,7 @@ import (
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/gopls/internal/util/slices"
+	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/typesinternal"
 )
 
@@ -108,13 +113,72 @@ func RenderPackageDoc(pkg *cache.Package, posURL func(filename string, line, col
 		})
 	}
 
-	// Ensure doc links (e.g. "[fmt.Println]") become valid links.
-	docpkg.Printer().DocLinkURL = func(link *comment.DocLink) string {
-		fragment := link.Name
-		if link.Recv == "" {
-			fragment = link.Recv + "." + link.Name
+	var docHTML func(comment string) []byte
+	{
+		// Adapt doc comment parser and printer
+		// to our representation of Go packages
+		// so that doc links (e.g. "[fmt.Println]")
+		// become valid links.
+
+		printer := docpkg.Printer()
+		printer.DocLinkURL = func(link *comment.DocLink) string {
+			path := pkg.Metadata().PkgPath
+			if link.ImportPath != "" {
+				path = PackagePath(link.ImportPath)
+			}
+			fragment := link.Name
+			if link.Recv != "" {
+				fragment = link.Recv + "." + link.Name
+			}
+			return pkgURL(path, fragment)
 		}
-		return pkgURL(PackagePath(link.ImportPath), fragment)
+		parser := docpkg.Parser()
+		parser.LookupPackage = func(name string) (importPath string, ok bool) {
+			// Ambiguous: different files in the same
+			// package may have different import mappings,
+			// but the hook doesn't provide the file context.
+			// TODO(adonovan): conspire with docHTML to
+			// pass the doc comment's enclosing file through
+			// a shared variable, so that we can compute
+			// the correct per-file mapping.
+			//
+			// TODO(adonovan): check for PkgName.Name
+			// matches, but also check for
+			// PkgName.Imported.Namer matches, since some
+			// packages are typically imported under a
+			// non-default name (e.g. pathpkg "path") but
+			// may be referred to in doc links using their
+			// canonical name.
+			for _, f := range pkg.Syntax() {
+				for _, imp := range f.Imports {
+					pkgName, ok := typesutil.ImportedPkgName(pkg.TypesInfo(), imp)
+					if ok && pkgName.Name() == name {
+						return pkgName.Imported().Path(), true
+					}
+				}
+			}
+			return "", false
+		}
+		parser.LookupSym = func(recv, name string) (ok bool) {
+			defer func() {
+				log.Printf("LookupSym %q %q = %t ", recv, name, ok)
+			}()
+			// package-level decl?
+			if recv == "" {
+				return pkg.Types().Scope().Lookup(name) != nil
+			}
+
+			// method?
+			tname, ok := pkg.Types().Scope().Lookup(recv).(*types.TypeName)
+			if !ok {
+				return false
+			}
+			m, _, _ := types.LookupFieldOrMethod(tname.Type(), true, pkg.Types(), name)
+			return is[*types.Func](m)
+		}
+		docHTML = func(comment string) []byte {
+			return printer.HTML(parser.Parse(comment))
+		}
 	}
 
 	var buf bytes.Buffer
@@ -131,9 +195,21 @@ function httpGET(url) {
 	xhttp.send();
 	return false; // disable usual <a href=...> behavior
 }
+
+// Start a GET /hang request. If it ever completes, the server
+// has disconnected. Show a banner in that case.
+{
+	var x = new XMLHttpRequest();
+	x.open("GET", "/hang", true);
+	x.onloadend = () => {
+		document.getElementById("disconnected").style.display = 'block';
+	};
+	x.send();
+};
   </script>
 </head>
 <body>
+<div id='disconnected'>Gopls server has terminated. Page is inactive.</div>
 `)
 
 	escape := html.EscapeString
@@ -244,8 +320,6 @@ function httpGET(url) {
 						emit(n.Pos())
 						pos = n.End()
 						if url := linkify(n); url != "" {
-							// TODO(adonovan): emit anchors (not hrefs)
-							// for package-level defining idents.
 							fmt.Fprintf(&buf, "<a class='id' href='%s'>%s</a>", url, escape(n.Name))
 						} else {
 							buf.WriteString(escape(n.Name)) // plain
@@ -292,7 +366,7 @@ function httpGET(url) {
 		"https://pkg.go.dev/"+string(pkg.Types().Path()))
 
 	// package doc
-	fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docpkg.HTML(docpkg.Doc))
+	fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docHTML(docpkg.Doc))
 
 	// symbol index
 	fmt.Fprintf(&buf, "<h2>Index</h2>\n")
@@ -345,13 +419,18 @@ function httpGET(url) {
 	// constants and variables
 	values := func(vals []*doc.Value) {
 		for _, v := range vals {
+			// anchors
+			for _, name := range v.Names {
+				fmt.Fprintf(&buf, "<a id='%s'></a>\n", escape(name))
+			}
+
 			// declaration
 			decl2 := *v.Decl // shallow copy
 			decl2.Doc = nil
 			fmt.Fprintf(&buf, "<pre class='code'>%s</pre>\n", nodeHTML(&decl2))
 
 			// comment (if any)
-			fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docpkg.HTML(v.Doc))
+			fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docHTML(v.Doc))
 		}
 	}
 	fmt.Fprintf(&buf, "<h2 id='hdr-Constants'>Constants</h2>\n")
@@ -382,7 +461,7 @@ function httpGET(url) {
 				nodeHTML(docfn.Decl.Type))
 
 			// comment (if any)
-			fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docpkg.HTML(docfn.Doc))
+			fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docHTML(docfn.Doc))
 		}
 	}
 	funcs(docpkg.Funcs)
@@ -402,7 +481,7 @@ function httpGET(url) {
 		fmt.Fprintf(&buf, "<pre class='code'>%s</pre>\n", nodeHTML(&decl2))
 
 		// comment (if any)
-		fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docpkg.HTML(doctype.Doc))
+		fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n", docHTML(doctype.Doc))
 
 		// subelements
 		values(doctype.Consts) // constants of type T
@@ -422,7 +501,7 @@ function httpGET(url) {
 
 			// comment (if any)
 			fmt.Fprintf(&buf, "<div class='comment'>%s</div>\n",
-				docpkg.HTML(docmethod.Doc))
+				docHTML(docmethod.Doc))
 		}
 	}
 
@@ -541,4 +620,14 @@ a:hover > * {
 .lit { color: darkgreen; }
 
 #pkgsite { height: 1.5em; }
+
+#disconnected {
+  position: fixed;
+  top: 1em;
+  left: 1em;
+  display: none; /* initially */
+  background-color: white;
+  border: thick solid red;
+  padding: 2em;
+}
 `
