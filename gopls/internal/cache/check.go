@@ -1654,6 +1654,10 @@ func validGoVersion(goVersion string) bool {
 		return false // malformed version string
 	}
 
+	if relVer := releaseVersion(); relVer != "" && versions.Before(relVer, goVersion) {
+		return false // 'go list' is too new for go/types
+	}
+
 	// TODO(rfindley): remove once we no longer support building gopls with Go
 	// 1.20 or earlier.
 	if !slices.Contains(build.Default.ReleaseTags, "go1.21") && strings.Count(goVersion, ".") >= 2 {
@@ -1661,6 +1665,19 @@ func validGoVersion(goVersion string) bool {
 	}
 
 	return true
+}
+
+// releaseVersion reports the Go language version used to compile gopls, or ""
+// if it cannot be determined.
+func releaseVersion() string {
+	if len(build.Default.ReleaseTags) > 0 {
+		v := build.Default.ReleaseTags[len(build.Default.ReleaseTags)-1]
+		var dummy int
+		if _, err := fmt.Sscanf(v, "go1.%d", &dummy); err == nil {
+			return v
+		}
+	}
+	return ""
 }
 
 // depsErrors creates diagnostics for each metadata error (e.g. import cycle).
@@ -1951,7 +1968,10 @@ func typeErrorsToDiagnostics(pkg *syntaxPackage, errs []types.Error, linkTarget 
 			// This is because go/types assumes that errors are read top-down, such as
 			// in the cycle error "A refers to...". The structure of the secondary
 			// error set likely only makes sense for the primary error.
-			if i > 0 {
+			//
+			// NOTE: len(diags) == 0 if the primary diagnostic has invalid positions.
+			// See also golang/go#66731.
+			if i > 0 && len(diags) > 0 {
 				primary := diags[0]
 				primary.Related = append(primary.Related, protocol.DiagnosticRelatedInformation{
 					Location: protocol.Location{URI: diag.URI, Range: diag.Range},
