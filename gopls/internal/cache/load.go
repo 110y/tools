@@ -43,12 +43,16 @@ var errNoPackages = errors.New("no packages returned")
 //
 // If scopes contains a file scope there must be exactly one scope.
 func (s *Snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadScope) (err error) {
+	if ctx.Err() != nil {
+		// Check context cancellation before incrementing id below: a load on a
+		// cancelled context should be a no-op.
+		return ctx.Err()
+	}
 	id := atomic.AddUint64(&loadID, 1)
 	eventName := fmt.Sprintf("go/packages.Load #%d", id) // unique name for logging
 
 	var query []string
-	var containsDir bool // for logging
-	var standalone bool  // whether this is a load of a standalone file
+	var standalone bool // whether this is a load of a standalone file
 
 	// Keep track of module query -> module path so that we can later correlate query
 	// errors with errors.
@@ -102,10 +106,6 @@ func (s *Snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadSc
 
 		default:
 			panic(fmt.Sprintf("unknown scope type %T", scope))
-		}
-		switch scope.(type) {
-		case viewLoadScope, moduleLoadScope:
-			containsDir = true
 		}
 	}
 	if len(query) == 0 {
@@ -217,7 +217,7 @@ func (s *Snapshot) load(ctx context.Context, allowNetwork bool, scopes ...loadSc
 			continue
 		}
 
-		if !containsDir || s.Options().VerboseOutput {
+		if s.Options().VerboseOutput {
 			event.Log(ctx, eventName, append(
 				s.Labels(),
 				tag.Package.Of(pkg.ID),
