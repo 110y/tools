@@ -5,6 +5,7 @@
 package template
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 
 func TestMain(m *testing.M) {
 	bug.PanicOnBugs = true
-	Main(m)
+	os.Exit(Main(m))
 }
 
 func TestMultilineTokens(t *testing.T) {
@@ -36,7 +37,6 @@ go 1.17
 	WithOptions(
 		Settings{
 			"templateExtensions": []string{"tmpl"},
-			"semanticTokens":     true,
 		},
 	).Run(t, files, func(t *testing.T, env *Env) {
 		var p protocol.SemanticTokensParams
@@ -65,7 +65,6 @@ Hello {{}} <-- missing body
 	WithOptions(
 		Settings{
 			"templateExtensions": []string{"tmpl"},
-			"semanticTokens":     true,
 		},
 	).Run(t, files, func(t *testing.T, env *Env) {
 		// TODO: can we move this diagnostic onto {{}}?

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	Main(m)
+	os.Exit(Main(m))
 }
 
 func TestBugNotification(t *testing.T) {
@@ -39,7 +40,7 @@ func TestBugNotification(t *testing.T) {
 // start the internal web server.
 func TestStartDebugging(t *testing.T) {
 	WithOptions(
-		Modes(Default|Experimental), // doesn't work in Forwarded mode
+		Modes(Default), // doesn't work in Forwarded mode
 	).Run(t, "", func(t *testing.T, env *Env) {
 		// Start a debugging server.
 		res, err := startDebugging(env.Ctx, env.Editor.Server, &command.DebuggingArgs{
