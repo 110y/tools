@@ -7,7 +7,7 @@ require (
 	github.com/jba/templatecheck v0.7.0
 	golang.org/x/mod v0.17.0
 	golang.org/x/sync v0.7.0
-	golang.org/x/telemetry v0.0.0-20240514153035-4a0682cf430d
+	golang.org/x/telemetry v0.0.0-20240515213752-9ff3ad9b3e68
 	golang.org/x/text v0.15.0
 	golang.org/x/tools v0.18.0
 	golang.org/x/vuln v1.0.4
