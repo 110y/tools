@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/types"
 	"strings"
 
+	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/gopls/internal/analysis/fillstruct"
 	"golang.org/x/tools/gopls/internal/analysis/fillswitch"
 	"golang.org/x/tools/gopls/internal/cache"
@@ -24,11 +26,17 @@ import (
 	"golang.org/x/tools/gopls/internal/util/slices"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/imports"
+	"golang.org/x/tools/internal/typesinternal"
 )
 
-// CodeActions returns all code actions (edits and other commands)
-// available for the selected range.
-func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range, diagnostics []protocol.Diagnostic, want map[protocol.CodeActionKind]bool, triggerKind protocol.CodeActionTriggerKind) (actions []protocol.CodeAction, _ error) {
+// CodeActions returns all wanted code actions (edits and other
+// commands) available for the selected range.
+//
+// Depending on how the request was triggered, fewer actions may be
+// offered, e.g. to avoid UI distractions after mere cursor motion.
+//
+// See ../protocol/codeactionkind.go for some code action theory.
+func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, rng protocol.Range, diagnostics []protocol.Diagnostic, want map[protocol.CodeActionKind]bool, trigger protocol.CodeActionTriggerKind) (actions []protocol.CodeAction, _ error) {
 	// Only compute quick fixes if there are any diagnostics to fix.
 	wantQuickFixes := want[protocol.QuickFix] && len(diagnostics) > 0
 
@@ -113,7 +121,7 @@ func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, 
 			if err != nil {
 				return nil, err
 			}
-			// For implementation, see commandHandler.showFreeSymbols.
+			// For implementation, see commandHandler.FreeSymbols.
 			actions = append(actions, protocol.CodeAction{
 				Title:   cmd.Title,
 				Kind:    protocol.GoFreeSymbols,
@@ -125,6 +133,7 @@ func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, 
 	// Code actions requiring type information.
 	if want[protocol.RefactorRewrite] ||
 		want[protocol.RefactorInline] ||
+		want[protocol.GoAssembly] ||
 		want[protocol.GoTest] {
 		pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 		if err != nil {
@@ -138,7 +147,9 @@ func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, 
 			actions = append(actions, rewrites...)
 		}
 
-		if want[protocol.RefactorInline] && (triggerKind != protocol.CodeActionAutomatic || rng.Start != rng.End) {
+		// To avoid distraction (e.g. VS Code lightbulb), offer "inline"
+		// only after a selection or explicit menu operation.
+		if want[protocol.RefactorInline] && (trigger != protocol.CodeActionAutomatic || rng.Start != rng.End) {
 			rewrites, err := getInlineCodeActions(pkg, pgf, rng, snapshot.Options())
 			if err != nil {
 				return nil, err
@@ -148,6 +159,14 @@ func CodeActions(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, 
 
 		if want[protocol.GoTest] {
 			fixes, err := getGoTestCodeActions(pkg, pgf, rng)
+			if err != nil {
+				return nil, err
+			}
+			actions = append(actions, fixes...)
+		}
+
+		if want[protocol.GoAssembly] {
+			fixes, err := getGoAssemblyAction(snapshot.View(), pkg, pgf, rng)
 			if err != nil {
 				return nil, err
 			}
@@ -513,4 +532,82 @@ func getGoTestCodeActions(pkg *cache.Package, pgf *parsego.File, rng protocol.Ra
 		Kind:    protocol.GoTest,
 		Command: &cmd,
 	}}, nil
+}
+
+// getGoAssemblyAction returns any "Show assembly for f" code actions for the selection.
+func getGoAssemblyAction(view *cache.View, pkg *cache.Package, pgf *parsego.File, rng protocol.Range) ([]protocol.CodeAction, error) {
+	start, end, err := pgf.RangePos(rng)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the enclosing toplevel function or method,
+	// and compute its symbol name (e.g. "pkgpath.(T).method").
+	// The report will show this method and all its nested
+	// functions (FuncLit, defers, etc).
+	//
+	// TODO(adonovan): this is no good for generics, since they
+	// will always be uninstantiated when they enclose the cursor.
+	// Instead, we need to query the func symbol under the cursor,
+	// rather than the enclosing function. It may be an explicitly
+	// or implicitly instantiated generic, and it may be defined
+	// in another package, though we would still need to compile
+	// the current package to see its assembly. The challenge,
+	// however, is that computing the linker name for a generic
+	// symbol is quite tricky. Talk with the compiler team for
+	// ideas.
+	//
+	// TODO(adonovan): think about a smoother UX for jumping
+	// directly to (say) a lambda of interest.
+	// Perhaps we could scroll to STEXT for the innermost
+	// enclosing nested function?
+	var actions []protocol.CodeAction
+	path, _ := astutil.PathEnclosingInterval(pgf.File, start, end)
+	if len(path) >= 2 { // [... FuncDecl File]
+		if decl, ok := path[len(path)-2].(*ast.FuncDecl); ok {
+			if fn, ok := pkg.TypesInfo().Defs[decl.Name].(*types.Func); ok {
+				sig := fn.Type().(*types.Signature)
+
+				// Compute the linker symbol of the enclosing function.
+				var sym strings.Builder
+				if fn.Pkg().Name() == "main" {
+					sym.WriteString("main")
+				} else {
+					sym.WriteString(fn.Pkg().Path())
+				}
+				sym.WriteString(".")
+				if sig.Recv() != nil {
+					if isPtr, named := typesinternal.ReceiverNamed(sig.Recv()); named != nil {
+						sym.WriteString("(")
+						if isPtr {
+							sym.WriteString("*")
+						}
+						sym.WriteString(named.Obj().Name())
+						sym.WriteString(").")
+					}
+				}
+				sym.WriteString(fn.Name())
+
+				if fn.Name() != "_" && // blank functions are not compiled
+					(fn.Name() != "init" || sig.Recv() != nil) && // init functions aren't linker functions
+					sig.TypeParams() == nil && sig.RecvTypeParams() == nil { // generic => no assembly
+					cmd, err := command.NewAssemblyCommand(
+						fmt.Sprintf("Show %s assembly for %s", view.GOARCH(), decl.Name),
+						view.ID(),
+						string(pkg.Metadata().ID),
+						sym.String())
+					if err != nil {
+						return nil, err
+					}
+					// For handler, see commandHandler.Assembly.
+					actions = append(actions, protocol.CodeAction{
+						Title:   cmd.Title,
+						Kind:    protocol.GoAssembly,
+						Command: &cmd,
+					})
+				}
+			}
+		}
+	}
+	return actions, nil
 }

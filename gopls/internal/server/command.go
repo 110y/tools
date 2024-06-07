@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"go/ast"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -93,18 +94,8 @@ func (*commandHandler) AddTelemetryCounters(_ context.Context, args command.AddT
 
 // commandConfig configures common command set-up and execution.
 type commandConfig struct {
-	// TODO(adonovan): whether a command is synchronous or
-	// asynchronous is part of the server interface contract, not
-	// a mere implementation detail of the handler.
-	// Export a (command.Command).IsAsync() property so that
-	// clients can tell. (The tricky part is ensuring the handler
-	// remains consistent with the command.Command metadata, as at
-	// the point were we read the 'async' field below, we no
-	// longer know that command.Command.)
-
-	async       bool                 // whether to run the command asynchronously. Async commands can only return errors.
 	requireSave bool                 // whether all files must be saved for the command to work
-	progress    string               // title to use for progress reporting. If empty, no progress will be reported.
+	progress    string               // title to use for progress reporting. If empty, no progress will be reported. Mandatory for async commands.
 	forView     string               // view to resolve to a snapshot; incompatible with forURI
 	forURI      protocol.DocumentURI // URI to resolve to a snapshot. If unset, snapshot will be nil.
 }
@@ -113,9 +104,9 @@ type commandConfig struct {
 // be populated, depending on which configuration is set. See comments in-line
 // for details.
 type commandDeps struct {
-	snapshot *cache.Snapshot    // present if cfg.forURI was set
+	snapshot *cache.Snapshot    // present if cfg.forURI or forView was set
 	fh       file.Handle        // present if cfg.forURI was set
-	work     *progress.WorkDone // present cfg.progress was set
+	work     *progress.WorkDone // present if cfg.progress was set
 }
 
 type commandFunc func(context.Context, commandDeps) error
@@ -195,7 +186,12 @@ func (c *commandHandler) run(ctx context.Context, cfg commandConfig, run command
 		}
 		return err
 	}
-	if cfg.async {
+
+	if enum := command.Command(c.params.Command); enum.IsAsync() {
+		if cfg.progress == "" {
+			log.Fatalf("asynchronous command %q does not enable progress reporting",
+				enum)
+		}
 		go func() {
 			if err := runcmd(); err != nil {
 				showMessage(ctx, c.s.client, protocol.Error, err.Error())
@@ -491,6 +487,7 @@ func dropDependency(pm *cache.ParsedModule, modulePath string) ([]protocol.TextE
 	return protocol.EditsFromDiffEdits(pm.Mapper, diff)
 }
 
+// Test is an alias for RunTests (with splayed arguments).
 func (c *commandHandler) Test(ctx context.Context, uri protocol.DocumentURI, tests, benchmarks []string) error {
 	return c.RunTests(ctx, command.RunTestsArgs{
 		URI:        uri,
@@ -583,9 +580,8 @@ func (c *commandHandler) Doc(ctx context.Context, loc protocol.Location) error {
 
 func (c *commandHandler) RunTests(ctx context.Context, args command.RunTestsArgs) error {
 	return c.run(ctx, commandConfig{
-		async:       true,
-		progress:    "Running go test",
-		requireSave: true, // go test honors overlays, but tests themselves cannot
+		progress:    "Running go test", // (asynchronous)
+		requireSave: true,              // go test honors overlays, but tests themselves cannot
 		forURI:      args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
 		return c.runTests(ctx, deps.snapshot, deps.work, args.URI, args.Tests, args.Benchmarks)
@@ -1088,9 +1084,8 @@ func (c *commandHandler) RunGovulncheck(ctx context.Context, args command.Vulnch
 	// synchronize the start of the run and return the token.
 	tokenChan := make(chan protocol.ProgressToken, 1)
 	err := c.run(ctx, commandConfig{
-		async:       true, // need to be async to be cancellable
-		progress:    "govulncheck",
-		requireSave: true, // govulncheck cannot honor overlays
+		progress:    "govulncheck", // (asynchronous)
+		requireSave: true,          // govulncheck cannot honor overlays
 		forURI:      args.URI,
 	}, func(ctx context.Context, deps commandDeps) error {
 		tokenChan <- deps.work.Token()
@@ -1471,6 +1466,9 @@ func (c *commandHandler) Views(ctx context.Context) ([]command.View, error) {
 }
 
 func (c *commandHandler) FreeSymbols(ctx context.Context, uri protocol.DocumentURI, rng protocol.Range) error {
+	// TODO(adonovan): simplify, following Assembly, by putting the
+	// viewID in the command so that c.run isn't necessary.
+	// (freesymbolsURL needs only a viewID, not a view.)
 	return c.run(ctx, commandConfig{
 		forURI: uri,
 	}, func(ctx context.Context, deps commandDeps) error {
@@ -1485,4 +1483,14 @@ func (c *commandHandler) FreeSymbols(ctx context.Context, uri protocol.DocumentU
 		openClientBrowser(ctx, c.s.client, url)
 		return nil
 	})
+}
+
+func (c *commandHandler) Assembly(ctx context.Context, viewID, packageID, symbol string) error {
+	web, err := c.s.getWeb()
+	if err != nil {
+		return err
+	}
+	url := web.assemblyURL(viewID, packageID, symbol)
+	openClientBrowser(ctx, c.s.client, url)
+	return nil
 }
