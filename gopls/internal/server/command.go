@@ -571,7 +571,7 @@ func (c *commandHandler) Doc(ctx context.Context, loc protocol.Location) error {
 		}
 
 		// Direct the client to open the /pkg page.
-		url := web.pkgURL(deps.snapshot.View(), pkgpath, fragment)
+		url := web.PkgURL(deps.snapshot.View().ID(), pkgpath, fragment)
 		openClientBrowser(ctx, c.s.client, url)
 
 		return nil
@@ -1465,24 +1465,14 @@ func (c *commandHandler) Views(ctx context.Context) ([]command.View, error) {
 	return summaries, nil
 }
 
-func (c *commandHandler) FreeSymbols(ctx context.Context, uri protocol.DocumentURI, rng protocol.Range) error {
-	// TODO(adonovan): simplify, following Assembly, by putting the
-	// viewID in the command so that c.run isn't necessary.
-	// (freesymbolsURL needs only a viewID, not a view.)
-	return c.run(ctx, commandConfig{
-		forURI: uri,
-	}, func(ctx context.Context, deps commandDeps) error {
-		web, err := c.s.getWeb()
-		if err != nil {
-			return err
-		}
-		url := web.freesymbolsURL(deps.snapshot.View(), protocol.Location{
-			URI:   deps.fh.URI(),
-			Range: rng,
-		})
-		openClientBrowser(ctx, c.s.client, url)
-		return nil
-	})
+func (c *commandHandler) FreeSymbols(ctx context.Context, viewID string, loc protocol.Location) error {
+	web, err := c.s.getWeb()
+	if err != nil {
+		return err
+	}
+	url := web.freesymbolsURL(viewID, loc)
+	openClientBrowser(ctx, c.s.client, url)
+	return nil
 }
 
 func (c *commandHandler) Assembly(ctx context.Context, viewID, packageID, symbol string) error {
