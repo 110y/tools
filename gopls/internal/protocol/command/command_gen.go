@@ -49,6 +49,7 @@ const (
 	RunGoWorkCommand        Command = "gopls.run_go_work_command"
 	RunGovulncheck          Command = "gopls.run_govulncheck"
 	RunTests                Command = "gopls.run_tests"
+	ScanImports             Command = "gopls.scan_imports"
 	StartDebugging          Command = "gopls.start_debugging"
 	StartProfile            Command = "gopls.start_profile"
 	StopProfile             Command = "gopls.stop_profile"
@@ -88,6 +89,7 @@ var Commands = []Command{
 	RunGoWorkCommand,
 	RunGovulncheck,
 	RunTests,
+	ScanImports,
 	StartDebugging,
 	StartProfile,
 	StopProfile,
@@ -248,6 +250,8 @@ func Dispatch(ctx context.Context, params *protocol.ExecuteCommandParams, s Inte
 			return nil, err
 		}
 		return nil, s.RunTests(ctx, a0)
+	case ScanImports:
+		return nil, s.ScanImports(ctx)
 	case StartDebugging:
 		var a0 DebuggingArgs
 		if err := UnmarshalArgs(params.Arguments, &a0); err != nil {
@@ -517,26 +521,16 @@ func NewListKnownPackagesCommand(title string, a0 URIArg) (protocol.Command, err
 }
 
 func NewMaybePromptForTelemetryCommand(title string) (protocol.Command, error) {
-	args, err := MarshalArgs()
-	if err != nil {
-		return protocol.Command{}, err
-	}
 	return protocol.Command{
-		Title:     title,
-		Command:   MaybePromptForTelemetry.String(),
-		Arguments: args,
+		Title:   title,
+		Command: MaybePromptForTelemetry.String(),
 	}, nil
 }
 
 func NewMemStatsCommand(title string) (protocol.Command, error) {
-	args, err := MarshalArgs()
-	if err != nil {
-		return protocol.Command{}, err
-	}
 	return protocol.Command{
-		Title:     title,
-		Command:   MemStats.String(),
-		Arguments: args,
+		Title:   title,
+		Command: MemStats.String(),
 	}, nil
 }
 
@@ -609,6 +603,13 @@ func NewRunTestsCommand(title string, a0 RunTestsArgs) (protocol.Command, error)
 		Title:     title,
 		Command:   RunTests.String(),
 		Arguments: args,
+	}, nil
+}
+
+func NewScanImportsCommand(title string) (protocol.Command, error) {
+	return protocol.Command{
+		Title:   title,
+		Command: ScanImports.String(),
 	}, nil
 }
 
@@ -721,25 +722,15 @@ func NewVendorCommand(title string, a0 URIArg) (protocol.Command, error) {
 }
 
 func NewViewsCommand(title string) (protocol.Command, error) {
-	args, err := MarshalArgs()
-	if err != nil {
-		return protocol.Command{}, err
-	}
 	return protocol.Command{
-		Title:     title,
-		Command:   Views.String(),
-		Arguments: args,
+		Title:   title,
+		Command: Views.String(),
 	}, nil
 }
 
 func NewWorkspaceStatsCommand(title string) (protocol.Command, error) {
-	args, err := MarshalArgs()
-	if err != nil {
-		return protocol.Command{}, err
-	}
 	return protocol.Command{
-		Title:     title,
-		Command:   WorkspaceStats.String(),
-		Arguments: args,
+		Title:   title,
+		Command: WorkspaceStats.String(),
 	}, nil
 }
