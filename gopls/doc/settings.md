@@ -180,7 +180,7 @@ Default: `false`.
 ## UI
 
 <a id='codelenses'></a>
-### `codelenses` *map[golang.org/x/tools/gopls/internal/protocol.CodeLensSource]bool*
+### `codelenses` *map[enum]bool*
 
 codelenses overrides the enabled/disabled state of each of gopls'
 sources of [Code Lenses](codelenses.md).
@@ -325,14 +325,14 @@ These analyses are documented on
 Default: `false`.
 
 <a id='annotations'></a>
-### `annotations` *map[string]bool*
+### `annotations` *map[enum]bool*
 
 **This setting is experimental and may be deleted.**
 
 annotations specifies the various kinds of optimization diagnostics
 that should be reported by the gc_details command.
 
-Can contain any of:
+Each enum must be one of:
 
 * `"bounds"` controls bounds checking diagnostics.
 * `"escape"` controls diagnostics about escape choices.
@@ -439,15 +439,15 @@ documentation links in hover.
 Default: `"pkg.go.dev"`.
 
 <a id='linksInHover'></a>
-### `linksInHover` *any*
+### `linksInHover` *enum*
 
-linksInHover controls the presence of documentation links
-in hover markdown.
+linksInHover controls the presence of documentation links in hover markdown.
 
-Its legal values are:
-- `false`, for no links;
-- `true`, for links to the `linkTarget` domain; or
-- `"gopls"`, for links to gopls' internal documentation viewer.
+Must be one of:
+
+* false: do not show links
+* true: show links to the `linkTarget` domain
+* `"gopls"`: show links to gopls' internal documentation viewer
 
 Default: `true`.
 
