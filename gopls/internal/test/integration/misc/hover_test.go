@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"golang.org/x/tools/gopls/internal/protocol"
 	. "golang.org/x/tools/gopls/internal/test/integration"
 	"golang.org/x/tools/gopls/internal/test/integration/fake"
@@ -552,4 +553,110 @@ func main() {
 			}
 		})
 	}
+}
+
+func TestHoverInternalLinksIssue68116(t *testing.T) {
+	// Links for the internal viewer should not include a module version suffix:
+	// the package path and the view are an unambiguous key; see #68116.
+
+	const proxy = `
+-- example.com@v1.2.3/go.mod --
+module example.com
+
+go 1.12
+
+-- example.com@v1.2.3/a/a.go --
+package a
+
+// F is a function.
+func F()
+`
+
+	const mod = `
+-- go.mod --
+module main
+
+go 1.12
+
+require example.com v1.2.3
+
+-- main.go --
+package main
+
+import "example.com/a"
+
+func main() {
+	a.F()
+}
+`
+	WithOptions(
+		ProxyFiles(proxy),
+		Settings{"linksInHover": "gopls"},
+		WriteGoSum("."),
+	).Run(t, mod, func(t *testing.T, env *Env) {
+		env.OpenFile("main.go")
+		got, _ := env.Hover(env.RegexpSearch("main.go", "F"))
+		const wantRE = "\\[`a.F` in gopls doc viewer\\]\\(http://127.0.0.1:[0-9]+/gopls/[^/]+/pkg/example.com\\?view=[0-9]+#F\\)" // no version
+		if m, err := regexp.MatchString(wantRE, got.Value); err != nil {
+			t.Fatalf("bad regexp in test: %v", err)
+		} else if !m {
+			t.Fatalf("hover output does not match %q; got:\n\n%s", wantRE, got.Value)
+		}
+	})
+}
+
+func TestHoverBuiltinFile(t *testing.T) {
+	testenv.NeedsGo1Point(t, 21) // uses 'min'
+
+	// This test verifies that hovering in the builtin file provides the same
+	// hover content as hovering over a use of a builtin.
+
+	const src = `
+-- p.go --
+package p
+
+func _() {
+	const (
+		_ = iota
+		_ = true
+	)
+	var (
+		_ any
+		err error = e{} // avoid nil deref warning
+	)
+	_ = err.Error
+	println("Hello")
+	_ = min(1, 2)
+}
+
+// e implements Error, for use above.
+type e struct{}
+func (e) Error() string
+`
+
+	// Test hovering over various builtins with different kinds of declarations.
+	tests := []string{
+		"iota",
+		"true",
+		"any",
+		"error",
+		"Error",
+		"println",
+		"min",
+	}
+
+	Run(t, src, func(t *testing.T, env *Env) {
+		env.OpenFile("p.go")
+		env.AfterChange(NoDiagnostics()) // avoid accidental compiler errors
+
+		for _, builtin := range tests {
+			useLocation := env.RegexpSearch("p.go", builtin)
+			calleeHover, _ := env.Hover(useLocation)
+			declLocation := env.GoToDefinition(useLocation)
+			declHover, _ := env.Hover(declLocation)
+			if diff := cmp.Diff(calleeHover, declHover); diff != "" {
+				t.Errorf("Hover mismatch (-callee hover +decl hover):\n%s", diff)
+			}
+		}
+	})
 }

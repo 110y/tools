@@ -70,6 +70,7 @@ type hoverJSON struct {
 
 	// LinkPath is the pkg.go.dev link for the given symbol.
 	// For example, the "go/ast" part of "pkg.go.dev/go/ast#Node".
+	// It may have a module version suffix "@v1.2.3".
 	LinkPath string `json:"linkPath"`
 
 	// LinkAnchor is the pkg.go.dev link anchor for the given symbol.
@@ -98,6 +99,7 @@ type hoverJSON struct {
 }
 
 // Hover implements the "textDocument/hover" RPC for Go files.
+// It may return nil even on success.
 //
 // If pkgURL is non-nil, it should be used to generate doc links.
 func Hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, position protocol.Position, pkgURL func(path PackagePath, fragment string) protocol.URI) (*protocol.Hover, error) {
@@ -130,6 +132,41 @@ func Hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, positi
 //
 // TODO(adonovan): strength-reduce file.Handle to protocol.DocumentURI.
 func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp protocol.Position) (protocol.Range, *hoverJSON, error) {
+	// Check for hover inside the builtin file before attempting type checking
+	// below. NarrowestPackageForFile may or may not succeed, depending on
+	// whether this is a GOROOT view, but even if it does succeed the resulting
+	// package will be command-line-arguments package. The user should get a
+	// hover for the builtin object, not the object type checked from the
+	// builtin.go.
+	if snapshot.IsBuiltin(fh.URI()) {
+		pgf, err := snapshot.BuiltinFile(ctx)
+		if err != nil {
+			return protocol.Range{}, nil, err
+		}
+		pos, err := pgf.PositionPos(pp)
+		if err != nil {
+			return protocol.Range{}, nil, err
+		}
+		path, _ := astutil.PathEnclosingInterval(pgf.File, pos, pos)
+		if id, ok := path[0].(*ast.Ident); ok {
+			rng, err := pgf.NodeRange(id)
+			if err != nil {
+				return protocol.Range{}, nil, err
+			}
+			var obj types.Object
+			if id.Name == "Error" {
+				obj = types.Universe.Lookup("error").Type().Underlying().(*types.Interface).Method(0)
+			} else {
+				obj = types.Universe.Lookup(id.Name)
+			}
+			if obj != nil {
+				h, err := hoverBuiltin(ctx, snapshot, obj)
+				return rng, h, err
+			}
+		}
+		return protocol.Range{}, nil, nil // no object to hover
+	}
+
 	pkg, pgf, err := NarrowestPackageForFile(ctx, snapshot, fh.URI())
 	if err != nil {
 		return protocol.Range{}, nil, err
@@ -200,7 +237,7 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 			if hoverRange == nil {
 				hoverRange = &rng
 			}
-			return *hoverRange, hoverJSON, nil
+			return *hoverRange, hoverJSON, nil // (hoverJSON may be nil)
 		}
 	}
 	// Handle hovering over (non-import-path) literals.
@@ -590,13 +627,16 @@ func hoverBuiltin(ctx context.Context, snapshot *cache.Snapshot, obj types.Objec
 		}, nil
 	}
 
-	pgf, node, err := builtinDecl(ctx, snapshot, obj)
+	pgf, ident, err := builtinDecl(ctx, snapshot, obj)
 	if err != nil {
 		return nil, err
 	}
 
-	var comment *ast.CommentGroup
-	path, _ := astutil.PathEnclosingInterval(pgf.File, node.Pos(), node.End())
+	var (
+		comment *ast.CommentGroup
+		decl    ast.Decl
+	)
+	path, _ := astutil.PathEnclosingInterval(pgf.File, ident.Pos(), ident.Pos())
 	for _, n := range path {
 		switch n := n.(type) {
 		case *ast.GenDecl:
@@ -604,17 +644,17 @@ func hoverBuiltin(ctx context.Context, snapshot *cache.Snapshot, obj types.Objec
 			comment = n.Doc
 			node2 := *n
 			node2.Doc = nil
-			node = &node2
+			decl = &node2
 		case *ast.FuncDecl:
 			// Ditto.
 			comment = n.Doc
 			node2 := *n
 			node2.Doc = nil
-			node = &node2
+			decl = &node2
 		}
 	}
 
-	signature := formatNodeFile(pgf.Tok, node)
+	signature := formatNodeFile(pgf.Tok, decl)
 	// Replace fake types with their common equivalent.
 	// TODO(rfindley): we should instead use obj.Type(), which would have the
 	// *actual* types of the builtin call.
@@ -1159,7 +1199,8 @@ func formatLink(h *hoverJSON, options *settings.Options, pkgURL func(path Packag
 	var url protocol.URI
 	var caption string
 	if pkgURL != nil { // LinksInHover == "gopls"
-		url = pkgURL(PackagePath(h.LinkPath), h.LinkAnchor)
+		path, _, _ := strings.Cut(h.LinkPath, "@") // remove optional module version suffix
+		url = pkgURL(PackagePath(path), h.LinkAnchor)
 		caption = "in gopls doc viewer"
 	} else {
 		if options.LinkTarget == "" {
