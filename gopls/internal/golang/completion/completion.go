@@ -33,6 +33,7 @@ import (
 	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/cache/metadata"
 	"golang.org/x/tools/gopls/internal/file"
+	"golang.org/x/tools/gopls/internal/fuzzy"
 	"golang.org/x/tools/gopls/internal/golang"
 	"golang.org/x/tools/gopls/internal/golang/completion/snippet"
 	"golang.org/x/tools/gopls/internal/protocol"
@@ -43,7 +44,6 @@ import (
 	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/aliases"
 	"golang.org/x/tools/internal/event"
-	"golang.org/x/tools/internal/fuzzy"
 	"golang.org/x/tools/internal/imports"
 	"golang.org/x/tools/internal/stdlib"
 	"golang.org/x/tools/internal/typeparams"
@@ -2130,6 +2130,7 @@ const (
 	kindBool
 	kindBytes
 	kindPtr
+	kindInterface
 	kindFloat
 	kindComplex
 	kindError
@@ -3272,6 +3273,8 @@ func candKind(candType types.Type) objKind {
 		if _, isArray := t.Elem().Underlying().(*types.Array); isArray {
 			kind |= kindArray
 		}
+	case *types.Interface:
+		kind |= kindInterface
 	case *types.Basic:
 		switch info := t.Info(); {
 		case info&types.IsString > 0:
