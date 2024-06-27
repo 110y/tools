@@ -166,39 +166,22 @@ func findSplitJoinTarget(fset *token.FileSet, file *ast.File, src []byte, start,
 		path, _ := astutil.PathEnclosingInterval(file, start, end)
 		for _, node := range path {
 			switch node := node.(type) {
-			case *ast.FuncDecl:
-				// target struct method declarations.
-				//   function (...) someMethod(a int, b int, c int) (d int, e, int) {}
-				params := node.Type.Params
-				if isCursorInside(params.Opening, params.Closing) {
-					return "parameters", params, params.Opening, params.Closing
-				}
-
-				results := node.Type.Results
-				if results != nil && isCursorInside(results.Opening, results.Closing) {
-					return "results", results, results.Opening, results.Closing
-				}
 			case *ast.FuncType:
-				// target function signature args and result.
-				//   type someFunc func (a int, b int, c int) (d int, e int)
-				params := node.Params
-				if isCursorInside(params.Opening, params.Closing) {
-					return "parameters", params, params.Opening, params.Closing
+				// params or results of func signature
+				// Note:
+				// - each ast.Field (e.g. "x, y, z int") is considered a single item.
+				// - splitting Params and Results lists is not usually good style.
+				if p := node.Params; isCursorInside(p.Opening, p.Closing) {
+					return "parameters", p, p.Opening, p.Closing
 				}
-
-				results := node.Results
-				if results != nil && isCursorInside(results.Opening, results.Closing) {
-					return "results", results, results.Opening, results.Closing
+				if r := node.Results; r != nil && isCursorInside(r.Opening, r.Closing) {
+					return "results", r, r.Opening, r.Closing
 				}
-			case *ast.CallExpr:
-				// target function calls.
-				//   someFunction(a, b, c)
+			case *ast.CallExpr: // f(a, b, c)
 				if isCursorInside(node.Lparen, node.Rparen) {
-					return "parameters", node, node.Lparen, node.Rparen
+					return "arguments", node, node.Lparen, node.Rparen
 				}
-			case *ast.CompositeLit:
-				// target composite lit instantiation (structs, maps, arrays).
-				//   A{b: 1, c: 2, d: 3}
+			case *ast.CompositeLit: // T{a, b, c}
 				if isCursorInside(node.Lbrace, node.Rbrace) {
 					return "elements", node, node.Lbrace, node.Rbrace
 				}
