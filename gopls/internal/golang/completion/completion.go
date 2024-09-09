@@ -18,7 +18,7 @@ import (
 	"go/token"
 	"go/types"
 	"math"
-	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,7 +40,6 @@ import (
 	"golang.org/x/tools/gopls/internal/settings"
 	goplsastutil "golang.org/x/tools/gopls/internal/util/astutil"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
-	"golang.org/x/tools/gopls/internal/util/slices"
 	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/aliases"
 	"golang.org/x/tools/internal/event"
@@ -198,7 +197,7 @@ type completer struct {
 
 	// goversion is the version of Go in force in the file, as
 	// defined by x/tools/internal/versions. Empty if unknown.
-	// TODO(adonovan): with go1.22+ it should always be known.
+	// Since go1.22 it should always be known.
 	goversion string
 
 	// (tokFile, pos) is the position at which the request was triggered.
@@ -1039,7 +1038,7 @@ func (c *completer) populateCommentCompletions(comment *ast.CommentGroup) {
 
 			// collect receiver struct fields
 			if node.Recv != nil {
-				sig := c.pkg.TypesInfo().Defs[node.Name].(*types.Func).Type().(*types.Signature)
+				sig := c.pkg.TypesInfo().Defs[node.Name].(*types.Func).Signature()
 				_, named := typesinternal.ReceiverNamed(sig.Recv()) // may be nil if ill-typed
 				if named != nil {
 					if recvStruct, ok := named.Underlying().(*types.Struct); ok {
@@ -1397,12 +1396,7 @@ func (c *completer) selector(ctx context.Context, sel *ast.SelectorExpr) error {
 		return nil
 	}
 
-	var goversion string
-	// TODO(adonovan): after go1.21, replace with:
-	//    goversion = c.pkg.GetTypesInfo().FileVersions[c.file]
-	if v := reflect.ValueOf(c.pkg.TypesInfo()).Elem().FieldByName("FileVersions"); v.IsValid() {
-		goversion = v.Interface().(map[*ast.File]string)[c.file] // may be ""
-	}
+	goversion := c.pkg.TypesInfo().FileVersions[c.file]
 
 	// Extract the package-level candidates using a quick parse.
 	var g errgroup.Group

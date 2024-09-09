@@ -36,7 +36,6 @@ import (
 	gastutil "golang.org/x/tools/gopls/internal/util/astutil"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
-	"golang.org/x/tools/gopls/internal/util/slices"
 	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/aliases"
 	"golang.org/x/tools/internal/event"
@@ -536,7 +535,7 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 			var recv types.Object
 			switch obj := obj.(type) {
 			case *types.Func:
-				sig := obj.Type().(*types.Signature)
+				sig := obj.Signature()
 				if sig.Recv() != nil {
 					tname := typeToObject(sig.Recv().Type())
 					if tname != nil { // beware typed nil
@@ -963,7 +962,7 @@ func objectString(obj types.Object, qf types.Qualifier, declPos token.Pos, file 
 		// specifically, we show the receiver name,
 		// and replace the period in (T).f by a space (#62190).
 
-		sig := obj.Type().(*types.Signature)
+		sig := obj.Signature()
 
 		var buf bytes.Buffer
 		buf.WriteString("func ")
@@ -1186,11 +1185,13 @@ func formatHover(h *hoverJSON, options *settings.Options, pkgURL func(path Packa
 		if h.stdVersion == nil || *h.stdVersion == stdlib.Version(0) {
 			parts[5] = "" // suppress stdlib version if not applicable or initial version 1.0
 		}
-		parts = slices.Remove(parts, "")
 
 		var b strings.Builder
-		for i, part := range parts {
-			if i > 0 {
+		for _, part := range parts {
+			if part == "" {
+				continue
+			}
+			if b.Len() > 0 {
 				if options.PreferredContentFormat == protocol.Markdown {
 					b.WriteString("\n\n")
 				} else {
@@ -1235,7 +1236,7 @@ func StdSymbolOf(obj types.Object) *stdlib.Symbol {
 
 	// Handle Method.
 	if fn, _ := obj.(*types.Func); fn != nil {
-		isPtr, named := typesinternal.ReceiverNamed(fn.Type().(*types.Signature).Recv())
+		isPtr, named := typesinternal.ReceiverNamed(fn.Signature().Recv())
 		if isPackageLevel(named.Obj()) {
 			for _, s := range symbols {
 				if s.Kind != stdlib.Method {

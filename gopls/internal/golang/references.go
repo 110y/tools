@@ -615,7 +615,7 @@ func localReferences(pkg *cache.Package, targets map[types.Object]bool, correspo
 // comparisons for obj, if it is a method, or nil otherwise.
 func effectiveReceiver(obj types.Object) types.Type {
 	if fn, ok := obj.(*types.Func); ok {
-		if recv := fn.Type().(*types.Signature).Recv(); recv != nil {
+		if recv := fn.Signature().Recv(); recv != nil {
 			return methodsets.EnsurePointer(recv.Type())
 		}
 	}
@@ -653,12 +653,6 @@ func objectsAt(info *types.Info, file *ast.File, pos token.Pos) (map[types.Objec
 				targets[obj] = leaf
 			}
 		} else {
-			// Note: prior to go1.21, go/types issue #60372 causes the position
-			// a field Var T created for struct{*p.T} to be recorded at the
-			// start of the field type ("*") not the location of the T.
-			// This affects references and other gopls operations (issue #60369).
-			// TODO(adonovan): delete this comment when we drop support for go1.20.
-
 			// For struct{T}, we prefer the defined field Var over the used TypeName.
 			obj := info.ObjectOf(leaf)
 			if obj == nil {

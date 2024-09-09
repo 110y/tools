@@ -6,15 +6,14 @@ package settings
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	"golang.org/x/tools/gopls/internal/file"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/util/frob"
-	"golang.org/x/tools/gopls/internal/util/maps"
 )
 
 type Annotation string
@@ -1060,6 +1059,9 @@ func (o *Options) setOne(name string, value any) error {
 		if err != nil {
 			return err
 		}
+		if o.Codelenses == nil {
+			o.Codelenses = make(map[CodeLensSource]bool)
+		}
 		o.Codelenses = maps.Clone(o.Codelenses)
 		for source, enabled := range lensOverrides {
 			o.Codelenses[source] = enabled
@@ -1070,15 +1072,7 @@ func (o *Options) setOne(name string, value any) error {
 		}
 
 	case "staticcheck":
-		v, err := asBool(value)
-		if err != nil {
-			return err
-		}
-		if v && !StaticcheckSupported {
-			return fmt.Errorf("staticcheck is not supported at %s;"+
-				" rebuild gopls with a more recent version of Go", runtime.Version())
-		}
-		o.Staticcheck = v
+		return setBool(&o.Staticcheck, value)
 
 	case "local":
 		return setString(&o.Local, value)
@@ -1093,15 +1087,7 @@ func (o *Options) setOne(name string, value any) error {
 		return setBool(&o.ShowBugReports, value)
 
 	case "gofumpt":
-		v, err := asBool(value)
-		if err != nil {
-			return err
-		}
-		if v && !GofumptSupported {
-			return fmt.Errorf("gofumpt is not supported at %s;"+
-				" rebuild gopls with a more recent version of Go", runtime.Version())
-		}
-		o.Gofumpt = v
+		return setBool(&o.Gofumpt, value)
 
 	case "completeFunctionCalls":
 		return setBool(&o.CompleteFunctionCalls, value)

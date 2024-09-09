@@ -39,7 +39,9 @@ import (
 	"go/token"
 	"go/types"
 	"html"
+	"iter"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
@@ -49,8 +51,6 @@ import (
 	goplsastutil "golang.org/x/tools/gopls/internal/util/astutil"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
-	"golang.org/x/tools/gopls/internal/util/slices"
-	"golang.org/x/tools/gopls/internal/util/typesutil"
 	"golang.org/x/tools/internal/stdlib"
 	"golang.org/x/tools/internal/typesinternal"
 )
@@ -120,7 +120,7 @@ func DocFragment(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (p
 	if !sym.Exported() {
 		// Unexported method of exported type?
 		if fn, ok := sym.(*types.Func); ok {
-			if recv := fn.Type().(*types.Signature).Recv(); recv != nil {
+			if recv := fn.Signature().Recv(); recv != nil {
 				_, named := typesinternal.ReceiverNamed(recv)
 				if named != nil && named.Obj().Exported() {
 					sym = named.Obj()
@@ -147,7 +147,7 @@ func DocFragment(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) (p
 	// Inv: sym is field or method, or local.
 	switch sym := sym.(type) {
 	case *types.Func: // => method
-		sig := sym.Type().(*types.Signature)
+		sig := sym.Signature()
 		isPtr, named := typesinternal.ReceiverNamed(sig.Recv())
 		if named != nil {
 			if !named.Obj().Exported() {
@@ -199,7 +199,7 @@ func thingAtPoint(pkg *cache.Package, pgf *parsego.File, start, end token.Pos) t
 	// In an import spec?
 	if len(path) >= 3 { // [...ImportSpec GenDecl File]
 		if spec, ok := path[len(path)-3].(*ast.ImportSpec); ok {
-			if pkgname, ok := typesutil.ImportedPkgName(pkg.TypesInfo(), spec); ok {
+			if pkgname := pkg.TypesInfo().PkgNameOf(spec); pkgname != nil {
 				return thing{pkg: pkgname.Imported()}
 			}
 		}
@@ -364,8 +364,8 @@ func PackageDocHTML(viewID string, pkg *cache.Package, web Web) ([]byte, error) 
 			// canonical name.
 			for _, f := range pkg.Syntax() {
 				for _, imp := range f.Imports {
-					pkgName, ok := typesutil.ImportedPkgName(pkg.TypesInfo(), imp)
-					if ok && pkgName.Name() == name {
+					pkgName := pkg.TypesInfo().PkgNameOf(imp)
+					if pkgName != nil && pkgName.Name() == name {
 						return pkgName.Imported().Path(), true
 					}
 				}
@@ -469,7 +469,7 @@ window.addEventListener('load', function() {
 		label := obj.Name() // for a type
 		if fn, ok := obj.(*types.Func); ok {
 			var buf strings.Builder
-			sig := fn.Type().(*types.Signature)
+			sig := fn.Signature()
 			if sig.Recv() != nil {
 				fmt.Fprintf(&buf, "(%s) ", sig.Recv().Name())
 				fragment = recvType + "." + fn.Name()
@@ -551,7 +551,7 @@ window.addEventListener('load', function() {
 
 				// method of package-level named type?
 				if fn, ok := obj.(*types.Func); ok {
-					sig := fn.Type().(*types.Signature)
+					sig := fn.Signature()
 					if sig.Recv() != nil {
 						_, named := typesinternal.ReceiverNamed(sig.Recv())
 						if named != nil {
@@ -648,7 +648,7 @@ window.addEventListener('load', function() {
 	fnString := func(fn *types.Func) string {
 		pkgRelative := typesinternal.NameRelativeTo(pkg.Types())
 
-		sig := fn.Type().(*types.Signature)
+		sig := fn.Signature()
 
 		// Emit "func (recv T) F".
 		var buf bytes.Buffer
@@ -693,7 +693,7 @@ window.addEventListener('load', function() {
 				cloneTparams(sig.RecvTypeParams()),
 				cloneTparams(sig.TypeParams()),
 				types.NewTuple(append(
-					typesSeqToSlice[*types.Var](sig.Params())[:3],
+					slices.Collect(tupleVariables(sig.Params()))[:3],
 					types.NewVar(0, nil, "", types.Typ[types.Invalid]))...),
 				sig.Results(),
 				false) // any final ...T parameter is truncated
@@ -874,18 +874,16 @@ window.addEventListener('load', function() {
 	return buf.Bytes(), nil
 }
 
-// typesSeq abstracts various go/types sequence types:
-// MethodSet, Tuple, TypeParamList, TypeList.
-// TODO(adonovan): replace with go1.23 iterators.
-type typesSeq[T any] interface {
-	Len() int
-	At(int) T
-}
-
-func typesSeqToSlice[T any](seq typesSeq[T]) []T {
-	slice := make([]T, seq.Len())
-	for i := range slice {
-		slice[i] = seq.At(i)
+// tupleVariables returns a go1.23 iterator over the variables of a tuple type.
+//
+// Example: for v := range tuple.Variables() { ... }
+// TODO(adonovan): use t.Variables in go1.24.
+func tupleVariables(t *types.Tuple) iter.Seq[*types.Var] {
+	return func(yield func(v *types.Var) bool) {
+		for i := range t.Len() {
+			if !yield(t.At(i)) {
+				break
+			}
+		}
 	}
-	return slice
 }
