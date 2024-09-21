@@ -29,7 +29,6 @@ import (
 	"golang.org/x/tools/go/loader"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
-	"golang.org/x/tools/internal/aliases"
 	"golang.org/x/tools/internal/testenv"
 )
 
@@ -350,7 +349,7 @@ func init():
 	}
 	for _, test := range tests {
 		// Create a single-file main package.
-		mainPkg, _ := buildContent(t, test.input, test.mode)
+		mainPkg, _ := buildPackage(t, test.input, test.mode)
 		name := mainPkg.Pkg.Name()
 		initFunc := mainPkg.Func("init")
 		if initFunc == nil {
@@ -406,7 +405,7 @@ var (
 	t interface{} = new(struct{*T})
 )
 `
-	pkg, _ := buildContent(t, input, ssa.BuilderMode(0))
+	pkg, _ := buildPackage(t, input, ssa.BuilderMode(0))
 
 	// Enumerate reachable synthetic functions
 	want := map[string]string{
@@ -989,7 +988,7 @@ func TestIssue58491Rec(t *testing.T) {
 	// Find the local type result instantiated with int.
 	var found bool
 	for _, rt := range p.Prog.RuntimeTypes() {
-		if n, ok := aliases.Unalias(rt).(*types.Named); ok {
+		if n, ok := types.Unalias(rt).(*types.Named); ok {
 			if u, ok := n.Underlying().(*types.Struct); ok {
 				found = true
 				if got, want := n.String(), "p.result"; got != want {
