@@ -204,6 +204,14 @@ type Snapshot struct {
 	// gcOptimizationDetails describes the packages for which we want
 	// optimization details to be included in the diagnostics.
 	gcOptimizationDetails map[metadata.PackageID]unit
+
+	// Concurrent type checking:
+	// typeCheckMu guards the ongoing type checking batch, and reference count of
+	// ongoing type checking operations.
+	// When the batch is no longer needed (batchRef=0), it is discarded.
+	typeCheckMu sync.Mutex
+	batchRef    int
+	batch       *typeCheckBatch
 }
 
 var _ memoize.RefCounted = (*Snapshot)(nil) // snapshots are reference-counted
@@ -2270,7 +2278,8 @@ func extractMagicComments(f *ast.File) []string {
 	return results
 }
 
-// BuiltinFile returns information about the special builtin package.
+// BuiltinFile returns the pseudo-source file builtins.go,
+// parsed with legacy ast.Object resolution.
 func (s *Snapshot) BuiltinFile(ctx context.Context) (*parsego.File, error) {
 	s.AwaitInitialized(ctx)
 
