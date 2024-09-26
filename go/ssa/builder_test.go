@@ -8,11 +8,11 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
-	"go/build"
 	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,9 +24,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/analysis/analysistest"
-	"golang.org/x/tools/go/buildutil"
 	"golang.org/x/tools/go/expect"
-	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 	"golang.org/x/tools/internal/testenv"
@@ -677,57 +676,42 @@ func TestTypeparamTest(t *testing.T) {
 		t.Skip("Consistent flakes on wasm (e.g. https://go.dev/issues/64726)")
 	}
 
-	dir := filepath.Join(build.Default.GOROOT, "test", "typeparam")
+	// located GOROOT based on the relative path of errors in $GOROOT/src/errors
+	stdPkgs, err := packages.Load(&packages.Config{
+		Mode: packages.NeedFiles,
+	}, "errors")
+	if err != nil {
+		t.Fatalf("Failed to load errors package from std: %s", err)
+	}
+	goroot := filepath.Dir(filepath.Dir(filepath.Dir(stdPkgs[0].GoFiles[0])))
+
+	dir := filepath.Join(goroot, "test", "typeparam")
 
 	// Collect all of the .go files in
-	list, err := os.ReadDir(dir)
+	fsys := os.DirFS(dir)
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, entry := range list {
+	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
 			continue // Consider standalone go files.
 		}
-		input := filepath.Join(dir, entry.Name())
 		t.Run(entry.Name(), func(t *testing.T) {
-			src, err := os.ReadFile(input)
+			src, err := fs.ReadFile(fsys, entry.Name())
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			// Only build test files that can be compiled, or compiled and run.
 			if !bytes.HasPrefix(src, []byte("// run")) && !bytes.HasPrefix(src, []byte("// compile")) {
 				t.Skipf("not detected as a run test")
 			}
 
-			t.Logf("Input: %s\n", input)
+			t.Logf("Input: %s\n", entry.Name())
 
-			ctx := build.Default    // copy
-			ctx.GOROOT = "testdata" // fake goroot. Makes tests ~1s. tests take ~80s.
-
-			reportErr := func(err error) {
-				t.Error(err)
-			}
-			conf := loader.Config{Build: &ctx, TypeChecker: types.Config{Error: reportErr}}
-			if _, err := conf.FromArgs([]string{input}, true); err != nil {
-				t.Fatalf("FromArgs(%s) failed: %s", input, err)
-			}
-
-			iprog, err := conf.Load()
-			if iprog != nil {
-				for _, pkg := range iprog.Created {
-					for i, e := range pkg.Errors {
-						t.Errorf("Loading pkg %s error[%d]=%s", pkg, i, e)
-					}
-				}
-			}
-			if err != nil {
-				t.Fatalf("conf.Load(%s) failed: %s", input, err)
-			}
-
-			mode := ssa.SanityCheckFunctions | ssa.InstantiateGenerics
-			prog := ssautil.CreateProgram(iprog, mode)
-			prog.Build()
+			_, _ = buildPackage(t, string(src), ssa.SanityCheckFunctions|ssa.InstantiateGenerics)
 		})
 	}
 }
@@ -781,30 +765,28 @@ func sliceMax(s []int) []int { return s[a():b():c()] }
 
 // TestGenericFunctionSelector ensures generic functions from other packages can be selected.
 func TestGenericFunctionSelector(t *testing.T) {
-	pkgs := map[string]map[string]string{
-		"main": {"m.go": `package main; import "a"; func main() { a.F[int](); a.G[int,string](); a.H(0) }`},
-		"a":    {"a.go": `package a; func F[T any](){}; func G[S, T any](){}; func H[T any](a T){} `},
-	}
+	fsys := overlayFS(map[string][]byte{
+		"go.mod":  goMod("example.com", -1),
+		"main.go": []byte(`package main; import "example.com/a"; func main() { a.F[int](); a.G[int,string](); a.H(0) }`),
+		"a/a.go":  []byte(`package a; func F[T any](){}; func G[S, T any](){}; func H[T any](a T){} `),
+	})
 
 	for _, mode := range []ssa.BuilderMode{
 		ssa.SanityCheckFunctions,
 		ssa.SanityCheckFunctions | ssa.InstantiateGenerics,
 	} {
-		conf := loader.Config{
-			Build: buildutil.FakeContext(pkgs),
-		}
-		conf.Import("main")
 
-		lprog, err := conf.Load()
-		if err != nil {
-			t.Errorf("Load failed: %s", err)
+		pkgs := loadPackages(t, fsys, "example.com") // package main
+		if len(pkgs) != 1 {
+			t.Fatalf("Expected 1 root package but got %d", len(pkgs))
 		}
-		if lprog == nil {
-			t.Fatalf("Load returned nil *Program")
+		prog, _ := ssautil.Packages(pkgs, mode)
+		p := prog.Package(pkgs[0].Types)
+		p.Build()
+
+		if p.Pkg.Name() != "main" {
+			t.Fatalf("Expected the second package is main but got %s", p.Pkg.Name())
 		}
-		// Create and build SSA
-		prog := ssautil.CreateProgram(lprog, mode)
-		p := prog.Package(lprog.Package("main").Pkg)
 		p.Build()
 
 		var callees []string // callees of the CallInstruction.String() in main().
@@ -821,7 +803,7 @@ func TestGenericFunctionSelector(t *testing.T) {
 		}
 		sort.Strings(callees) // ignore the order in the code.
 
-		want := "[a.F[int] a.G[int string] a.H[int]]"
+		want := "[example.com/a.F[int] example.com/a.G[int string] example.com/a.H[int]]"
 		if got := fmt.Sprint(callees); got != want {
 			t.Errorf("Expected main() to contain calls %v. got %v", want, got)
 		}
@@ -1132,10 +1114,10 @@ func TestGenericAliases(t *testing.T) {
 }
 
 func testGenericAliases(t *testing.T) {
-	t.Setenv("GOEXPERIMENT", "aliastypeparams=1")
+	testenv.NeedsGoExperiment(t, "aliastypeparams")
 
 	const source = `
-package P
+package p
 
 type A = uint8
 type B[T any] = [4]T
@@ -1167,22 +1149,9 @@ func f[S any]() {
 }
 `
 
-	conf := loader.Config{Fset: token.NewFileSet()}
-	f, err := parser.ParseFile(conf.Fset, "p.go", source, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conf.CreateFromFiles("p", f)
-	iprog, err := conf.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
+	p, _ := buildPackage(t, source, ssa.InstantiateGenerics)
 
-	// Create and build SSA program.
-	prog := ssautil.CreateProgram(iprog, ssa.InstantiateGenerics)
-	prog.Build()
-
-	probes := callsTo(ssautil.AllFunctions(prog), "print")
+	probes := callsTo(ssautil.AllFunctions(p.Prog), "print")
 	if got, want := len(probes), 3*4*2; got != want {
 		t.Errorf("Found %v probes, expected %v", got, want)
 	}
