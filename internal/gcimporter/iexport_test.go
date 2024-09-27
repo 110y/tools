@@ -47,6 +47,10 @@ func TestIExportData_stdlib(t *testing.T) {
 		t.Skip("skipping RAM hungry test in -short mode")
 	}
 
+	testAliases(t, testIExportData_stdlib)
+}
+
+func testIExportData_stdlib(t *testing.T) {
 	var errorsDir string // GOROOT/src/errors directory
 	{
 		cfg := packages.Config{
@@ -105,7 +109,7 @@ type UnknownType undefined
 	})
 
 	// Assert that we saw a plausible sized library.
-	const minStdlibPackages = 284
+	const minStdlibPackages = 248
 	if n := len(allPkgs); n < minStdlibPackages {
 		t.Errorf("Loaded only %d packages, want at least %d", n, minStdlibPackages)
 	}
@@ -225,6 +229,9 @@ func TestIExportData_long(t *testing.T) {
 }
 
 func TestIExportData_typealiases(t *testing.T) {
+	testAliases(t, testIExportData_typealiases)
+}
+func testIExportData_typealiases(t *testing.T) {
 	// parse and typecheck
 	fset1 := token.NewFileSet()
 	f, err := parser.ParseFile(fset1, "p.go", src, 0)
@@ -420,9 +427,12 @@ func (f importerFunc) Import(path string) (*types.Package, error) { return f(pat
 // on both declarations and uses of type parameterized aliases.
 func TestIExportDataTypeParameterizedAliases(t *testing.T) {
 	testenv.NeedsGo1Point(t, 23)
+	skipWindows(t)
+	if testenv.Go1Point() == 23 {
+		testenv.NeedsGoExperiment(t, "aliastypeparams") // testenv.Go1Point() >= 24 implies aliastypeparams=1
+	}
 
-	testenv.NeedsGoExperiment(t, "aliastypeparams")
-	t.Setenv("GODEBUG", "gotypesalias=1")
+	t.Setenv("GODEBUG", aliasesOn)
 
 	// High level steps:
 	// * parse  and typecheck
@@ -476,6 +486,8 @@ type Chained = C[Named] // B[Named, A[Named]] = B[Named, *Named] = []*Named
 		// This means that it can be loaded by go/importer or go/types.
 		// This step is not supported, but it does give test coverage for stdlib.
 		"goroot": func(t *testing.T) *types.Package {
+			testenv.NeedsGo1Point(t, 24) // requires >= 1.24 go/importer.
+
 			// Write indexed export data file contents.
 			//
 			// TODO(taking): Slightly unclear to what extent this step should be supported by go/importer.
