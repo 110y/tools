@@ -18,10 +18,10 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/gopls/internal/analysis/stubmethods"
 	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/cache/metadata"
 	"golang.org/x/tools/gopls/internal/cache/parsego"
+	"golang.org/x/tools/gopls/internal/golang/stubmethods"
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/diff"
@@ -40,6 +40,7 @@ func stubMethodsFixer(ctx context.Context, snapshot *cache.Snapshot, pkg *cache.
 
 	// A function-local type cannot be stubbed
 	// since there's nowhere to put the methods.
+	// TODO(adonovan): move this check into GetStubInfo instead of offering a bad fix.
 	conc := si.Concrete.Obj()
 	if conc.Parent() != conc.Pkg().Scope() {
 		return nil, nil, fmt.Errorf("local type %q cannot be stubbed", conc.Name())
