@@ -66,11 +66,12 @@ type typeCheckBatch struct {
 	handleMu sync.Mutex
 	_handles map[PackageID]*packageHandle
 
-	parseCache     *parseCache
-	fset           *token.FileSet                          // describes all parsed or imported files
-	cpulimit       chan unit                               // concurrency limiter for CPU-bound operations
-	syntaxPackages *futureCache[PackageID, *Package]       // transient cache of in-progress syntax futures
-	importPackages *futureCache[PackageID, *types.Package] // persistent cache of imports
+	parseCache       *parseCache
+	fset             *token.FileSet                          // describes all parsed or imported files
+	cpulimit         chan unit                               // concurrency limiter for CPU-bound operations
+	syntaxPackages   *futureCache[PackageID, *Package]       // transient cache of in-progress syntax futures
+	importPackages   *futureCache[PackageID, *types.Package] // persistent cache of imports
+	gopackagesdriver bool                                    // for bug reporting: were packages loaded with a driver?
 }
 
 // addHandles is called by each goroutine joining the type check batch, to
@@ -237,7 +238,7 @@ func (s *Snapshot) acquireTypeChecking() (*typeCheckBatch, func()) {
 
 	if s.batch == nil {
 		assert(s.batchRef == 0, "miscounted type checking")
-		s.batch = newTypeCheckBatch(s.view.parseCache)
+		s.batch = newTypeCheckBatch(s.view.parseCache, s.view.typ == GoPackagesDriverView)
 	}
 	s.batchRef++
 
@@ -256,14 +257,15 @@ func (s *Snapshot) acquireTypeChecking() (*typeCheckBatch, func()) {
 // shared parseCache.
 //
 // If a non-nil importGraph is provided, imports in this graph will be reused.
-func newTypeCheckBatch(parseCache *parseCache) *typeCheckBatch {
+func newTypeCheckBatch(parseCache *parseCache, gopackagesdriver bool) *typeCheckBatch {
 	return &typeCheckBatch{
-		_handles:       make(map[PackageID]*packageHandle),
-		parseCache:     parseCache,
-		fset:           fileSetWithBase(reservedForParsing),
-		cpulimit:       make(chan unit, runtime.GOMAXPROCS(0)),
-		syntaxPackages: newFutureCache[PackageID, *Package](false),      // don't persist syntax packages
-		importPackages: newFutureCache[PackageID, *types.Package](true), // ...but DO persist imports
+		_handles:         make(map[PackageID]*packageHandle),
+		parseCache:       parseCache,
+		fset:             fileSetWithBase(reservedForParsing),
+		cpulimit:         make(chan unit, runtime.GOMAXPROCS(0)),
+		syntaxPackages:   newFutureCache[PackageID, *Package](false),      // don't persist syntax packages
+		importPackages:   newFutureCache[PackageID, *types.Package](true), // ...but DO persist imports
+		gopackagesdriver: gopackagesdriver,
 	}
 }
 
@@ -479,8 +481,14 @@ func (b *typeCheckBatch) importPackage(ctx context.Context, mp *metadata.Package
 					// manifest in the export data of mp.PkgPath is
 					// inconsistent with mp.Name. Or perhaps there
 					// are duplicate PkgPath items in the manifest?
-					return bug.Errorf("internal error: package name is %q, want %q (id=%q, path=%q) (see issue #60904)",
-						pkg.Name(), item.Name, id, item.Path)
+					if b.gopackagesdriver {
+						return bug.Errorf("internal error: package name is %q, want %q (id=%q, path=%q) (see issue #60904) (using GOPACKAGESDRIVER)",
+							pkg.Name(), item.Name, id, item.Path)
+					} else {
+						return bug.Errorf("internal error: package name is %q, want %q (id=%q, path=%q) (see issue #60904)",
+							pkg.Name(), item.Name, id, item.Path)
+
+					}
 				}
 			} else {
 				id = importLookup(PackagePath(item.Path))
@@ -1877,7 +1885,11 @@ func typeErrorsToDiagnostics(pkg *syntaxPackage, inputs *typeCheckInputs, errs [
 				// over fixed syntax, which overflowed its file. So it's definitely
 				// possible that we get here (it's hard to reason about fixing up the
 				// AST). Nevertheless, it's a bug.
-				bug.Reportf("internal error: type checker error %q outside its Fset", e)
+				if pkg.hasFixedFiles() {
+					bug.Reportf("internal error: type checker error %q outside its Fset (fixed files)", e)
+				} else {
+					bug.Reportf("internal error: type checker error %q outside its Fset", e)
+				}
 				continue
 			}
 			pgf, err := pkg.File(protocol.URIFromPath(posn.Filename))
@@ -1889,12 +1901,16 @@ func typeErrorsToDiagnostics(pkg *syntaxPackage, inputs *typeCheckInputs, errs [
 				// package (the message would be rather confusing), but we do want to
 				// report an error in the current package (golang/go#59005).
 				if i == 0 {
-					bug.Reportf("internal error: could not locate file for primary type checker error %v: %v", e, err)
+					if pkg.hasFixedFiles() {
+						bug.Reportf("internal error: could not locate file for primary type checker error %v: %v (fixed files)", e, err)
+					} else {
+						bug.Reportf("internal error: could not locate file for primary type checker error %v: %v", e, err)
+					}
 				}
 				continue
 			}
 
-			// debugging #65960
+			// debugging golang/go#65960
 			//
 			// At this point, we know 'start' IsValid, and
 			// StartPosition(start) worked (with e.Fset).
@@ -1903,21 +1919,33 @@ func typeErrorsToDiagnostics(pkg *syntaxPackage, inputs *typeCheckInputs, errs [
 			// is also in range for pgf.Tok, which means
 			// the PosRange failure must be caused by 'end'.
 			if pgf.Tok != e.Fset.File(start) {
-				bug.Reportf("internal error: inconsistent token.Files for pos")
+				if pkg.hasFixedFiles() {
+					bug.Reportf("internal error: inconsistent token.Files for pos (fixed files)")
+				} else {
+					bug.Reportf("internal error: inconsistent token.Files for pos")
+				}
 			}
 
 			if end == start {
 				// Expand the end position to a more meaningful span.
 				end = analysisinternal.TypeErrorEndPos(e.Fset, pgf.Src, start)
 
-				// debugging #65960
+				// debugging golang/go#65960
 				if _, err := safetoken.Offset(pgf.Tok, end); err != nil {
-					bug.Reportf("TypeErrorEndPos returned invalid end: %v", err)
+					if pkg.hasFixedFiles() {
+						bug.Reportf("TypeErrorEndPos returned invalid end: %v (fixed files)", err)
+					} else {
+						bug.Reportf("TypeErrorEndPos returned invalid end: %v", err)
+					}
 				}
 			} else {
-				// debugging #65960
+				// debugging golang/go#65960
 				if _, err := safetoken.Offset(pgf.Tok, end); err != nil {
-					bug.Reportf("ReadGo116ErrorData returned invalid end: %v", err)
+					if pkg.hasFixedFiles() {
+						bug.Reportf("ReadGo116ErrorData returned invalid end: %v (fixed files)", err)
+					} else {
+						bug.Reportf("ReadGo116ErrorData returned invalid end: %v", err)
+					}
 				}
 			}
 
