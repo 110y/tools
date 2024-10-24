@@ -19,6 +19,7 @@ import (
 	"go/token"
 	"go/types"
 	"log"
+	"maps"
 	urlpkg "net/url"
 	"path/filepath"
 	"reflect"
@@ -45,6 +46,7 @@ import (
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/frob"
 	"golang.org/x/tools/gopls/internal/util/moremaps"
+	"golang.org/x/tools/gopls/internal/util/persistent"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/event"
 	"golang.org/x/tools/internal/facts"
@@ -175,7 +177,7 @@ const AnalysisProgressTitle = "Analyzing Dependencies"
 // The analyzers list must be duplicate free; order does not matter.
 //
 // Notifications of progress may be sent to the optional reporter.
-func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Package, analyzers []*settings.Analyzer, reporter *progress.Tracker) ([]*Diagnostic, error) {
+func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Package, reporter *progress.Tracker) ([]*Diagnostic, error) {
 	start := time.Now() // for progress reporting
 
 	var tagStr string // sorted comma-separated list of PackageIDs
@@ -192,6 +194,7 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 
 	// Filter and sort enabled root analyzers.
 	// A disabled analyzer may still be run if required by another.
+	analyzers := analyzers(s.Options().Staticcheck)
 	toSrc := make(map[*analysis.Analyzer]*settings.Analyzer)
 	var enabledAnalyzers []*analysis.Analyzer // enabled subset + transitive requirements
 	for _, a := range analyzers {
@@ -259,7 +262,7 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 			an = &analysisNode{
 				allNodes:     nodes,
 				fset:         fset,
-				fsource:      struct{ file.Source }{s}, // expose only ReadFile
+				fsource:      s, // expose only ReadFile
 				viewType:     s.View().Type(),
 				mp:           mp,
 				analyzers:    facty, // all nodes run at least the facty analyzers
@@ -305,6 +308,8 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 			from.unfinishedSuccs.Add(+1) // incref
 			an.preds = append(an.preds, from)
 		}
+		// Increment unfinishedPreds even for root nodes (from==nil), so that their
+		// Action summaries are never cleared.
 		an.unfinishedPreds.Add(+1)
 		return an, nil
 	}
@@ -320,20 +325,14 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 		roots = append(roots, root)
 	}
 
-	// Now that we have read all files,
-	// we no longer need the snapshot.
-	// (but options are needed for progress reporting)
-	options := s.Options()
-	s = nil
-
 	// Progress reporting. If supported, gopls reports progress on analysis
 	// passes that are taking a long time.
 	maybeReport := func(completed int64) {}
 
 	// Enable progress reporting if enabled by the user
 	// and we have a capable reporter.
-	if reporter != nil && reporter.SupportsWorkDoneProgress() && options.AnalysisProgressReporting {
-		var reportAfter = options.ReportAnalysisProgressAfter // tests may set this to 0
+	if reporter != nil && reporter.SupportsWorkDoneProgress() && s.Options().AnalysisProgressReporting {
+		var reportAfter = s.Options().ReportAnalysisProgressAfter // tests may set this to 0
 		const reportEvery = 1 * time.Second
 
 		ctx, cancel := context.WithCancel(ctx)
@@ -394,10 +393,34 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 			limiter <- unit{}
 			defer func() { <-limiter }()
 
-			summary, err := an.runCached(ctx)
+			// Check to see if we already have a valid cache key. If not, compute it.
+			//
+			// The snapshot field that memoizes keys depends on whether this key is
+			// for the analysis result including all enabled analyzer, or just facty analyzers.
+			var keys *persistent.Map[PackageID, file.Hash]
+			if _, root := pkgs[an.mp.ID]; root {
+				keys = s.fullAnalysisKeys
+			} else {
+				keys = s.factyAnalysisKeys
+			}
+
+			// As keys is referenced by a snapshot field, it's guarded by s.mu.
+			s.mu.Lock()
+			key, keyFound := keys.Get(an.mp.ID)
+			s.mu.Unlock()
+
+			if !keyFound {
+				key = an.cacheKey()
+				s.mu.Lock()
+				keys.Set(an.mp.ID, key, nil)
+				s.mu.Unlock()
+			}
+
+			summary, err := an.runCached(ctx, key)
 			if err != nil {
 				return err // cancelled, or failed to produce a package
 			}
+
 			maybeReport(completed.Add(1))
 			an.summary = summary
 
@@ -484,6 +507,14 @@ func (s *Snapshot) Analyze(ctx context.Context, pkgs map[PackageID]*metadata.Pac
 		}
 	}
 	return results, nil
+}
+
+func analyzers(staticcheck bool) []*settings.Analyzer {
+	analyzers := slices.Collect(maps.Values(settings.DefaultAnalyzers))
+	if staticcheck {
+		analyzers = slices.AppendSeq(analyzers, maps.Values(settings.StaticcheckAnalyzers))
+	}
+	return analyzers
 }
 
 func (an *analysisNode) decrefPreds() {
@@ -689,6 +720,19 @@ type actionSummary struct {
 	Err         string // "" => success
 }
 
+var (
+	// inFlightAnalyses records active analysis operations so that later requests
+	// can be satisfied by joining onto earlier requests that are still active.
+	//
+	// Note that persistent=false, so results are cleared once they are delivered
+	// to awaiting goroutines.
+	inFlightAnalyses = newFutureCache[file.Hash, *analyzeSummary](false)
+
+	// cacheLimit reduces parallelism of filecache updates.
+	// We allow more than typical GOMAXPROCS as it's a mix of CPU and I/O.
+	cacheLimit = make(chan unit, 32)
+)
+
 // runCached applies a list of analyzers (plus any others
 // transitively required by them) to a package.  It succeeds as long
 // as it could produce a types.Package, even if there were direct or
@@ -696,21 +740,14 @@ type actionSummary struct {
 // actions failed. It usually fails only if the package was unknown,
 // a file was missing, or the operation was cancelled.
 //
-// Postcondition: runCached must not continue to use the snapshot
-// (in background goroutines) after it has returned; see memoize.RefCounted.
-func (an *analysisNode) runCached(ctx context.Context) (*analyzeSummary, error) {
-	// At this point we have the action results (serialized
-	// packages and facts) of our immediate dependencies,
-	// and the metadata and content of this package.
+// The provided key is the cache key for this package.
+func (an *analysisNode) runCached(ctx context.Context, key file.Hash) (*analyzeSummary, error) {
+	// At this point we have the action results (serialized packages and facts)
+	// of our immediate dependencies, and the metadata and content of this
+	// package.
 	//
-	// We now compute a hash for all our inputs, and consult a
-	// global cache of promised results. If nothing material
-	// has changed, we'll make a hit in the shared cache.
-	//
-	// The hash of our inputs is based on the serialized export
-	// data and facts so that immaterial changes can be pruned
-	// without decoding.
-	key := an.cacheKey()
+	// We now consult a global cache of promised results. If nothing material has
+	// changed, we'll make a hit in the shared cache.
 
 	// Access the cache.
 	var summary *analyzeSummary
@@ -725,38 +762,40 @@ func (an *analysisNode) runCached(ctx context.Context) (*analyzeSummary, error) 
 		return nil, bug.Errorf("internal error reading shared cache: %v", err)
 	} else {
 		// Cache miss: do the work.
-		var err error
-		summary, err = an.run(ctx)
+		cachedSummary, err := inFlightAnalyses.get(ctx, key, func(ctx context.Context) (*analyzeSummary, error) {
+			summary, err := an.run(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if summary == nil { // debugging #66732 (can't happen)
+				bug.Reportf("analyzeNode.run returned nil *analyzeSummary")
+			}
+			go func() {
+				cacheLimit <- unit{}            // acquire token
+				defer func() { <-cacheLimit }() // release token
+
+				data := analyzeSummaryCodec.Encode(summary)
+				if false {
+					log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.mp.ID)
+				}
+				if err := filecache.Set(cacheKind, key, data); err != nil {
+					event.Error(ctx, "internal error updating analysis shared cache", err)
+				}
+			}()
+			return summary, nil
+		})
 		if err != nil {
 			return nil, err
 		}
-		if summary == nil { // debugging #66732 (can't happen)
-			bug.Reportf("analyzeNode.run returned nil *analyzeSummary")
-		}
 
-		an.unfinishedPreds.Add(+1) // incref
-		go func() {
-			defer an.decrefPreds() //decref
-
-			cacheLimit <- unit{}            // acquire token
-			defer func() { <-cacheLimit }() // release token
-
-			data := analyzeSummaryCodec.Encode(summary)
-			if false {
-				log.Printf("Set key=%d value=%d id=%s\n", len(key), len(data), an.mp.ID)
-			}
-			if err := filecache.Set(cacheKind, key, data); err != nil {
-				event.Error(ctx, "internal error updating analysis shared cache", err)
-			}
-		}()
+		// Copy the computed summary. In decrefPreds, we may zero out
+		// summary.actions, but can't mutate a shared result.
+		copy := *cachedSummary
+		summary = &copy
 	}
 
 	return summary, nil
 }
-
-// cacheLimit reduces parallelism of cache updates.
-// We allow more than typical GOMAXPROCS as it's a mix of CPU and I/O.
-var cacheLimit = make(chan unit, 32)
 
 // analysisCacheKey returns a cache key that is a cryptographic digest
 // of the all the values that might affect type checking and analysis:
