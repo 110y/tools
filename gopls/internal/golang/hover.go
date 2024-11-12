@@ -344,6 +344,13 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 	// if they embed platform-variant types.
 	//
 	var sizeOffset string // optional size/offset description
+	// debugging #69362: unexpected nil Defs[ident] value (?)
+	_ = ident.Pos()          // (can't be nil due to check after referencedObject)
+	_ = pkg.TypesInfo()      // (can't be nil due to check in call to inferredSignature)
+	_ = pkg.TypesInfo().Defs // (can't be nil due to nature of cache.Package)
+	if def, ok := pkg.TypesInfo().Defs[ident]; ok {
+		_ = def.Pos() // can't be nil due to reasoning in #69362.
+	}
 	if def, ok := pkg.TypesInfo().Defs[ident]; ok && ident.Pos() == def.Pos() {
 		// This is the declaring identifier.
 		// (We can't simply use ident.Pos() == obj.Pos() because
@@ -1620,7 +1627,12 @@ func computeSizeOffsetInfo(pkg *cache.Package, path []ast.Node, obj types.Object
 		var tStruct *types.Struct
 		for _, n := range path {
 			if n, ok := n.(*ast.StructType); ok {
-				tStruct = pkg.TypesInfo().TypeOf(n).(*types.Struct)
+				t, ok := pkg.TypesInfo().TypeOf(n).(*types.Struct)
+				if ok {
+					// golang/go#69150: TypeOf(n) was observed not to be a Struct (likely
+					// nil) in some cases.
+					tStruct = t
+				}
 				break
 			}
 		}
