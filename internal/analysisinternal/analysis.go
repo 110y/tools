@@ -66,6 +66,8 @@ func TypeErrorEndPos(fset *token.FileSet, src []byte, start token.Pos) token.Pos
 	return end
 }
 
+// ZeroValue returns the ast.Expr representation of the "zero" value of the type t.
+// See [typesinternal.ZeroString] for a variant that returns a string.
 func ZeroValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 	// TODO(adonovan): think about generics, and also generic aliases.
 	under := types.Unalias(typ)
@@ -80,9 +82,11 @@ func ZeroValue(f *ast.File, pkg *types.Package, typ types.Type) ast.Expr {
 		case under.Info()&types.IsNumeric != 0:
 			return &ast.BasicLit{Kind: token.INT, Value: "0"}
 		case under.Info()&types.IsBoolean != 0:
-			return &ast.Ident{Name: "false"}
+			return ast.NewIdent("false")
 		case under.Info()&types.IsString != 0:
 			return &ast.BasicLit{Kind: token.STRING, Value: `""`}
+		case under == types.Typ[types.Invalid]:
+			return nil
 		default:
 			panic(fmt.Sprintf("unknown basic type %v", under))
 		}
