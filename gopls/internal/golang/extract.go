@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/format"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"go/types"
 	"slices"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/tools/gopls/internal/util/bug"
 	"golang.org/x/tools/gopls/internal/util/safetoken"
 	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/typesinternal"
 )
 
 func extractVariable(fset *token.FileSet, start, end token.Pos, src []byte, file *ast.File, pkg *types.Package, info *types.Info) (*token.FileSet, *analysis.SuggestedFix, error) {
@@ -360,7 +362,7 @@ func extractFunctionMethod(fset *token.FileSet, start, end token.Pos, src []byte
 			// The blank identifier is always a local variable
 			continue
 		}
-		typ := analysisinternal.TypeExpr(file, pkg, v.obj.Type())
+		typ := typesinternal.TypeExpr(file, pkg, v.obj.Type())
 		if typ == nil {
 			return nil, nil, fmt.Errorf("nil AST expression for type: %v", v.obj.Name())
 		}
@@ -448,7 +450,8 @@ func extractFunctionMethod(fset *token.FileSet, start, end token.Pos, src []byte
 		return nil, nil, err
 	}
 	selection := src[startOffset:endOffset]
-	extractedBlock, err := parseBlockStmt(fset, selection)
+
+	extractedBlock, extractedComments, err := parseStmts(fset, selection)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -569,39 +572,15 @@ func extractFunctionMethod(fset *token.FileSet, start, end token.Pos, src []byte
 	if canDefine {
 		sym = token.DEFINE
 	}
-	var name, funName string
+	var funName string
 	if isMethod {
-		name = "newMethod"
 		// TODO(suzmue): generate a name that does not conflict for "newMethod".
-		funName = name
+		funName = "newMethod"
 	} else {
-		name = "newFunction"
-		funName, _ = generateAvailableName(start, path, pkg, info, name, 0)
+		funName, _ = generateAvailableName(start, path, pkg, info, "newFunction", 0)
 	}
 	extractedFunCall := generateFuncCall(hasNonNestedReturn, hasReturnValues, params,
 		append(returns, getNames(retVars)...), funName, sym, receiverName)
-
-	// Build the extracted function.
-	newFunc := &ast.FuncDecl{
-		Name: ast.NewIdent(funName),
-		Type: &ast.FuncType{
-			Params:  &ast.FieldList{List: paramTypes},
-			Results: &ast.FieldList{List: append(returnTypes, getDecls(retVars)...)},
-		},
-		Body: extractedBlock,
-	}
-	if isMethod {
-		var names []*ast.Ident
-		if receiverUsed {
-			names = append(names, ast.NewIdent(receiverName))
-		}
-		newFunc.Recv = &ast.FieldList{
-			List: []*ast.Field{{
-				Names: names,
-				Type:  receiver.Type,
-			}},
-		}
-	}
 
 	// Create variable declarations for any identifiers that need to be initialized prior to
 	// calling the extracted function. We do not manually initialize variables if every return
@@ -623,17 +602,49 @@ func extractFunctionMethod(fset *token.FileSet, start, end token.Pos, src []byte
 			return nil, nil, err
 		}
 	}
+
+	// Build the extracted function. We format the function declaration and body
+	// separately, so that comments are printed relative to the extracted
+	// BlockStmt.
+	//
+	// In other words, extractedBlock and extractedComments were parsed from a
+	// synthetic function declaration of the form func _() { ... }. If we now
+	// print the real function declaration, the length of the signature will have
+	// grown, causing some comment positions to be computed as inside the
+	// signature itself.
+	newFunc := &ast.FuncDecl{
+		Name: ast.NewIdent(funName),
+		Type: &ast.FuncType{
+			Params:  &ast.FieldList{List: paramTypes},
+			Results: &ast.FieldList{List: append(returnTypes, getDecls(retVars)...)},
+		},
+		// Body handled separately -- see above.
+	}
+	if isMethod {
+		var names []*ast.Ident
+		if receiverUsed {
+			names = append(names, ast.NewIdent(receiverName))
+		}
+		newFunc.Recv = &ast.FieldList{
+			List: []*ast.Field{{
+				Names: names,
+				Type:  receiver.Type,
+			}},
+		}
+	}
 	if err := format.Node(&newFuncBuf, fset, newFunc); err != nil {
 		return nil, nil, err
 	}
-	// Find all the comments within the range and print them to be put somewhere.
-	// TODO(suzmue): print these in the extracted function at the correct place.
-	for _, cg := range file.Comments {
-		if cg.Pos().IsValid() && cg.Pos() < end && cg.Pos() >= start {
-			for _, c := range cg.List {
-				fmt.Fprintln(&commentBuf, c.Text)
-			}
-		}
+	// Write a space between the end of the function signature and opening '{'.
+	if err := newFuncBuf.WriteByte(' '); err != nil {
+		return nil, nil, err
+	}
+	commentedNode := &printer.CommentedNode{
+		Node:     extractedBlock,
+		Comments: extractedComments,
+	}
+	if err := format.Node(&newFuncBuf, fset, commentedNode); err != nil {
+		return nil, nil, err
 	}
 
 	// We're going to replace the whole enclosing function,
@@ -1186,25 +1197,25 @@ func varOverridden(info *types.Info, firstUse *ast.Ident, obj types.Object, isFr
 	return isOverriden
 }
 
-// parseBlockStmt generates an AST file from the given text. We then return the portion of the
-// file that represents the text.
-func parseBlockStmt(fset *token.FileSet, src []byte) (*ast.BlockStmt, error) {
+// parseStmts parses the specified source (a list of statements) and
+// returns them as a BlockStmt along with any associated comments.
+func parseStmts(fset *token.FileSet, src []byte) (*ast.BlockStmt, []*ast.CommentGroup, error) {
 	text := "package main\nfunc _() { " + string(src) + " }"
-	extract, err := parser.ParseFile(fset, "", text, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(fset, "", text, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(extract.Decls) == 0 {
-		return nil, fmt.Errorf("parsed file does not contain any declarations")
+	if len(file.Decls) != 1 {
+		return nil, nil, fmt.Errorf("got %d declarations, want 1", len(file.Decls))
 	}
-	decl, ok := extract.Decls[0].(*ast.FuncDecl)
+	decl, ok := file.Decls[0].(*ast.FuncDecl)
 	if !ok {
-		return nil, fmt.Errorf("parsed file does not contain expected function declaration")
+		return nil, nil, bug.Errorf("parsed file does not contain expected function declaration")
 	}
 	if decl.Body == nil {
-		return nil, fmt.Errorf("extracted function has no body")
+		return nil, nil, bug.Errorf("extracted function has no body")
 	}
-	return decl.Body, nil
+	return decl.Body, file.Comments, nil
 }
 
 // generateReturnInfo generates the information we need to adjust the return statements and
@@ -1233,7 +1244,7 @@ func generateReturnInfo(enclosing *ast.FuncType, pkg *types.Package, path []ast.
 				return nil, nil, fmt.Errorf(
 					"failed type conversion, AST expression: %T", field.Type)
 			}
-			expr := analysisinternal.TypeExpr(file, pkg, typ)
+			expr := typesinternal.TypeExpr(file, pkg, typ)
 			if expr == nil {
 				return nil, nil, fmt.Errorf("nil AST expression")
 			}
@@ -1253,7 +1264,7 @@ func generateReturnInfo(enclosing *ast.FuncType, pkg *types.Package, path []ast.
 				}
 				retName, idx := generateNameOutsideOfRange(start, end, path, pkg, info, bestName, nameIdx[bestName])
 				nameIdx[bestName] = idx
-				z := analysisinternal.ZeroValue(file, pkg, typ)
+				z := typesinternal.ZeroExpr(file, pkg, typ)
 				if z == nil {
 					return nil, nil, fmt.Errorf("can't generate zero value for %T", typ)
 				}
@@ -1332,7 +1343,7 @@ func adjustReturnStatements(returnTypes []*ast.Field, seenVars map[types.Object]
 			if typ != returnType.Type {
 				continue
 			}
-			val = analysisinternal.ZeroValue(file, pkg, obj.Type())
+			val = typesinternal.ZeroExpr(file, pkg, obj.Type())
 			break
 		}
 		if val == nil {
