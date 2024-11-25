@@ -11,6 +11,7 @@ import (
 	"go/constant"
 	"go/format"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"go/types"
 	pathpkg "path"
@@ -202,17 +203,37 @@ func (st *state) inline() (*Result, error) {
 		}
 	}
 
+	// File rewriting. This proceeds in multiple passes, in order to maximally
+	// preserve comment positioning. (This could be greatly simplified once
+	// comments are stored in the tree.)
+	//
 	// Don't call replaceNode(caller.File, res.old, res.new)
 	// as it mutates the caller's syntax tree.
 	// Instead, splice the file, replacing the extent of the "old"
 	// node by a formatting of the "new" node, and re-parse.
 	// We'll fix up the imports on this new tree, and format again.
-	var f *ast.File
+	//
+	// Inv: f is the result of parsing content, using fset.
+	var (
+		content = caller.Content
+		fset    = caller.Fset
+		f       *ast.File // parsed below
+	)
+	reparse := func() error {
+		const mode = parser.ParseComments | parser.SkipObjectResolution | parser.AllErrors
+		f, err = parser.ParseFile(fset, "callee.go", content, mode)
+		if err != nil {
+			// Something has gone very wrong.
+			logf("failed to reparse <<%s>>: %v", string(content), err) // debugging
+			return err
+		}
+		return nil
+	}
 	{
-		start := offsetOf(caller.Fset, res.old.Pos())
-		end := offsetOf(caller.Fset, res.old.End())
+		start := offsetOf(fset, res.old.Pos())
+		end := offsetOf(fset, res.old.End())
 		var out bytes.Buffer
-		out.Write(caller.Content[:start])
+		out.Write(content[:start])
 		// TODO(adonovan): might it make more sense to use
 		// callee.Fset when formatting res.new?
 		// The new tree is a mix of (cloned) caller nodes for
@@ -232,21 +253,18 @@ func (st *state) inline() (*Result, error) {
 				if i > 0 {
 					out.WriteByte('\n')
 				}
-				if err := format.Node(&out, caller.Fset, stmt); err != nil {
+				if err := format.Node(&out, fset, stmt); err != nil {
 					return nil, err
 				}
 			}
 		} else {
-			if err := format.Node(&out, caller.Fset, res.new); err != nil {
+			if err := format.Node(&out, fset, res.new); err != nil {
 				return nil, err
 			}
 		}
-		out.Write(caller.Content[end:])
-		const mode = parser.ParseComments | parser.SkipObjectResolution | parser.AllErrors
-		f, err = parser.ParseFile(caller.Fset, "callee.go", &out, mode)
-		if err != nil {
-			// Something has gone very wrong.
-			logf("failed to parse <<%s>>", &out) // debugging
+		out.Write(content[end:])
+		content = out.Bytes()
+		if err := reparse(); err != nil {
 			return nil, err
 		}
 	}
@@ -257,15 +275,58 @@ func (st *state) inline() (*Result, error) {
 	// to avoid migration of pre-import comments.
 	// The imports will be organized below.
 	if len(res.newImports) > 0 {
-		var importDecl *ast.GenDecl
+		// If we have imports to add, do so independent of the rest of the file.
+		// Otherwise, the length of the new imports may consume floating comments,
+		// causing them to be printed inside the imports block.
+		var (
+			importDecl    *ast.GenDecl
+			comments      []*ast.CommentGroup // relevant comments.
+			before, after []byte              // pre- and post-amble for the imports block.
+		)
 		if len(f.Imports) > 0 {
 			// Append specs to existing import decl
 			importDecl = f.Decls[0].(*ast.GenDecl)
+			for _, comment := range f.Comments {
+				// Filter comments. Don't use CommentMap.Filter here, because we don't
+				// want to include comments that document the import decl itself, for
+				// example:
+				//
+				//  // We don't want this comment to be duplicated.
+				//  import (
+				//    "something"
+				//  )
+				if importDecl.Pos() <= comment.Pos() && comment.Pos() < importDecl.End() {
+					comments = append(comments, comment)
+				}
+			}
+			before = content[:offsetOf(fset, importDecl.Pos())]
+			importDecl.Doc = nil // present in before
+			after = content[offsetOf(fset, importDecl.End()):]
 		} else {
 			// Insert new import decl.
 			importDecl = &ast.GenDecl{Tok: token.IMPORT}
 			f.Decls = prepend[ast.Decl](importDecl, f.Decls...)
+
+			// Make room for the new declaration after the package declaration.
+			pkgEnd := f.Name.End()
+			file := fset.File(pkgEnd)
+			if file == nil {
+				logf("internal error: missing pkg file")
+				return nil, fmt.Errorf("missing pkg file for %s", f.Name.Name)
+			}
+			// Preserve any comments after the package declaration, by splicing in
+			// the new import block after the end of the package declaration line.
+			line := file.Line(pkgEnd)
+			if line < len(file.Lines()) { // line numbers are 1-based
+				nextLinePos := file.LineStart(line + 1)
+				nextLine := offsetOf(fset, nextLinePos)
+				before = slices.Concat(content[:nextLine], []byte("\n"))
+				after = slices.Concat([]byte("\n\n"), content[nextLine:])
+			} else {
+				before = slices.Concat(content, []byte("\n\n"))
+			}
 		}
+		// Add new imports.
 		for _, imp := range res.newImports {
 			// Check that the new imports are accessible.
 			path, _ := strconv.Unquote(imp.spec.Path.Value)
@@ -273,6 +334,21 @@ func (st *state) inline() (*Result, error) {
 				return nil, fmt.Errorf("can't inline function %v as its body refers to inaccessible package %q", callee, path)
 			}
 			importDecl.Specs = append(importDecl.Specs, imp.spec)
+		}
+		var out bytes.Buffer
+		out.Write(before)
+		commented := &printer.CommentedNode{
+			Node:     importDecl,
+			Comments: comments,
+		}
+		if err := format.Node(&out, fset, commented); err != nil {
+			logf("failed to format new importDecl: %v", err) // debugging
+			return nil, err
+		}
+		out.Write(after)
+		content = out.Bytes()
+		if err := reparse(); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1278,6 +1354,10 @@ func (st *state) inlineCall() (*inlineCallResult, error) {
 		Type: calleeDecl.Type,
 		Body: calleeDecl.Body,
 	}
+	// clear positions before prepending the binding decl below, since the
+	// binding decl contains syntax from the caller and we must not mutate the
+	// caller. (This was a prior bug.)
+	clearPositions(funcLit)
 
 	// Literalization can still make use of a binding
 	// decl as it gives a more natural reading order:
@@ -1299,7 +1379,6 @@ func (st *state) inlineCall() (*inlineCallResult, error) {
 		Ellipsis: token.NoPos, // f(slice...) is always simplified
 		Args:     remainingArgs,
 	}
-	clearPositions(newCall.Fun)
 	res.old = caller.Call
 	res.new = newCall
 	return res, nil
@@ -1316,6 +1395,7 @@ type argument struct {
 	freevars      map[string]bool // free names of expr
 	substitutable bool            // is candidate for substitution
 	variadic      bool            // is explicit []T{...} for eliminated variadic
+	desugaredRecv bool            // is *recv or &recv, where operator was elided
 }
 
 // arguments returns the effective arguments of the call.
@@ -1409,12 +1489,14 @@ func (st *state) arguments(caller *Caller, calleeDecl *ast.FuncDecl, assign1 fun
 				// &recv
 				arg.expr = &ast.UnaryExpr{Op: token.AND, X: arg.expr}
 				arg.typ = types.NewPointer(arg.typ)
+				arg.desugaredRecv = true
 			} else if argIsPtr && !paramIsPtr {
 				// *recv
 				arg.expr = &ast.StarExpr{X: arg.expr}
 				arg.typ = typeparams.Deref(arg.typ)
 				arg.duplicable = false
 				arg.pure = false
+				arg.desugaredRecv = true
 			}
 		}
 	}
@@ -1604,40 +1686,6 @@ next:
 	for i, param := range params {
 		if arg := args[i]; arg.substitutable {
 
-			// Wrap the argument in an explicit conversion if
-			// substitution might materially change its type.
-			// (We already did the necessary shadowing check
-			// on the parameter type syntax.)
-			//
-			// This is only needed for substituted arguments. All
-			// other arguments are given explicit types in either
-			// a binding decl or when using the literalization
-			// strategy.
-
-			// If the types are identical, we can eliminate
-			// redundant type conversions such as this:
-			//
-			// Callee:
-			//    func f(i int32) { print(i) }
-			// Caller:
-			//    func g() { f(int32(1)) }
-			// Inlined as:
-			//    func g() { print(int32(int32(1)))
-			//
-			// Recall that non-trivial does not imply non-identical
-			// for constant conversions; however, at this point state.arguments
-			// has already re-typechecked the constant and set arg.type to
-			// its (possibly "untyped") inherent type, so
-			// the conversion from untyped 1 to int32 is non-trivial even
-			// though both arg and param have identical types (int32).
-			if len(param.info.Refs) > 0 &&
-				!types.Identical(arg.typ, param.obj.Type()) &&
-				!trivialConversion(arg.constant, arg.typ, param.obj.Type()) {
-				arg.expr = convert(param.fieldType, arg.expr)
-				logf("param %q: adding explicit %s -> %s conversion around argument",
-					param.info.Name, arg.typ, param.obj.Type())
-			}
-
 			// It is safe to substitute param and replace it with arg.
 			// The formatter introduces parens as needed for precedence.
 			//
@@ -1646,12 +1694,86 @@ next:
 			logf("replacing parameter %q by argument %q",
 				param.info.Name, debugFormatNode(caller.Fset, arg.expr))
 			for _, ref := range param.info.Refs {
-				replace(ref, internalastutil.CloneNode(arg.expr).(ast.Expr), arg.variadic)
+				// Apply any transformations necessary for this reference.
+				argExpr := arg.expr
+
+				// If the reference itself is being selected, and we applied desugaring
+				// (an explicit &x or *x), we can undo that desugaring here as it is
+				// not necessary for a selector. We don't need to check addressability
+				// here because if we desugared, the receiver must have been
+				// addressable.
+				if ref.IsSelectionOperand && arg.desugaredRecv {
+					switch e := argExpr.(type) {
+					case *ast.UnaryExpr:
+						argExpr = e.X
+					case *ast.StarExpr:
+						argExpr = e.X
+					}
+				}
+
+				// If the reference requires exact type agreement (as reported by
+				// param.info.NeedType), wrap the argument in an explicit conversion
+				// if substitution might materially change its type. (We already did
+				// the necessary shadowing check on the parameter type syntax.)
+				//
+				// This is only needed for substituted arguments. All other arguments
+				// are given explicit types in either a binding decl or when using the
+				// literalization strategy.
+				//
+				// If the types are identical, we can eliminate
+				// redundant type conversions such as this:
+				//
+				// Callee:
+				//    func f(i int32) { print(i) }
+				// Caller:
+				//    func g() { f(int32(1)) }
+				// Inlined as:
+				//    func g() { print(int32(int32(1)))
+				//
+				// Recall that non-trivial does not imply non-identical
+				// for constant conversions; however, at this point state.arguments
+				// has already re-typechecked the constant and set arg.type to
+				// its (possibly "untyped") inherent type, so
+				// the conversion from untyped 1 to int32 is non-trivial even
+				// though both arg and param have identical types (int32).
+				if ref.NeedType &&
+					!types.Identical(arg.typ, param.obj.Type()) &&
+					!trivialConversion(arg.constant, arg.typ, param.obj.Type()) {
+
+					// If arg.expr is already an interface call, strip it.
+					if call, ok := argExpr.(*ast.CallExpr); ok && len(call.Args) == 1 {
+						if typ, ok := isConversion(caller.Info, call); ok && isNonTypeParamInterface(typ) {
+							argExpr = call.Args[0]
+						}
+					}
+
+					argExpr = convert(param.fieldType, argExpr)
+					logf("param %q (offset %d): adding explicit %s -> %s conversion around argument",
+						param.info.Name, ref.Offset, arg.typ, param.obj.Type())
+				}
+				replace(ref.Offset, internalastutil.CloneNode(argExpr).(ast.Expr), arg.variadic)
 			}
 			params[i] = nil // substituted
 			args[i] = nil   // substituted
 		}
 	}
+}
+
+// isConversion reports whether the given call is a type conversion, returning
+// (operand, true) if so.
+//
+// If the call is not a conversion, it returns (nil, false).
+func isConversion(info *types.Info, call *ast.CallExpr) (types.Type, bool) {
+	if tv, ok := info.Types[call.Fun]; ok && tv.IsType() {
+		return tv.Type, true
+	}
+	return nil, false
+}
+
+// isNonTypeParamInterface reports whether t is a non-type parameter interface
+// type.
+func isNonTypeParamInterface(t types.Type) bool {
+	return !typeparams.IsTypeParam(t) && types.IsInterface(t)
 }
 
 // isUsedOutsideCall reports whether v is used outside of caller.Call, within
