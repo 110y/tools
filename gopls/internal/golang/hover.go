@@ -12,6 +12,7 @@ import (
 	"go/constant"
 	"go/doc"
 	"go/format"
+	"go/printer"
 	"go/token"
 	"go/types"
 	"go/version"
@@ -241,10 +242,15 @@ func hover(ctx context.Context, snapshot *cache.Snapshot, fh file.Handle, pp pro
 			return *hoverRange, hoverRes, nil // (hoverRes may be nil)
 		}
 	}
-	// Handle hovering over (non-import-path) literals.
+
+	// Handle hovering over various special kinds of syntax node.
 	if path, _ := astutil.PathEnclosingInterval(pgf.File, pos, pos); len(path) > 0 {
-		if lit, _ := path[0].(*ast.BasicLit); lit != nil {
-			return hoverLit(pgf, lit, pos)
+		switch node := path[0].(type) {
+		// Handle hovering over (non-import-path) literals.
+		case *ast.BasicLit:
+			return hoverLit(pgf, node, pos)
+		case *ast.ReturnStmt:
+			return hoverReturnStatement(pgf, path, node)
 		}
 	}
 
@@ -925,6 +931,45 @@ func hoverLit(pgf *parsego.File, lit *ast.BasicLit, pos token.Pos) (protocol.Ran
 	}, nil
 }
 
+func hoverReturnStatement(pgf *parsego.File, path []ast.Node, ret *ast.ReturnStmt) (protocol.Range, *hoverResult, error) {
+	var funcType *ast.FuncType
+	// Find innermost enclosing function.
+	for _, n := range path {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			funcType = n.Type
+		case *ast.FuncDecl:
+			funcType = n.Type
+		}
+		if funcType != nil {
+			break
+		}
+	}
+	// Inv: funcType != nil because a ReturnStmt is always enclosed by a function.
+	if funcType.Results == nil {
+		return protocol.Range{}, nil, nil // no result variables
+	}
+	rng, err := pgf.PosRange(ret.Pos(), ret.End())
+	if err != nil {
+		return protocol.Range{}, nil, err
+	}
+	// Format the function's result type.
+	var buf strings.Builder
+	var cfg printer.Config
+	fset := token.NewFileSet()
+	buf.WriteString("returns (")
+	for i, field := range funcType.Results.List {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		cfg.Fprint(&buf, fset, field.Type)
+	}
+	buf.WriteByte(')')
+	return rng, &hoverResult{
+		signature: buf.String(),
+	}, nil
+}
+
 // hoverEmbed computes hover information for a filepath.Match pattern.
 // Assumes that the pattern is relative to the location of fh.
 func hoverEmbed(fh file.Handle, rng protocol.Range, pattern string) (protocol.Range, *hoverResult, error) {
@@ -1304,7 +1349,7 @@ func StdSymbolOf(obj types.Object) *stdlib.Symbol {
 	// Handle Method.
 	if fn, _ := obj.(*types.Func); fn != nil {
 		isPtr, named := typesinternal.ReceiverNamed(fn.Signature().Recv())
-		if isPackageLevel(named.Obj()) {
+		if named != nil && isPackageLevel(named.Obj()) {
 			for _, s := range symbols {
 				if s.Kind != stdlib.Method {
 					continue

@@ -50,6 +50,7 @@ import (
 	"golang.org/x/tools/gopls/internal/analysis/embeddirective"
 	"golang.org/x/tools/gopls/internal/analysis/fillreturns"
 	"golang.org/x/tools/gopls/internal/analysis/infertypeargs"
+	"golang.org/x/tools/gopls/internal/analysis/modernize"
 	"golang.org/x/tools/gopls/internal/analysis/nonewvars"
 	"golang.org/x/tools/gopls/internal/analysis/noresultvalues"
 	"golang.org/x/tools/gopls/internal/analysis/simplifycompositelit"
@@ -57,7 +58,6 @@ import (
 	"golang.org/x/tools/gopls/internal/analysis/simplifyslice"
 	"golang.org/x/tools/gopls/internal/analysis/unusedparams"
 	"golang.org/x/tools/gopls/internal/analysis/unusedvariable"
-	"golang.org/x/tools/gopls/internal/analysis/useany"
 	"golang.org/x/tools/gopls/internal/analysis/yield"
 	"golang.org/x/tools/gopls/internal/protocol"
 )
@@ -149,6 +149,7 @@ func init() {
 		// - some (nilness, yield) use go/ssa; see #59714.
 		// - others don't meet the "frequency" criterion;
 		//   see GOROOT/src/cmd/vet/README.
+		// - some (modernize) report diagnostics on perfectly valid code (hence severity=info)
 		{analyzer: atomicalign.Analyzer, enabled: true},
 		{analyzer: deepequalerrors.Analyzer, enabled: true},
 		{analyzer: nilness.Analyzer, enabled: true}, // uses go/ssa
@@ -156,10 +157,10 @@ func init() {
 		{analyzer: sortslice.Analyzer, enabled: true},
 		{analyzer: embeddirective.Analyzer, enabled: true},
 		{analyzer: waitgroup.Analyzer, enabled: true}, // to appear in cmd/vet@go1.25
+		{analyzer: modernize.Analyzer, enabled: true, severity: protocol.SeverityInformation},
 
 		// disabled due to high false positives
 		{analyzer: shadow.Analyzer, enabled: false}, // very noisy
-		{analyzer: useany.Analyzer, enabled: false}, // never a bug
 		// fieldalignment is not even off-by-default; see #67762.
 
 		// "simplifiers": analyzers that offer mere style fixes
