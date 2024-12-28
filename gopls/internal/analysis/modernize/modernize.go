@@ -11,12 +11,16 @@ import (
 	"go/format"
 	"go/token"
 	"go/types"
+	"iter"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
+	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/gopls/internal/util/astutil"
 	"golang.org/x/tools/internal/analysisinternal"
+	"golang.org/x/tools/internal/astutil/cursor"
+	"golang.org/x/tools/internal/versions"
 )
 
 //go:embed doc.go
@@ -53,11 +57,12 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 	}
 
-	minmax(pass)
-	sortslice(pass)
-	efaceany(pass)
 	appendclipped(pass)
 	bloop(pass)
+	efaceany(pass)
+	mapsloop(pass)
+	minmax(pass)
+	sortslice(pass)
 
 	// TODO(adonovan):
 	// - more modernizers here; see #70815.
@@ -122,3 +127,24 @@ func isPackageLevel(obj types.Object, pkgpath, name string) bool {
 		obj.Pkg().Path() == pkgpath &&
 		obj.Name() == name
 }
+
+// filesUsing returns a cursor for each *ast.File in the inspector
+// that uses at least the specified version of Go (e.g. "go1.24").
+func filesUsing(inspect *inspector.Inspector, info *types.Info, version string) iter.Seq[cursor.Cursor] {
+	return func(yield func(cursor.Cursor) bool) {
+		for curFile := range cursor.Root(inspect).Children() {
+			file := curFile.Node().(*ast.File)
+			if !versions.Before(info.FileVersions[file], version) && !yield(curFile) {
+				break
+			}
+		}
+	}
+}
+
+var (
+	builtinAny    = types.Universe.Lookup("any")
+	builtinAppend = types.Universe.Lookup("append")
+	builtinBool   = types.Universe.Lookup("bool")
+	builtinMake   = types.Universe.Lookup("make")
+	builtinNil    = types.Universe.Lookup("nil")
+)
