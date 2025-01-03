@@ -586,6 +586,11 @@
 							"Default": "true"
 						},
 						{
+							"Name": "\"unusedfunc\"",
+							"Doc": "check for unused functions and methods\n\nThe unusedfunc analyzer reports functions and methods that are\nnever referenced outside of their own declaration.\n\nA function is considered unused if it is unexported and not\nreferenced (except within its own declaration).\n\nA method is considered unused if it is unexported, not referenced\n(except within its own declaration), and its name does not match\nthat of any method of an interface type declared within the same\npackage.\n\nThe tool may report a false positive for a declaration of an\nunexported function that is referenced from another package using\nthe go:linkname mechanism, if the declaration's doc comment does\nnot also have a go:linkname comment. (Such code is in any case\nstrongly discouraged: linkname annotations, if they must be used at\nall, should be used on both the declaration and the alias.)\n\nThe unusedfunc algorithm is not as precise as the\ngolang.org/x/tools/cmd/deadcode tool, but it has the advantage that\nit runs within the modular analysis framework, enabling near\nreal-time feedback within gopls.",
+							"Default": "true"
+						},
+						{
 							"Name": "\"unusedparams\"",
 							"Doc": "check for unused parameters of functions\n\nThe unusedparams analyzer checks functions to see if there are\nany parameters that are not being used.\n\nTo ensure soundness, it ignores:\n  - \"address-taken\" functions, that is, functions that are used as\n    a value rather than being called directly; their signatures may\n    be required to conform to a func type.\n  - exported functions or methods, since they may be address-taken\n    in another package.\n  - unexported methods whose name matches an interface method\n    declared in the same package, since the method's signature\n    may be required to conform to the interface type.\n  - functions with empty bodies, or containing just a call to panic.\n  - parameters that are unnamed, or named \"_\", the blank identifier.\n\nThe analyzer suggests a fix of replacing the parameter name by \"_\",\nbut in such cases a deeper fix can be obtained by invoking the\n\"Refactor: remove unused parameter\" code action, which will\neliminate the parameter entirely, along with all corresponding\narguments at call sites, while taking care to preserve any side\neffects in the argument expressions; see\nhttps://github.com/golang/tools/releases/tag/gopls%2Fv0.14.",
 							"Default": "true"
@@ -632,40 +637,6 @@
 				},
 				"EnumValues": null,
 				"Default": "false",
-				"Status": "experimental",
-				"Hierarchy": "ui.diagnostic"
-			},
-			{
-				"Name": "annotations",
-				"Type": "map[enum]bool",
-				"Doc": "annotations specifies the various kinds of optimization diagnostics\nthat should be reported by the gc_details command.\n",
-				"EnumKeys": {
-					"ValueType": "bool",
-					"Keys": [
-						{
-							"Name": "\"bounds\"",
-							"Doc": "`\"bounds\"` controls bounds checking diagnostics.\n",
-							"Default": "true"
-						},
-						{
-							"Name": "\"escape\"",
-							"Doc": "`\"escape\"` controls diagnostics about escape choices.\n",
-							"Default": "true"
-						},
-						{
-							"Name": "\"inline\"",
-							"Doc": "`\"inline\"` controls diagnostics about inlining choices.\n",
-							"Default": "true"
-						},
-						{
-							"Name": "\"nil\"",
-							"Doc": "`\"nil\"` controls nil checks.\n",
-							"Default": "true"
-						}
-					]
-				},
-				"EnumValues": null,
-				"Default": "{\"bounds\":true,\"escape\":true,\"inline\":true,\"nil\":true}",
 				"Status": "experimental",
 				"Hierarchy": "ui.diagnostic"
 			},
@@ -791,15 +762,10 @@
 			{
 				"Name": "codelenses",
 				"Type": "map[enum]bool",
-				"Doc": "codelenses overrides the enabled/disabled state of each of gopls'\nsources of [Code Lenses](codelenses.md).\n\nExample Usage:\n\n```json5\n\"gopls\": {\n...\n  \"codelenses\": {\n    \"generate\": false,  // Don't show the `go generate` lens.\n    \"gc_details\": true  // Show a code lens toggling the display of gc's choices.\n  }\n...\n}\n```\n",
+				"Doc": "codelenses overrides the enabled/disabled state of each of gopls'\nsources of [Code Lenses](codelenses.md).\n\nExample Usage:\n\n```json5\n\"gopls\": {\n...\n  \"codelenses\": {\n    \"generate\": false,  // Don't show the `go generate` lens.\n  }\n...\n}\n```\n",
 				"EnumKeys": {
 					"ValueType": "bool",
 					"Keys": [
-						{
-							"Name": "\"gc_details\"",
-							"Doc": "`\"gc_details\"`: Toggle display of Go compiler optimization decisions\n\nThis codelens source causes the `package` declaration of\neach file to be annotated with a command to toggle the\nstate of the per-session variable that controls whether\noptimization decisions from the Go compiler (formerly known\nas \"gc\") should be displayed as diagnostics.\n\nOptimization decisions include:\n- whether a variable escapes, and how escape is inferred;\n- whether a nil-pointer check is implied or eliminated;\n- whether a function can be inlined.\n\nTODO(adonovan): this source is off by default because the\nannotation is annoying and because VS Code has a separate\n\"Toggle gc details\" command. Replace it with a Code Action\n(\"Source action...\").\n",
-							"Default": "false"
-						},
 						{
 							"Name": "\"generate\"",
 							"Doc": "`\"generate\"`: Run `go generate`\n\nThis codelens source annotates any `//go:generate` comments\nwith commands to run `go generate` in this directory, on\nall directories recursively beneath this one.\n\nSee [Generating code](https://go.dev/blog/generate) for\nmore details.\n",
@@ -843,7 +809,7 @@
 					]
 				},
 				"EnumValues": null,
-				"Default": "{\"gc_details\":false,\"generate\":true,\"regenerate_cgo\":true,\"run_govulncheck\":false,\"tidy\":true,\"upgrade_dependency\":true,\"vendor\":true}",
+				"Default": "{\"generate\":true,\"regenerate_cgo\":true,\"run_govulncheck\":false,\"tidy\":true,\"upgrade_dependency\":true,\"vendor\":true}",
 				"Status": "",
 				"Hierarchy": "ui"
 			},
@@ -928,13 +894,6 @@
 		]
 	},
 	"Lenses": [
-		{
-			"FileType": "Go",
-			"Lens": "gc_details",
-			"Title": "Toggle display of Go compiler optimization decisions",
-			"Doc": "\nThis codelens source causes the `package` declaration of\neach file to be annotated with a command to toggle the\nstate of the per-session variable that controls whether\noptimization decisions from the Go compiler (formerly known\nas \"gc\") should be displayed as diagnostics.\n\nOptimization decisions include:\n- whether a variable escapes, and how escape is inferred;\n- whether a nil-pointer check is implied or eliminated;\n- whether a function can be inlined.\n\nTODO(adonovan): this source is off by default because the\nannotation is annoying and because VS Code has a separate\n\"Toggle gc details\" command. Replace it with a Code Action\n(\"Source action...\").\n",
-			"Default": false
-		},
 		{
 			"FileType": "Go",
 			"Lens": "generate",
@@ -1273,6 +1232,12 @@
 			"Name": "unsafeptr",
 			"Doc": "check for invalid conversions of uintptr to unsafe.Pointer\n\nThe unsafeptr analyzer reports likely incorrect uses of unsafe.Pointer\nto convert integers to pointers. A conversion from uintptr to\nunsafe.Pointer is invalid if it implies that there is a uintptr-typed\nword in memory that holds a pointer value, because that word will be\ninvisible to stack copying and to the garbage collector.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/unsafeptr",
+			"Default": true
+		},
+		{
+			"Name": "unusedfunc",
+			"Doc": "check for unused functions and methods\n\nThe unusedfunc analyzer reports functions and methods that are\nnever referenced outside of their own declaration.\n\nA function is considered unused if it is unexported and not\nreferenced (except within its own declaration).\n\nA method is considered unused if it is unexported, not referenced\n(except within its own declaration), and its name does not match\nthat of any method of an interface type declared within the same\npackage.\n\nThe tool may report a false positive for a declaration of an\nunexported function that is referenced from another package using\nthe go:linkname mechanism, if the declaration's doc comment does\nnot also have a go:linkname comment. (Such code is in any case\nstrongly discouraged: linkname annotations, if they must be used at\nall, should be used on both the declaration and the alias.)\n\nThe unusedfunc algorithm is not as precise as the\ngolang.org/x/tools/cmd/deadcode tool, but it has the advantage that\nit runs within the modular analysis framework, enabling near\nreal-time feedback within gopls.",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/unusedfunc",
 			"Default": true
 		},
 		{
