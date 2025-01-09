@@ -16,7 +16,6 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/astutil/cursor"
-	"golang.org/x/tools/internal/typesinternal"
 )
 
 // bloop updates benchmarks that use "for range b.N", replacing it
@@ -37,12 +36,12 @@ func bloop(pass *analysis.Pass) {
 	// edits computes the text edits for a matched for/range loop
 	// at the specified cursor. b is the *testing.B value, and
 	// (start, end) is the portion using b.N to delete.
-	edits := func(cur cursor.Cursor, b ast.Expr, start, end token.Pos) (edits []analysis.TextEdit) {
+	edits := func(curLoop cursor.Cursor, b ast.Expr, start, end token.Pos) (edits []analysis.TextEdit) {
+		curFn, _ := enclosingFunc(curLoop)
 		// Within the same function, delete all calls to
 		// b.{Start,Stop,Timer} that precede the loop.
 		filter := []ast.Node{(*ast.ExprStmt)(nil), (*ast.FuncLit)(nil)}
-		fn, _ := enclosingFunc(cur)
-		fn.Inspect(filter, func(cur cursor.Cursor, push bool) (descend bool) {
+		curFn.Inspect(filter, func(cur cursor.Cursor, push bool) (descend bool) {
 			if push {
 				node := cur.Node()
 				if is[*ast.FuncLit](node) {
@@ -90,7 +89,7 @@ func bloop(pass *analysis.Pass) {
 				if cmp, ok := n.Cond.(*ast.BinaryExpr); ok && cmp.Op == token.LSS {
 					if sel, ok := cmp.Y.(*ast.SelectorExpr); ok &&
 						sel.Sel.Name == "N" &&
-						isTestingB(info.TypeOf(sel.X)) {
+						analysisinternal.IsPointerToNamed(info.TypeOf(sel.X), "testing", "B") {
 
 						delStart, delEnd := n.Cond.Pos(), n.Cond.End()
 
@@ -133,7 +132,7 @@ func bloop(pass *analysis.Pass) {
 					n.Key == nil &&
 					n.Value == nil &&
 					sel.Sel.Name == "N" &&
-					isTestingB(info.TypeOf(sel.X)) {
+					analysisinternal.IsPointerToNamed(info.TypeOf(sel.X), "testing", "B") {
 
 					pass.Report(analysis.Diagnostic{
 						// Highlight "range b.N".
@@ -152,10 +151,6 @@ func bloop(pass *analysis.Pass) {
 	}
 }
 
-func isTestingB(t types.Type) bool {
-	return analysisinternal.IsTypeNamed(typesinternal.Unpointer(t), "testing", "B")
-}
-
 // uses reports whether the subtree cur contains a use of obj.
 func uses(info *types.Info, cur cursor.Cursor, obj types.Object) bool {
 	for curId := range cur.Preorder((*ast.Ident)(nil)) {
@@ -167,22 +162,10 @@ func uses(info *types.Info, cur cursor.Cursor, obj types.Object) bool {
 }
 
 // enclosingFunc returns the cursor for the innermost Func{Decl,Lit}
-// that encloses (or is) c, if any.
-//
-// TODO(adonovan): consider adding:
-//
-//	func (Cursor) AnyEnclosing(filter ...ast.Node) (Cursor bool)
-//	func (Cursor) Enclosing[N ast.Node]() (Cursor, bool)
-//
-// See comments at [cursor.Cursor.Stack].
+// that encloses c, if any.
 func enclosingFunc(c cursor.Cursor) (cursor.Cursor, bool) {
-	for {
-		switch c.Node().(type) {
-		case *ast.FuncLit, *ast.FuncDecl:
-			return c, true
-		case nil:
-			return cursor.Cursor{}, false
-		}
-		c = c.Parent()
+	for curAncestor := range c.Ancestors((*ast.FuncLit)(nil), (*ast.FuncDecl)(nil)) {
+		return curAncestor, true
 	}
+	return cursor.Cursor{}, false
 }

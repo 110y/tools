@@ -157,13 +157,6 @@ func (c Cursor) Inspect(types []ast.Node, f func(c Cursor, push bool) (descend b
 // must be empty.
 //
 // Stack must not be called on the Root node.
-//
-// TODO(adonovan): perhaps this should be replaced by:
-//
-//	func (Cursor) Ancestors(filter []ast.Node) iter.Seq[Cursor]
-//
-// returning a filtering iterator up the parent chain.
-// This finesses the question of allocation entirely.
 func (c Cursor) Stack(stack []Cursor) []Cursor {
 	if len(stack) > 0 {
 		panic("stack is non-empty")
@@ -172,12 +165,35 @@ func (c Cursor) Stack(stack []Cursor) []Cursor {
 		panic("Cursor.Stack called on Root node")
 	}
 
-	events := c.events()
-	for i := c.index; i >= 0; i = events[i].parent {
-		stack = append(stack, Cursor{c.in, i})
-	}
+	stack = append(stack, c)
+	stack = slices.AppendSeq(stack, c.Ancestors())
 	slices.Reverse(stack)
 	return stack
+}
+
+// Ancestors returns an iterator over the ancestors of the current
+// node, starting with [Cursor.Parent].
+//
+// Ancestors must not be called on the Root node (whose [Cursor.Node] returns nil).
+//
+// The types argument, if non-empty, enables type-based filtering of
+// events: the sequence includes only ancestors whose type matches an
+// element of the types slice.
+func (c Cursor) Ancestors(types ...ast.Node) iter.Seq[Cursor] {
+	if c.index < 0 {
+		panic("Cursor.Ancestors called on Root node")
+	}
+
+	mask := maskOf(types)
+
+	return func(yield func(Cursor) bool) {
+		events := c.events()
+		for i := events[c.index].parent; i >= 0; i = events[i].parent {
+			if events[i].typ&mask != 0 && !yield(Cursor{c.in, i}) {
+				break
+			}
+		}
+	}
 }
 
 // Parent returns the parent of the current node.
@@ -191,10 +207,10 @@ func (c Cursor) Parent() Cursor {
 	return Cursor{c.in, c.events()[c.index].parent}
 }
 
-// NextSibling returns the cursor for the next sibling node in the
-// same list (for example, of files, decls, specs, statements, fields,
-// or expressions) as the current node. It returns zero if the node is
-// the last node in the list, or is not part of a list.
+// NextSibling returns the cursor for the next sibling node in the same list
+// (for example, of files, decls, specs, statements, fields, or expressions) as
+// the current node. It returns (zero, false) if the node is the last node in
+// the list, or is not part of a list.
 //
 // NextSibling must not be called on the Root node.
 //
