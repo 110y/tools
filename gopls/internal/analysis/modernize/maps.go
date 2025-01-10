@@ -177,16 +177,19 @@ func mapsloop(pass *analysis.Pass) {
 		for curRange := range curFile.Preorder((*ast.RangeStmt)(nil)) {
 			rng := curRange.Node().(*ast.RangeStmt)
 
-			if rng.Tok == token.DEFINE && rng.Key != nil && rng.Value != nil && len(rng.Body.List) == 1 {
-				// Have: for k, v := range x { S }
-				if assign, ok := rng.Body.List[0].(*ast.AssignStmt); ok && len(assign.Lhs) == 1 {
-					if index, ok := assign.Lhs[0].(*ast.IndexExpr); ok &&
-						equalSyntax(rng.Key, index.Index) &&
-						equalSyntax(rng.Value, assign.Rhs[0]) {
+			if rng.Tok == token.DEFINE &&
+				rng.Key != nil &&
+				rng.Value != nil &&
+				isAssignBlock(rng.Body) {
+				// Have: for k, v := range x { lhs = rhs }
 
-						// Have: for k, v := range x { m[k] = v }
-						check(file, curRange, assign, index.X, rng.X)
-					}
+				assign := rng.Body.List[0].(*ast.AssignStmt)
+				if index, ok := assign.Lhs[0].(*ast.IndexExpr); ok &&
+					equalSyntax(rng.Key, index.Index) &&
+					equalSyntax(rng.Value, assign.Rhs[0]) {
+
+					// Have: for k, v := range x { m[k] = v }
+					check(file, curRange, assign, index.X, rng.X)
 				}
 			}
 		}
