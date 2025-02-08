@@ -126,28 +126,33 @@ func mapsloop(pass *analysis.Pass) {
 			}
 		}
 
-		// Choose function, report diagnostic, and suggest fix.
+		// Choose function.
+		var funcName string
+		if mrhs != nil {
+			funcName = cond(xmap, "Clone", "Collect")
+		} else {
+			funcName = cond(xmap, "Copy", "Insert")
+		}
+
+		// Report diagnostic, and suggest fix.
 		rng := curRange.Node()
-		mapsName, importEdits := analysisinternal.AddImport(info, file, rng.Pos(), "maps", "maps")
+		_, prefix, importEdits := analysisinternal.AddImport(info, file, "maps", "maps", funcName, rng.Pos())
 		var (
-			funcName   string
 			newText    []byte
 			start, end token.Pos
 		)
 		if mrhs != nil {
 			// Replace RHS of preceding m=... assignment (and loop) with expression.
 			start, end = mrhs.Pos(), rng.End()
-			funcName = cond(xmap, "Clone", "Collect")
-			newText = fmt.Appendf(nil, "%s.%s(%s)",
-				mapsName,
+			newText = fmt.Appendf(nil, "%s%s(%s)",
+				prefix,
 				funcName,
 				analysisinternal.Format(pass.Fset, x))
 		} else {
 			// Replace loop with call statement.
 			start, end = rng.Pos(), rng.End()
-			funcName = cond(xmap, "Copy", "Insert")
-			newText = fmt.Appendf(nil, "%s.%s(%s, %s)",
-				mapsName,
+			newText = fmt.Appendf(nil, "%s%s(%s, %s)",
+				prefix,
 				funcName,
 				analysisinternal.Format(pass.Fset, m),
 				analysisinternal.Format(pass.Fset, x))
@@ -186,9 +191,12 @@ func mapsloop(pass *analysis.Pass) {
 				assign := rng.Body.List[0].(*ast.AssignStmt)
 				if index, ok := assign.Lhs[0].(*ast.IndexExpr); ok &&
 					equalSyntax(rng.Key, index.Index) &&
-					equalSyntax(rng.Value, assign.Rhs[0]) {
+					equalSyntax(rng.Value, assign.Rhs[0]) &&
+					is[*types.Map](typeparams.CoreType(info.TypeOf(index.X))) &&
+					types.Identical(info.TypeOf(index), info.TypeOf(rng.Value)) { // m[k], v
 
 					// Have: for k, v := range x { m[k] = v }
+					// where there is no implicit conversion.
 					check(file, curRange, assign, index.X, rng.X)
 				}
 			}

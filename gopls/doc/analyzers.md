@@ -290,6 +290,16 @@ Default: on.
 
 Package documentation: [framepointer](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/framepointer)
 
+<a id='gofix'></a>
+## `gofix`: apply fixes based on go:fix comment directives
+
+
+The gofix analyzer inlines functions and constants that are marked for inlining.
+
+Default: on.
+
+Package documentation: [gofix](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/gofix)
+
 <a id='hostport'></a>
 ## `hostport`: check format of addresses passed to net.Dial
 
@@ -375,15 +385,6 @@ inferred from function arguments, or from other type arguments:
 Default: on.
 
 Package documentation: [infertypeargs](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/infertypeargs)
-
-<a id='inline'></a>
-## `inline`: inline calls to functions with "//go:fix inline" doc comment
-
-
-
-Default: on.
-
-Package documentation: [inline](https://pkg.go.dev/golang.org/x/tools/internal/refactor/inline/analyzer)
 
 <a id='loopclosure'></a>
 ## `loopclosure`: check references to loop variables from within nested functions
@@ -491,9 +492,13 @@ existing code by using more modern features of Go, such as:
     added in go1.19;
   - replacing uses of context.WithCancel in tests with t.Context, added in
     go1.24;
-  - replacing omitempty by omitzero on structs, added in go 1.24;
+  - replacing omitempty by omitzero on structs, added in go1.24;
   - replacing append(s[:i], s[i+1]...) by slices.Delete(s, i, i+1),
     added in go1.21
+  - replacing a 3-clause for i := 0; i < n; i++ {} loop by
+    for i := range n {}, added in go1.22;
+  - replacing Split in "for range strings.Split(...)" by go1.24's
+    more efficient SplitSeq;
 
 Default: on.
 
@@ -999,6 +1004,8 @@ eliminate the parameter entirely, along with all corresponding
 arguments at call sites, while taking care to preserve any side
 effects in the argument expressions; see
 https://github.com/golang/tools/releases/tag/gopls%2Fv0.14.
+
+This analyzer ignores generated code.
 
 Default: on.
 
