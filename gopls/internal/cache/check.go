@@ -44,11 +44,6 @@ import (
 	"golang.org/x/tools/internal/versions"
 )
 
-// Various optimizations that should not affect correctness.
-const (
-	preserveImportGraph = true // hold on to the import graph for open packages
-)
-
 type unit = struct{}
 
 // A typeCheckBatch holds data for a logical type-checking operation, which may
@@ -95,21 +90,6 @@ func (b *typeCheckBatch) getHandle(id PackageID) *packageHandle {
 	b.handleMu.Lock()
 	defer b.handleMu.Unlock()
 	return b._handles[id]
-}
-
-// A futurePackage is a future result of type checking or importing a package,
-// to be cached in a map.
-//
-// The goroutine that creates the futurePackage is responsible for evaluating
-// its value, and closing the done channel.
-type futurePackage struct {
-	done chan unit
-	v    pkgOrErr
-}
-
-type pkgOrErr struct {
-	pkg *types.Package
-	err error
 }
 
 // TypeCheck parses and type-checks the specified packages,
@@ -701,8 +681,7 @@ func importLookup(mp *metadata.Package, source metadata.Source) func(PackagePath
 
 	// search scans children the next package in pending, looking for pkgPath.
 	// Invariant: whenever search is called, pkgPath is not yet mapped.
-	var search func(pkgPath PackagePath) (PackageID, bool)
-	search = func(pkgPath PackagePath) (id PackageID, found bool) {
+	search := func(pkgPath PackagePath) (id PackageID, found bool) {
 		pkg := pending[0]
 		pending = pending[1:]
 		for depPath, depID := range pkg.DepsByPkgPath {
@@ -2001,7 +1980,7 @@ func typeErrorsToDiagnostics(pkg *syntaxPackage, inputs *typeCheckInputs, errs [
 	batch := func(related []types.Error) {
 		var diags []*Diagnostic
 		for i, e := range related {
-			code, start, end, ok := typesinternal.ReadGo116ErrorData(e)
+			code, start, end, ok := typesinternal.ErrorCodeStartEnd(e)
 			if !ok || !start.IsValid() || !end.IsValid() {
 				start, end = e.Pos, e.Pos
 				code = 0
@@ -2075,6 +2054,9 @@ func typeErrorsToDiagnostics(pkg *syntaxPackage, inputs *typeCheckInputs, errs [
 
 			if end == start {
 				// Expand the end position to a more meaningful span.
+				//
+				// TODO(adonovan): It is the type checker's responsibility
+				// to ensure that (start, end) are meaningful; see #71803.
 				end = analysisinternal.TypeErrorEndPos(e.Fset, pgf.Src, start)
 
 				// debugging golang/go#65960
