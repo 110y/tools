@@ -1179,7 +1179,10 @@ func isValidIdentifierChar(char byte) bool {
 
 // adds struct fields, interface methods, function declaration fields to completion
 func (c *completer) addFieldItems(fields *ast.FieldList) {
-	if fields == nil {
+	// TODO: in golang/go#72828, we get here with a nil surrounding.
+	// This indicates a logic bug elsewhere: we should only be interrogating the
+	// surrounding if it is set.
+	if fields == nil || c.surrounding == nil {
 		return
 	}
 
@@ -2000,6 +2003,8 @@ func (c *completer) structLiteralFieldName(ctx context.Context) error {
 
 // enclosingCompositeLiteral returns information about the composite literal enclosing the
 // position.
+// It returns nil on failure; for example, if there is no type information for a
+// node on path.
 func enclosingCompositeLiteral(path []ast.Node, pos token.Pos, info *types.Info) *compLitInfo {
 	for _, n := range path {
 		switch n := n.(type) {
@@ -2564,7 +2569,7 @@ func inferExpectedResultTypes(c *completer, callNodeIdx int) []types.Type {
 	switch node := c.path[callNodeIdx+1].(type) {
 	case *ast.KeyValueExpr:
 		enclosingCompositeLiteral := enclosingCompositeLiteral(c.path[callNodeIdx:], callNode.Pos(), c.pkg.TypesInfo())
-		if !wantStructFieldCompletions(enclosingCompositeLiteral) {
+		if enclosingCompositeLiteral != nil && !wantStructFieldCompletions(enclosingCompositeLiteral) {
 			expectedResults = append(expectedResults, expectedCompositeLiteralType(enclosingCompositeLiteral, callNode.Pos()))
 		}
 	case *ast.AssignStmt:
