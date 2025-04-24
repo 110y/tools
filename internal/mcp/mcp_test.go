@@ -2,18 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package mcp_test
+package mcp
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/tools/internal/mcp"
 	"golang.org/x/tools/internal/mcp/internal/jsonschema"
 	"golang.org/x/tools/internal/mcp/internal/protocol"
 )
@@ -22,22 +23,25 @@ type hiParams struct {
 	Name string
 }
 
-func sayHi(_ context.Context, v hiParams) ([]mcp.Content, error) {
-	return []mcp.Content{mcp.TextContent{Text: "hi " + v.Name}}, nil
+func sayHi(ctx context.Context, cc *ClientConnection, v hiParams) ([]Content, error) {
+	if err := cc.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("ping failed: %v", err)
+	}
+	return []Content{TextContent{Text: "hi " + v.Name}}, nil
 }
 
 func TestEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	ct, st := mcp.NewLocalTransport()
+	ct, st := NewLocalTransport()
 
-	s := mcp.NewServer("testServer", "v1.0.0", nil)
+	s := NewServer("testServer", "v1.0.0", nil)
 
 	// The 'greet' tool says hi.
-	s.AddTools(mcp.MakeTool("greet", "say hi", sayHi))
+	s.AddTools(MakeTool("greet", "say hi", sayHi))
 
 	// The 'fail' tool returns this error.
 	failure := errors.New("mcp failure")
-	s.AddTools(mcp.MakeTool("fail", "just fail", func(context.Context, struct{}) ([]mcp.Content, error) {
+	s.AddTools(MakeTool("fail", "just fail", func(context.Context, *ClientConnection, struct{}) ([]Content, error) {
 		return nil, failure
 	}))
 
@@ -60,15 +64,20 @@ func TestEndToEnd(t *testing.T) {
 		clientWG.Done()
 	}()
 
-	c := mcp.NewClient("testClient", "v1.0.0", nil)
+	c := NewClient("testClient", "v1.0.0", nil)
 
 	// Connect the client.
 	sc, err := c.Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := slices.Collect(c.Servers()); len(got) != 1 {
 		t.Errorf("after connection, Servers() has length %d, want 1", len(got))
+	}
+
+	if err := sc.Ping(ctx); err != nil {
+		t.Fatalf("ping failed: %v", err)
 	}
 
 	gotTools, err := sc.ListTools(ctx)
@@ -101,7 +110,7 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantHi := []mcp.Content{mcp.TextContent{Text: "hi user"}}
+	wantHi := []Content{TextContent{Text: "hi user"}}
 	if diff := cmp.Diff(wantHi, gotHi); diff != "" {
 		t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
 	}
@@ -124,25 +133,39 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
-func TestServerClosing(t *testing.T) {
-	ctx := context.Background()
-	ct, st := mcp.NewLocalTransport()
+// basicConnection returns a new basic client-server connection configured with
+// the provided tools.
+//
+// The caller should cancel either the client connection or server connection
+// when the connections are no longer needed.
+func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *ServerConnection) {
+	t.Helper()
 
-	s := mcp.NewServer("testServer", "v1.0.0", nil)
+	ctx := context.Background()
+	ct, st := NewLocalTransport()
+
+	s := NewServer("testServer", "v1.0.0", nil)
 
 	// The 'greet' tool says hi.
-	s.AddTools(mcp.MakeTool("greet", "say hi", sayHi))
+	s.AddTools(tools...)
 	cc, err := s.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c := mcp.NewClient("testClient", "v1.0.0", nil)
+	c := NewClient("testClient", "v1.0.0", nil)
 	sc, err := c.Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return cc, sc
+}
 
+func TestServerClosing(t *testing.T) {
+	cc, sc := basicConnection(t, MakeTool("greet", "say hi", sayHi))
+	defer sc.Close()
+
+	ctx := context.Background()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -156,36 +179,77 @@ func TestServerClosing(t *testing.T) {
 	}
 	cc.Close()
 	wg.Wait()
-	if _, err := sc.CallTool(ctx, "greet", hiParams{"user"}); !errors.Is(err, mcp.ErrConnectionClosed) {
+	if _, err := sc.CallTool(ctx, "greet", hiParams{"user"}); !errors.Is(err, ErrConnectionClosed) {
 		t.Errorf("after disconnection, got error %v, want EOF", err)
 	}
 }
 
 func TestBatching(t *testing.T) {
 	ctx := context.Background()
-	ct, st := mcp.NewLocalTransport()
+	ct, st := NewLocalTransport()
 
-	s := mcp.NewServer("testServer", "v1.0.0", nil)
+	s := NewServer("testServer", "v1.0.0", nil)
 	_, err := s.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c := mcp.NewClient("testClient", "v1.0.0", nil)
-	opts := new(mcp.ConnectionOptions)
-	mcp.BatchSize(opts, 2)
+	c := NewClient("testClient", "v1.0.0", nil)
+	opts := new(ConnectionOptions)
+	// TODO: this test is broken, because increasing the batch size here causes
+	// 'initialize' to block. Therefore, we can only test with a size of 1.
+	const batchSize = 1
+	BatchSize(ct, batchSize)
 	sc, err := c.Connect(ctx, ct, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sc.Close()
 
-	errs := make(chan error, 2)
-	for range 2 {
+	errs := make(chan error, batchSize)
+	for i := range batchSize {
 		go func() {
 			_, err := sc.ListTools(ctx)
 			errs <- err
 		}()
+		time.Sleep(2 * time.Millisecond)
+		if i < batchSize-1 {
+			select {
+			case <-errs:
+				t.Errorf("ListTools: unexpected result for incomplete batch: %v", err)
+			default:
+			}
+		}
 	}
 
+}
+
+func TestCancellation(t *testing.T) {
+	var (
+		start     = make(chan struct{})
+		cancelled = make(chan struct{}, 1) // don't block the request
+	)
+
+	slowRequest := func(ctx context.Context, cc *ClientConnection, v struct{}) ([]Content, error) {
+		start <- struct{}{}
+		select {
+		case <-ctx.Done():
+			cancelled <- struct{}{}
+		case <-time.After(5 * time.Second):
+			return nil, nil
+		}
+		return nil, nil
+	}
+	_, sc := basicConnection(t, MakeTool("slow", "a slow request", slowRequest))
+	defer sc.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go sc.CallTool(ctx, "slow", struct{}{})
+	<-start
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for cancellation")
+	}
 }

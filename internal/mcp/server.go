@@ -56,10 +56,10 @@ func NewServer(name, version string, opts *ServerOptions) *Server {
 // AddTools adds the given tools to the server.
 //
 // TODO(rfindley): notify connected clients of any changes.
-func (c *Server) AddTools(tools ...*Tool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.tools = append(c.tools, tools...)
+func (s *Server) AddTools(tools ...*Tool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tools = append(s.tools, tools...)
 }
 
 // Clients returns an iterator that yields the current set of client
@@ -71,60 +71,60 @@ func (s *Server) Clients() iter.Seq[*ClientConnection] {
 	return slices.Values(clients)
 }
 
-func (c *Server) listTools(_ context.Context, params *protocol.ListToolsParams) (*protocol.ListToolsResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (s *Server) listTools(_ context.Context, _ *ClientConnection, params *protocol.ListToolsParams) (*protocol.ListToolsResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	res := new(protocol.ListToolsResult)
-	for _, t := range c.tools {
+	for _, t := range s.tools {
 		res.Tools = append(res.Tools, t.Definition)
 	}
 	return res, nil
 }
 
-func (c *Server) callTool(ctx context.Context, params *protocol.CallToolParams) (*protocol.CallToolResult, error) {
-	c.mu.Lock()
+func (s *Server) callTool(ctx context.Context, cc *ClientConnection, params *protocol.CallToolParams) (*protocol.CallToolResult, error) {
+	s.mu.Lock()
 	var tool *Tool
-	if i := slices.IndexFunc(c.tools, func(t *Tool) bool {
+	if i := slices.IndexFunc(s.tools, func(t *Tool) bool {
 		return t.Definition.Name == params.Name
 	}); i >= 0 {
-		tool = c.tools[i]
+		tool = s.tools[i]
 	}
-	c.mu.Unlock()
+	s.mu.Unlock()
 
 	if tool == nil {
 		return nil, fmt.Errorf("%s: unknown tool %q", jsonrpc2.ErrInvalidParams, params.Name)
 	}
-	return tool.Handler(ctx, params.Arguments)
+	return tool.Handler(ctx, cc, params.Arguments)
 }
 
-// Run runs the server over the given transport.
+// Run runs the server over the given transport, which must be persistent.
 //
 // Run blocks until the client terminates the connection.
-func (c *Server) Run(ctx context.Context, t *Transport, opts *ConnectionOptions) error {
-	conn, err := c.Connect(ctx, t, opts)
+func (s *Server) Run(ctx context.Context, t Transport, opts *ConnectionOptions) error {
+	cc, err := s.Connect(ctx, t, opts)
 	if err != nil {
 		return err
 	}
-	return conn.Wait()
+	return cc.Wait()
 }
 
 // bind implements the binder[*ClientConnection] interface, so that Servers can
 // be connected using [connect].
-func (c *Server) bind(conn *jsonrpc2.Connection) *ClientConnection {
-	cc := &ClientConnection{conn: conn, server: c}
-	c.mu.Lock()
-	c.clients = append(c.clients, cc)
-	c.mu.Unlock()
+func (s *Server) bind(conn *jsonrpc2.Connection) *ClientConnection {
+	cc := &ClientConnection{conn: conn, server: s}
+	s.mu.Lock()
+	s.clients = append(s.clients, cc)
+	s.mu.Unlock()
 	return cc
 }
 
 // disconnect implements the binder[*ClientConnection] interface, so that
 // Servers can be connected using [connect].
-func (c *Server) disconnect(cc *ClientConnection) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.clients = slices.DeleteFunc(c.clients, func(cc2 *ClientConnection) bool {
+func (s *Server) disconnect(cc *ClientConnection) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clients = slices.DeleteFunc(s.clients, func(cc2 *ClientConnection) bool {
 		return cc2 == cc
 	})
 }
@@ -135,8 +135,8 @@ func (c *Server) disconnect(cc *ClientConnection) {
 // It returns a connection object that may be used to terminate the connection
 // (with [Connection.Close]), or await client termination (with
 // [Connection.Wait]).
-func (c *Server) Connect(ctx context.Context, t *Transport, opts *ConnectionOptions) (*ClientConnection, error) {
-	return connect(ctx, t, opts, c)
+func (s *Server) Connect(ctx context.Context, t Transport, opts *ConnectionOptions) (*ClientConnection, error) {
+	return connect(ctx, t, opts, s)
 }
 
 // A ClientConnection is a connection with an MCP client.
@@ -144,35 +144,73 @@ func (c *Server) Connect(ctx context.Context, t *Transport, opts *ConnectionOpti
 // It handles messages from the client, and can be used to send messages to the
 // client. Create a connection by calling [Server.Connect].
 type ClientConnection struct {
-	conn   *jsonrpc2.Connection
 	server *Server
+	conn   *jsonrpc2.Connection
 
 	mu               sync.Mutex
-	initializeParams *protocol.InitializeParams // set once initialize has been received
+	initializeParams *protocol.InitializeParams
+	initialized      bool
+}
+
+// Ping makes an MCP "ping" request to the client.
+func (cc *ClientConnection) Ping(ctx context.Context) error {
+	return call(ctx, cc.conn, "ping", nil, nil)
 }
 
 func (cc *ClientConnection) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
+	cc.mu.Lock()
+	initialized := cc.initialized
+	cc.mu.Unlock()
+
+	// From the spec:
+	// "The client SHOULD NOT send requests other than pings before the server
+	// has responded to the initialize request."
+	switch req.Method {
+	case "initialize", "ping":
+	default:
+		if !initialized {
+			return nil, fmt.Errorf("method %q is invalid during session ininitialization", req.Method)
+		}
+	}
+
+	// TODO: embed the incoming request ID in the ClientContext (or, more likely,
+	// a wrapper around it), so that we can correlate responses and notifications
+	// to the handler; this is required for the new session-based transport.
+
 	switch req.Method {
 	case "initialize":
-		return dispatch(ctx, req, cc.initialize)
+		return dispatch(ctx, cc, req, cc.initialize)
 
-	// TODO: handle initialized
+	case "ping":
+		// The spec says that 'ping' expects an empty object result.
+		return struct{}{}, nil
 
 	case "tools/list":
-		return dispatch(ctx, req, cc.server.listTools)
+		return dispatch(ctx, cc, req, cc.server.listTools)
 
 	case "tools/call":
-		return dispatch(ctx, req, cc.server.callTool)
+		return dispatch(ctx, cc, req, cc.server.callTool)
 
 	case "notifications/initialized":
 	}
 	return nil, jsonrpc2.ErrNotHandled
 }
 
-func (cc *ClientConnection) initialize(ctx context.Context, params *protocol.InitializeParams) (*protocol.InitializeResult, error) {
+func (cc *ClientConnection) initialize(ctx context.Context, _ *ClientConnection, params *protocol.InitializeParams) (*protocol.InitializeResult, error) {
 	cc.mu.Lock()
 	cc.initializeParams = params
 	cc.mu.Unlock()
+
+	// Mark the connection as initialized when this method exits. TODO:
+	// Technically, the server should not be considered initialized until it has
+	// *responded*, but we don't have adequate visibility into the jsonrpc2
+	// connection to implement that easily. In any case, once we've initialized
+	// here, we can handle requests.
+	defer func() {
+		cc.mu.Lock()
+		cc.initialized = true
+		cc.mu.Unlock()
+	}()
 
 	return &protocol.InitializeResult{
 		// TODO(rfindley): support multiple protocol versions.
@@ -202,11 +240,14 @@ func (cc *ClientConnection) Wait() error {
 	return cc.conn.Wait()
 }
 
-func dispatch[TParams, TResult any](ctx context.Context, req *jsonrpc2.Request, f func(context.Context, TParams) (TResult, error)) (TResult, error) {
+// dispatch turns a strongly type request handler into a jsonrpc2 handler.
+//
+// Importantly, it returns nil if the handler returned an error, which is a
+// requirement of the jsonrpc2 package.
+func dispatch[TConn, TParams, TResult any](ctx context.Context, conn TConn, req *jsonrpc2.Request, f func(context.Context, TConn, TParams) (TResult, error)) (any, error) {
 	var params TParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		var zero TResult
-		return zero, err
+		return nil, err
 	}
-	return f(ctx, params)
+	return f(ctx, conn, params)
 }
