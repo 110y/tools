@@ -15,8 +15,9 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/tools/internal/mcp/internal/jsonschema"
-	"golang.org/x/tools/internal/mcp/internal/protocol"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"golang.org/x/tools/internal/mcp/jsonschema"
+	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 type hiParams struct {
@@ -80,10 +81,10 @@ func TestEndToEnd(t *testing.T) {
 		clientWG.Done()
 	}()
 
-	c := NewClient("testClient", "v1.0.0", nil)
+	c := NewClient("testClient", "v1.0.0", ct, nil)
 
 	// Connect the client.
-	if err := c.Connect(ctx, ct, nil); err != nil {
+	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,7 +150,7 @@ func TestEndToEnd(t *testing.T) {
 			AdditionalProperties: falseSchema,
 		},
 	}}
-	if diff := cmp.Diff(wantTools, gotTools); diff != "" {
+	if diff := cmp.Diff(wantTools, gotTools, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
 		t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
 	}
 
@@ -209,8 +210,8 @@ func basicConnection(t *testing.T, tools ...*Tool) (*ClientConnection, *Client) 
 		t.Fatal(err)
 	}
 
-	c := NewClient("testClient", "v1.0.0", nil)
-	if err := c.Connect(ctx, ct, nil); err != nil {
+	c := NewClient("testClient", "v1.0.0", ct, nil)
+	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return cc, c
@@ -249,13 +250,12 @@ func TestBatching(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := NewClient("testClient", "v1.0.0", nil)
-	opts := new(ConnectionOptions)
+	c := NewClient("testClient", "v1.0.0", ct, nil)
 	// TODO: this test is broken, because increasing the batch size here causes
 	// 'initialize' to block. Therefore, we can only test with a size of 1.
 	const batchSize = 1
 	BatchSize(ct, batchSize)
-	if err := c.Connect(ctx, ct, opts); err != nil {
+	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
