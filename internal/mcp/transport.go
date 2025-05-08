@@ -35,8 +35,7 @@ type Transport interface {
 	Connect(ctx context.Context) (Stream, error)
 }
 
-// A Stream is an abstract bidirectional jsonrpc2 Stream.
-// It is used by [connect] to establish a [jsonrpc2.Connection].
+// A Stream is a bidirectional jsonrpc2 Stream.
 type Stream interface {
 	jsonrpc2.Reader
 	jsonrpc2.Writer
@@ -136,7 +135,7 @@ func (c *canceller) Preempt(ctx context.Context, req *jsonrpc2.Request) (result 
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return nil, err
 		}
-		id, err := jsonrpc2.MakeID(params.RequestId)
+		id, err := jsonrpc2.MakeID(params.RequestID)
 		if err != nil {
 			return nil, err
 		}
@@ -157,7 +156,7 @@ func call(ctx context.Context, conn *jsonrpc2.Connection, method string, params,
 		// Notify the peer of cancellation.
 		err := conn.Notify(xcontext.Detach(ctx), "notifications/cancelled", &protocol.CancelledParams{
 			Reason:    ctx.Err().Error(),
-			RequestId: call.ID().Raw(),
+			RequestID: call.ID().Raw(),
 		})
 		return errors.Join(ctx.Err(), err)
 	case err != nil:
