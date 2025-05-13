@@ -70,14 +70,16 @@ type CancelledParams struct {
 // additional capabilities.
 type ClientCapabilities struct {
 	// Experimental, non-standard capabilities that the client supports.
-	Experimental map[string]map[string]json.RawMessage `json:"experimental,omitempty"`
+	Experimental map[string]struct {
+	} `json:"experimental,omitempty"`
 	// Present if the client supports listing roots.
 	Roots *struct {
 		// Whether the client supports notifications for changes to the roots list.
 		ListChanged bool `json:"listChanged,omitempty"`
 	} `json:"roots,omitempty"`
 	// Present if the client supports sampling from an LLM.
-	Sampling map[string]json.RawMessage `json:"sampling,omitempty"`
+	Sampling struct {
+	} `json:"sampling,omitempty"`
 }
 
 type GetPromptParams struct {
@@ -131,7 +133,11 @@ type InitializeResult struct {
 	ServerInfo      Implementation `json:"serverInfo"`
 }
 
-type InitializedParams map[string]json.RawMessage
+type InitializedParams struct {
+	// This parameter name is reserved by MCP to allow clients and servers to attach
+	// additional metadata to their notifications.
+	Meta map[string]json.RawMessage `json:"_meta,omitempty"`
+}
 
 type ListPromptsParams struct {
 	// An opaque token representing the current pagination position. If provided,
@@ -148,6 +154,43 @@ type ListPromptsResult struct {
 	// result. If present, there may be more results available.
 	NextCursor string   `json:"nextCursor,omitempty"`
 	Prompts    []Prompt `json:"prompts"`
+}
+
+type ListResourcesParams struct {
+	// An opaque token representing the current pagination position. If provided,
+	// the server should return results starting after this cursor.
+	Cursor string `json:"cursor,omitempty"`
+}
+
+// The server's response to a resources/list request from the client.
+type ListResourcesResult struct {
+	// This result property is reserved by the protocol to allow clients and servers
+	// to attach additional metadata to their responses.
+	Meta map[string]json.RawMessage `json:"_meta,omitempty"`
+	// An opaque token representing the pagination position after the last returned
+	// result. If present, there may be more results available.
+	NextCursor string     `json:"nextCursor,omitempty"`
+	Resources  []Resource `json:"resources"`
+}
+
+type ListRootsParams struct {
+	Meta *struct {
+		// If specified, the caller is requesting out-of-band progress notifications for
+		// this request (as represented by notifications/progress). The value of this
+		// parameter is an opaque token that will be attached to any subsequent
+		// notifications. The receiver is not obligated to provide these notifications.
+		ProgressToken *any `json:"progressToken,omitempty"`
+	} `json:"_meta,omitempty"`
+}
+
+// The client's response to a roots/list request from the server. This result
+// contains an array of Root objects, each representing a root directory or file
+// that the server can operate on.
+type ListRootsResult struct {
+	// This result property is reserved by the protocol to allow clients and servers
+	// to attach additional metadata to their responses.
+	Meta  map[string]json.RawMessage `json:"_meta,omitempty"`
+	Roots []Root                     `json:"roots"`
 }
 
 type ListToolsParams struct {
@@ -202,6 +245,45 @@ type PromptMessage struct {
 	Role    Role    `json:"role"`
 }
 
+type ReadResourceParams struct {
+	// The URI of the resource to read. The URI can use any protocol; it is up to
+	// the server how to interpret it.
+	URI string `json:"uri"`
+}
+
+// The server's response to a resources/read request from the client.
+type ReadResourceResult struct {
+	// This result property is reserved by the protocol to allow clients and servers
+	// to attach additional metadata to their responses.
+	Meta     map[string]json.RawMessage `json:"_meta,omitempty"`
+	Contents *ResourceContents          `json:"contents"`
+}
+
+// A known resource that the server is capable of reading.
+type Resource struct {
+	// Optional annotations for the client.
+	Annotations *Annotations `json:"annotations,omitempty"`
+	// A description of what this resource represents.
+	//
+	// This can be used by clients to improve the LLM's understanding of available
+	// resources. It can be thought of like a "hint" to the model.
+	Description string `json:"description,omitempty"`
+	// The MIME type of this resource, if known.
+	MIMEType string `json:"mimeType,omitempty"`
+	// A human-readable name for this resource.
+	//
+	// This can be used by clients to populate UI elements.
+	Name string `json:"name"`
+	// The size of the raw resource content, in bytes (i.e., before base64 encoding
+	// or any tokenization), if known.
+	//
+	// This can be used by Hosts to display file sizes and estimate context window
+	// usage.
+	Size int64 `json:"size,omitempty"`
+	// The URI of this resource.
+	URI string `json:"uri"`
+}
+
 // Present if the server offers any resources to read.
 type ResourceCapabilities struct {
 	// Whether this server supports notifications for changes to the resource list.
@@ -213,16 +295,31 @@ type ResourceCapabilities struct {
 // The sender or recipient of messages and data in a conversation.
 type Role string
 
+// Represents a root directory or file that the server can operate on.
+type Root struct {
+	// An optional name for the root. This can be used to provide a human-readable
+	// identifier for the root, which may be useful for display purposes or for
+	// referencing the root in other parts of the application.
+	Name string `json:"name,omitempty"`
+	// The URI identifying the root. This *must* start with file:// for now. This
+	// restriction may be relaxed in future versions of the protocol to allow other
+	// URI schemes.
+	URI string `json:"uri"`
+}
+
 // Capabilities that a server may support. Known capabilities are defined here,
 // in this schema, but this is not a closed set: any server can define its own,
 // additional capabilities.
 type ServerCapabilities struct {
 	// Present if the server supports argument autocompletion suggestions.
-	Completions map[string]json.RawMessage `json:"completions,omitempty"`
+	Completions struct {
+	} `json:"completions,omitempty"`
 	// Experimental, non-standard capabilities that the server supports.
-	Experimental map[string]map[string]json.RawMessage `json:"experimental,omitempty"`
+	Experimental map[string]struct {
+	} `json:"experimental,omitempty"`
 	// Present if the server supports sending log messages to the client.
-	Logging map[string]json.RawMessage `json:"logging,omitempty"`
+	Logging struct {
+	} `json:"logging,omitempty"`
 	// Present if the server offers any prompt templates.
 	Prompts *PromptCapabilities `json:"prompts,omitempty"`
 	// Present if the server offers any resources to read.

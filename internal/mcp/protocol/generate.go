@@ -46,46 +46,74 @@ type config map[string]*typeConfig
 
 // declarations configures the set of declarations to write.
 //
-// Top level declarations are only created if they are configured with a
-// non-empty Name. Otherwise, they are discarded, though their fields may be
+// Top level declarations are created unless configured with Name=="-",
+// in which case they are discarded, though their fields may be
 // extracted to types if they have a nested field configuration.
+// If Name == "", the map key is used as the type name.
 var declarations = config{
-	"Annotations": {Name: "Annotations"},
+	"Annotations": {},
 	"CallToolRequest": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "CallToolParams"}},
 	},
-	"CallToolResult": {Name: "CallToolResult"},
+	"CallToolResult": {},
 	"CancelledNotification": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "CancelledParams"}},
 	},
-	"ClientCapabilities": {Name: "ClientCapabilities"},
+	"ClientCapabilities": {},
 	"GetPromptRequest": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "GetPromptParams"}},
 	},
-	"GetPromptResult": {Name: "GetPromptResult"},
-	"Implementation":  {Name: "Implementation"},
+	"GetPromptResult": {},
+	"Implementation":  {},
 	"InitializeRequest": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "InitializeParams"}},
 	},
-	"InitializeResult": {Name: "InitializeResult"},
+	"InitializeResult": {},
 	"InitializedNotification": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "InitializedParams"}},
 	},
 	"ListPromptsRequest": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "ListPromptsParams"}},
 	},
-	"ListPromptsResult": {Name: "ListPromptsResult"},
+	"ListPromptsResult": {},
+	"ListResourcesRequest": {
+		Name:   "-",
+		Fields: config{"Params": {Name: "ListResourcesParams"}},
+	},
+	"ListResourcesResult": {},
+	"ListRootsRequest": {
+		Name:   "-",
+		Fields: config{"Params": {Name: "ListRootsParams"}},
+	},
+	"ListRootsResult": {},
 	"ListToolsRequest": {
+		Name:   "-",
 		Fields: config{"Params": {Name: "ListToolsParams"}},
 	},
-	"ListToolsResult": {Name: "ListToolsResult"},
-	"Prompt":          {Name: "Prompt"},
-	"PromptMessage":   {Name: "PromptMessage"},
-	"PromptArgument":  {Name: "PromptArgument"},
-	"RequestId":       {Substitute: "any"}, // null|number|string
-	"Role":            {Name: "Role"},
+	"ListToolsResult": {},
+	"Prompt":          {},
+	"PromptMessage":   {},
+	"PromptArgument":  {},
+	"ProgressToken":   {Name: "-", Substitute: "any"}, // null|number|string
+	"RequestId":       {Name: "-", Substitute: "any"}, // null|number|string
+	"ReadResourceRequest": {
+		Name:   "-",
+		Fields: config{"Params": {Name: "ReadResourceParams"}},
+	},
+	"ReadResourceResult": {
+		Fields: config{"Contents": {Substitute: "*ResourceContents"}},
+	},
+	"Resource": {},
+	"Role":     {},
+	"Root":     {},
+
 	"ServerCapabilities": {
-		Name: "ServerCapabilities",
 		Fields: config{
 			"Prompts":   {Name: "PromptCapabilities"},
 			"Resources": {Name: "ResourceCapabilities"},
@@ -93,10 +121,9 @@ var declarations = config{
 		},
 	},
 	"Tool": {
-		Name:   "Tool",
 		Fields: config{"InputSchema": {Substitute: "*jsonschema.Schema"}},
 	},
-	"ToolAnnotations": {Name: "ToolAnnotations"},
+	"ToolAnnotations": {},
 }
 
 func main() {
@@ -121,7 +148,7 @@ func main() {
 		if config == nil {
 			continue
 		}
-		if err := writeDecl(*config, def, named); err != nil {
+		if err := writeDecl(name, *config, def, named); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -192,19 +219,22 @@ func loadSchema(schemaFile string) (data []byte, err error) {
 	return data, nil
 }
 
-func writeDecl(config typeConfig, def *jsonschema.Schema, named map[string]*bytes.Buffer) error {
+func writeDecl(configName string, config typeConfig, def *jsonschema.Schema, named map[string]*bytes.Buffer) error {
 	var w io.Writer = io.Discard
-	if name := config.Name; name != "" {
-		if _, ok := named[name]; ok {
+	if typeName := config.Name; typeName != "-" {
+		if typeName == "" {
+			typeName = configName
+		}
+		if _, ok := named[typeName]; ok {
 			return nil
 		}
 		buf := new(bytes.Buffer)
 		w = buf
-		named[name] = buf
+		named[typeName] = buf
 		if def.Description != "" {
 			fmt.Fprintf(buf, "%s\n", toComment(def.Description))
 		}
-		fmt.Fprintf(buf, "type %s ", name)
+		fmt.Fprintf(buf, "type %s ", typeName)
 	}
 	if err := writeType(w, &config, def, named); err != nil {
 		return err // Better error here?
@@ -227,12 +257,12 @@ func writeType(w io.Writer, config *typeConfig, def *jsonschema.Schema, named ma
 		// definition is missing, *but only if w is not io.Discard*. That's not a
 		// great API: see if we can do something more explicit than io.Discard.
 		if cfg, ok := declarations[name]; ok {
-			if cfg.Name == "" && cfg.Substitute == "" {
+			if cfg.Name == "-" && cfg.Substitute == "" {
 				panic(fmt.Sprintf("referenced type %q cannot be referred to (no name or substitution)", name))
 			}
 			if cfg.Substitute != "" {
 				name = cfg.Substitute
-			} else {
+			} else if cfg.Name != "" {
 				name = cfg.Name
 			}
 		}
@@ -243,7 +273,11 @@ func writeType(w io.Writer, config *typeConfig, def *jsonschema.Schema, named ma
 	// For types that explicitly allow additional properties, we can either
 	// unmarshal them into a map[string]any, or delay unmarshalling with
 	// json.RawMessage. For now, use json.RawMessage as it defers the choice.
-	if def.Type == "object" && canHaveAdditionalProperties(def) {
+	//
+	// TODO(jba): further refine this classification of object schemas.
+	// For example, the typescript "object" type, which should map to a Go "any",
+	// is represented in schema.json by `{type: object, properties: {}, additionalProperties: true}`.
+	if def.Type == "object" && canHaveAdditionalProperties(def) && def.Properties == nil {
 		w.Write([]byte("map[string]"))
 		return writeType(w, nil, def.AdditionalProperties, named)
 	}
@@ -300,14 +334,18 @@ func writeType(w io.Writer, config *typeConfig, def *jsonschema.Schema, named ma
 					if r.Substitute != "" {
 						fmt.Fprintf(w, r.Substitute)
 					} else {
-						assert(r.Name != "", "missing ExtractTo")
-						if err := writeDecl(*r, fieldDef, named); err != nil {
+						assert(r.Name != "-", "missing ExtractTo")
+						typename := export
+						if r.Name != "" {
+							typename = r.Name
+						}
+						if err := writeDecl(typename, *r, fieldDef, named); err != nil {
 							return err
 						}
 						if needPointer {
 							fmt.Fprintf(w, "*")
 						}
-						fmt.Fprintf(w, r.Name)
+						fmt.Fprintf(w, typename)
 					}
 				} else {
 					if needPointer {
@@ -399,7 +437,12 @@ func exportName(s string) string {
 		// at once, because the replacement will change the indices.)
 		for {
 			if loc := re.FindStringIndex(s); loc != nil {
-				s = s[:loc[0]] + replacement + s[loc[1]:]
+				// Don't replace the rune after the initialism, if any.
+				end := loc[1]
+				if end < len(s) {
+					end--
+				}
+				s = s[:loc[0]] + replacement + s[end:]
 			} else {
 				break
 			}
@@ -410,9 +453,10 @@ func exportName(s string) string {
 
 // Map from initialism to the regexp that matches it.
 var initialisms = map[string]*regexp.Regexp{
-	"Id":  nil,
-	"Url": nil,
-	"Uri": nil,
+	"Id":   nil,
+	"Url":  nil,
+	"Uri":  nil,
+	"Mime": nil,
 }
 
 func init() {
