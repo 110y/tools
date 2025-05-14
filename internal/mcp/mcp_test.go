@@ -18,23 +18,22 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
 	"golang.org/x/tools/internal/mcp/jsonschema"
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 type hiParams struct {
 	Name string
 }
 
-func sayHi(ctx context.Context, cc *ServerConnection, v hiParams) ([]Content, error) {
-	if err := cc.Ping(ctx); err != nil {
+func sayHi(ctx context.Context, cc *ServerSession, v hiParams) ([]*Content, error) {
+	if err := cc.Ping(ctx, nil); err != nil {
 		return nil, fmt.Errorf("ping failed: %v", err)
 	}
-	return []Content{TextContent{Text: "hi " + v.Name}}, nil
+	return []*Content{NewTextContent("hi " + v.Name)}, nil
 }
 
 func TestEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	ct, st := NewLocalTransport()
+	ct, st := NewInMemoryTransport()
 
 	s := NewServer("testServer", "v1.0.0", nil)
 
@@ -44,31 +43,31 @@ func TestEndToEnd(t *testing.T) {
 	// The 'fail' tool returns this error.
 	failure := errors.New("mcp failure")
 	s.AddTools(
-		NewTool("fail", "just fail", func(context.Context, *ServerConnection, struct{}) ([]Content, error) {
+		NewTool("fail", "just fail", func(context.Context, *ServerSession, struct{}) ([]*Content, error) {
 			return nil, failure
 		}),
 	)
 
 	s.AddPrompts(
-		NewPrompt("code_review", "do a code review", func(_ context.Context, _ *ServerConnection, params struct{ Code string }) (*protocol.GetPromptResult, error) {
-			return &protocol.GetPromptResult{
+		NewPrompt("code_review", "do a code review", func(_ context.Context, _ *ServerSession, params struct{ Code string }) (*GetPromptResult, error) {
+			return &GetPromptResult{
 				Description: "Code review prompt",
-				Messages: []protocol.PromptMessage{
-					{Role: "user", Content: TextContent{Text: "Please review the following code: " + params.Code}.ToWire()},
+				Messages: []*PromptMessage{
+					{Role: "user", Content: NewTextContent("Please review the following code: " + params.Code)},
 				},
 			}, nil
 		}),
-		NewPrompt("fail", "", func(_ context.Context, _ *ServerConnection, params struct{}) (*protocol.GetPromptResult, error) {
+		NewPrompt("fail", "", func(_ context.Context, _ *ServerSession, params struct{}) (*GetPromptResult, error) {
 			return nil, failure
 		}),
 	)
 
 	// Connect the server.
-	sc, err := s.Connect(ctx, st, nil)
+	ss, err := s.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := slices.Collect(s.Clients()); len(got) != 1 {
+	if got := slices.Collect(s.Sessions()); len(got) != 1 {
 		t.Errorf("after connection, Clients() has length %d, want 1", len(got))
 	}
 
@@ -76,48 +75,48 @@ func TestEndToEnd(t *testing.T) {
 	var clientWG sync.WaitGroup
 	clientWG.Add(1)
 	go func() {
-		if err := sc.Wait(); err != nil {
+		if err := ss.Wait(); err != nil {
 			t.Errorf("server failed: %v", err)
 		}
 		clientWG.Done()
 	}()
 
 	c := NewClient("testClient", "v1.0.0", ct, nil)
-	c.AddRoots(protocol.Root{URI: "file:///root"})
+	c.AddRoots(&Root{URI: "file:///root"})
 
 	// Connect the client.
 	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := c.Ping(ctx); err != nil {
+	if err := c.Ping(ctx, nil); err != nil {
 		t.Fatalf("ping failed: %v", err)
 	}
 	t.Run("prompts", func(t *testing.T) {
-		gotPrompts, err := c.ListPrompts(ctx)
+		res, err := c.ListPrompts(ctx, nil)
 		if err != nil {
 			t.Errorf("prompts/list failed: %v", err)
 		}
-		wantPrompts := []protocol.Prompt{
+		wantPrompts := []*Prompt{
 			{
 				Name:        "code_review",
 				Description: "do a code review",
-				Arguments:   []protocol.PromptArgument{{Name: "Code", Required: true}},
+				Arguments:   []*PromptArgument{{Name: "Code", Required: true}},
 			},
 			{Name: "fail"},
 		}
-		if diff := cmp.Diff(wantPrompts, gotPrompts); diff != "" {
+		if diff := cmp.Diff(wantPrompts, res.Prompts); diff != "" {
 			t.Fatalf("prompts/list mismatch (-want +got):\n%s", diff)
 		}
 
-		gotReview, err := c.GetPrompt(ctx, "code_review", map[string]string{"Code": "1+1"})
+		gotReview, err := c.GetPrompt(ctx, &GetPromptParams{Name: "code_review", Arguments: map[string]string{"Code": "1+1"}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantReview := &protocol.GetPromptResult{
+		wantReview := &GetPromptResult{
 			Description: "Code review prompt",
-			Messages: []protocol.PromptMessage{{
-				Content: TextContent{Text: "Please review the following code: 1+1"}.ToWire(),
+			Messages: []*PromptMessage{{
+				Content: NewTextContent("Please review the following code: 1+1"),
 				Role:    "user",
 			}},
 		}
@@ -125,17 +124,17 @@ func TestEndToEnd(t *testing.T) {
 			t.Errorf("prompts/get 'code_review' mismatch (-want +got):\n%s", diff)
 		}
 
-		if _, err := c.GetPrompt(ctx, "fail", map[string]string{}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
+		if _, err := c.GetPrompt(ctx, &GetPromptParams{Name: "fail"}); err == nil || !strings.Contains(err.Error(), failure.Error()) {
 			t.Errorf("fail returned unexpected error: got %v, want containing %v", err, failure)
 		}
 	})
 
 	t.Run("tools", func(t *testing.T) {
-		gotTools, err := c.ListTools(ctx)
+		res, err := c.ListTools(ctx, nil)
 		if err != nil {
 			t.Errorf("tools/list failed: %v", err)
 		}
-		wantTools := []protocol.Tool{
+		wantTools := []*Tool{
 			{
 				Name:        "fail",
 				Description: "just fail",
@@ -157,30 +156,30 @@ func TestEndToEnd(t *testing.T) {
 				},
 			},
 		}
-		if diff := cmp.Diff(wantTools, gotTools, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
+		if diff := cmp.Diff(wantTools, res.Tools, cmpopts.IgnoreUnexported(jsonschema.Schema{})); diff != "" {
 			t.Fatalf("tools/list mismatch (-want +got):\n%s", diff)
 		}
 
-		gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"})
+		gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantHi := &protocol.CallToolResult{
-			Content: []protocol.Content{{Type: "text", Text: "hi user"}},
+		wantHi := &CallToolResult{
+			Content: []*Content{{Type: "text", Text: "hi user"}},
 		}
 		if diff := cmp.Diff(wantHi, gotHi); diff != "" {
 			t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
 		}
 
-		gotFail, err := c.CallTool(ctx, "fail", map[string]any{})
+		gotFail, err := c.CallTool(ctx, "fail", map[string]any{}, nil)
 		// Counter-intuitively, when a tool fails, we don't expect an RPC error for
 		// call tool: instead, the failure is embedded in the result.
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantFail := &protocol.CallToolResult{
+		wantFail := &CallToolResult{
 			IsError: true,
-			Content: []protocol.Content{{Type: "text", Text: failure.Error()}},
+			Content: []*Content{{Type: "text", Text: failure.Error()}},
 		}
 		if diff := cmp.Diff(wantFail, gotFail); diff != "" {
 			t.Errorf("tools/call 'fail' mismatch (-want +got):\n%s", diff)
@@ -188,26 +187,26 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("resources", func(t *testing.T) {
-		resource1 := protocol.Resource{
+		resource1 := &Resource{
 			Name:     "public",
 			MIMEType: "text/plain",
 			URI:      "file:///file1.txt",
 		}
-		resource2 := protocol.Resource{
+		resource2 := &Resource{
 			Name:     "public", // names are not unique IDs
 			MIMEType: "text/plain",
 			URI:      "file:///nonexistent.txt",
 		}
 
-		readHandler := func(_ context.Context, r protocol.Resource, _ *protocol.ReadResourceParams) (*protocol.ReadResourceResult, error) {
-			if r.URI == "file:///file1.txt" {
-				return &protocol.ReadResourceResult{
-					Contents: &protocol.ResourceContents{
+		readHandler := func(_ context.Context, _ *ServerSession, p *ReadResourceParams) (*ReadResourceResult, error) {
+			if p.URI == "file:///file1.txt" {
+				return &ReadResourceResult{
+					Contents: &ResourceContents{
 						Text: "file contents",
 					},
 				}, nil
 			}
-			return nil, ResourceNotFoundError(r.URI)
+			return nil, ResourceNotFoundError(p.URI)
 		}
 		s.AddResources(
 			&ServerResource{resource1, readHandler},
@@ -217,7 +216,7 @@ func TestEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if diff := cmp.Diff([]protocol.Resource{resource1, resource2}, lrres.Resources); diff != "" {
+		if diff := cmp.Diff([]*Resource{resource1, resource2}, lrres.Resources); diff != "" {
 			t.Errorf("resources/list mismatch (-want, +got):\n%s", diff)
 		}
 
@@ -229,7 +228,7 @@ func TestEndToEnd(t *testing.T) {
 			{"file:///nonexistent.txt", ""},
 			// TODO(jba): add resource template cases when we implement them
 		} {
-			rres, err := c.ReadResource(ctx, &protocol.ReadResourceParams{URI: tt.uri})
+			rres, err := c.ReadResource(ctx, &ReadResourceParams{URI: tt.uri})
 			if err != nil {
 				var werr *jsonrpc2.WireError
 				if errors.As(err, &werr) && werr.Code == codeResourceNotFound {
@@ -250,13 +249,13 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 	t.Run("roots", func(t *testing.T) {
-		// Take the server's first ServerConnection.
-		var sc *ServerConnection
-		for sc = range s.Clients() {
+		// Take the server's first ServerSession.
+		var sc *ServerSession
+		for sc = range s.Sessions() {
 			break
 		}
 
-		rootRes, err := sc.ListRoots(ctx, &protocol.ListRootsParams{})
+		rootRes, err := sc.ListRoots(ctx, &ListRootsParams{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -273,7 +272,7 @@ func TestEndToEnd(t *testing.T) {
 
 	// After disconnecting, neither client nor server should have any
 	// connections.
-	for range s.Clients() {
+	for range s.Sessions() {
 		t.Errorf("unexpected client after disconnection")
 	}
 }
@@ -283,17 +282,17 @@ func TestEndToEnd(t *testing.T) {
 //
 // The caller should cancel either the client connection or server connection
 // when the connections are no longer needed.
-func basicConnection(t *testing.T, tools ...*Tool) (*ServerConnection, *Client) {
+func basicConnection(t *testing.T, tools ...*ServerTool) (*ServerSession, *Client) {
 	t.Helper()
 
 	ctx := context.Background()
-	ct, st := NewLocalTransport()
+	ct, st := NewInMemoryTransport()
 
 	s := NewServer("testServer", "v1.0.0", nil)
 
 	// The 'greet' tool says hi.
 	s.AddTools(tools...)
-	cc, err := s.Connect(ctx, st, nil)
+	ss, err := s.Connect(ctx, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +301,7 @@ func basicConnection(t *testing.T, tools ...*Tool) (*ServerConnection, *Client) 
 	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	return cc, c
+	return ss, c
 }
 
 func TestServerClosing(t *testing.T) {
@@ -318,19 +317,19 @@ func TestServerClosing(t *testing.T) {
 		}
 		wg.Done()
 	}()
-	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}); err != nil {
+	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil); err != nil {
 		t.Fatalf("after connecting: %v", err)
 	}
 	cc.Close()
 	wg.Wait()
-	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}); !errors.Is(err, ErrConnectionClosed) {
+	if _, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil); !errors.Is(err, ErrConnectionClosed) {
 		t.Errorf("after disconnection, got error %v, want EOF", err)
 	}
 }
 
 func TestBatching(t *testing.T) {
 	ctx := context.Background()
-	ct, st := NewLocalTransport()
+	ct, st := NewInMemoryTransport()
 
 	s := NewServer("testServer", "v1.0.0", nil)
 	_, err := s.Connect(ctx, st, nil)
@@ -351,7 +350,7 @@ func TestBatching(t *testing.T) {
 	errs := make(chan error, batchSize)
 	for i := range batchSize {
 		go func() {
-			_, err := c.ListTools(ctx)
+			_, err := c.ListTools(ctx, nil)
 			errs <- err
 		}()
 		time.Sleep(2 * time.Millisecond)
@@ -371,7 +370,7 @@ func TestCancellation(t *testing.T) {
 		cancelled = make(chan struct{}, 1) // don't block the request
 	)
 
-	slowRequest := func(ctx context.Context, cc *ServerConnection, v struct{}) ([]Content, error) {
+	slowRequest := func(ctx context.Context, cc *ServerSession, v struct{}) ([]*Content, error) {
 		start <- struct{}{}
 		select {
 		case <-ctx.Done():
@@ -385,7 +384,7 @@ func TestCancellation(t *testing.T) {
 	defer sc.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go sc.CallTool(ctx, "slow", map[string]any{})
+	go sc.CallTool(ctx, "slow", map[string]any{}, nil)
 	<-start
 	cancel()
 	select {

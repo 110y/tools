@@ -9,13 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"log"
 	"net/url"
 	"slices"
 	"sync"
 
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 // A Server is an instance of an MCP server.
@@ -29,10 +27,10 @@ type Server struct {
 	opts    ServerOptions
 
 	mu        sync.Mutex
-	prompts   *featureSet[*Prompt]
-	tools     *featureSet[*Tool]
+	prompts   *featureSet[*ServerPrompt]
+	tools     *featureSet[*ServerTool]
 	resources *featureSet[*ServerResource]
-	conns     []*ServerConnection
+	conns     []*ServerSession
 }
 
 // ServerOptions is used to configure behavior of the server.
@@ -55,15 +53,15 @@ func NewServer(name, version string, opts *ServerOptions) *Server {
 		name:      name,
 		version:   version,
 		opts:      *opts,
-		prompts:   newFeatureSet(func(p *Prompt) string { return p.Definition.Name }),
-		tools:     newFeatureSet(func(t *Tool) string { return t.Definition.Name }),
+		prompts:   newFeatureSet(func(p *ServerPrompt) string { return p.Definition.Name }),
+		tools:     newFeatureSet(func(t *ServerTool) string { return t.Definition.Name }),
 		resources: newFeatureSet(func(r *ServerResource) string { return r.Resource.URI }),
 	}
 }
 
 // AddPrompts adds the given prompts to the server,
 // replacing any with the same names.
-func (s *Server) AddPrompts(prompts ...*Prompt) {
+func (s *Server) AddPrompts(prompts ...*ServerPrompt) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prompts.add(prompts...)
@@ -84,7 +82,7 @@ func (s *Server) RemovePrompts(names ...string) {
 
 // AddTools adds the given tools to the server,
 // replacing any with the same names.
-func (s *Server) AddTools(tools ...*Tool) {
+func (s *Server) AddTools(tools ...*ServerTool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tools.add(tools...)
@@ -121,18 +119,18 @@ func ResourceNotFoundError(uri string) error {
 // The immediate problem is that jsonprc2 defines -32002 as "server closing".
 const codeResourceNotFound = -31002
 
-// A ReadResourceHandler is a function that reads a resource.
+// A ResourceHandler is a function that reads a resource.
 // If it cannot find the resource, it should return the result of calling [ResourceNotFoundError].
-type ReadResourceHandler func(context.Context, protocol.Resource, *protocol.ReadResourceParams) (*protocol.ReadResourceResult, error)
+type ResourceHandler func(context.Context, *ServerSession, *ReadResourceParams) (*ReadResourceResult, error)
 
 // A ServerResource associates a Resource with its handler.
 type ServerResource struct {
-	Resource protocol.Resource
-	Handler  ReadResourceHandler
+	Resource *Resource
+	Handler  ResourceHandler
 }
 
 // AddResource adds the given resource to the server and associates it with
-// a [ReadResourceHandler], which will be called when the client calls [ClientSession.ReadResource].
+// a [ResourceHandler], which will be called when the client calls [ClientSession.ReadResource].
 // If a resource with the same URI already exists, this one replaces it.
 // AddResource panics if a resource URI is invalid or not absolute (has an empty scheme).
 func (s *Server) AddResources(resources ...*ServerResource) {
@@ -159,26 +157,25 @@ func (s *Server) RemoveResources(uris ...string) {
 	s.resources.remove(uris...)
 }
 
-// Clients returns an iterator that yields the current set of client
-// connections.
-func (s *Server) Clients() iter.Seq[*ServerConnection] {
+// Sessions returns an iterator that yields the current set of server sessions.
+func (s *Server) Sessions() iter.Seq[*ServerSession] {
 	s.mu.Lock()
 	clients := slices.Clone(s.conns)
 	s.mu.Unlock()
 	return slices.Values(clients)
 }
 
-func (s *Server) listPrompts(_ context.Context, _ *ServerConnection, params *protocol.ListPromptsParams) (*protocol.ListPromptsResult, error) {
+func (s *Server) listPrompts(_ context.Context, _ *ServerSession, params *ListPromptsParams) (*ListPromptsResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res := new(protocol.ListPromptsResult)
+	res := new(ListPromptsResult)
 	for p := range s.prompts.all() {
 		res.Prompts = append(res.Prompts, p.Definition)
 	}
 	return res, nil
 }
 
-func (s *Server) getPrompt(ctx context.Context, cc *ServerConnection, params *protocol.GetPromptParams) (*protocol.GetPromptResult, error) {
+func (s *Server) getPrompt(ctx context.Context, cc *ServerSession, params *GetPromptParams) (*GetPromptResult, error) {
 	s.mu.Lock()
 	prompt, ok := s.prompts.get(params.Name)
 	s.mu.Unlock()
@@ -189,39 +186,37 @@ func (s *Server) getPrompt(ctx context.Context, cc *ServerConnection, params *pr
 	return prompt.Handler(ctx, cc, params.Arguments)
 }
 
-func (s *Server) listTools(_ context.Context, _ *ServerConnection, params *protocol.ListToolsParams) (*protocol.ListToolsResult, error) {
+func (s *Server) listTools(_ context.Context, _ *ServerSession, params *ListToolsParams) (*ListToolsResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res := new(protocol.ListToolsResult)
+	res := new(ListToolsResult)
 	for t := range s.tools.all() {
 		res.Tools = append(res.Tools, t.Definition)
 	}
 	return res, nil
 }
 
-func (s *Server) callTool(ctx context.Context, cc *ServerConnection, params *protocol.CallToolParams) (*protocol.CallToolResult, error) {
+func (s *Server) callTool(ctx context.Context, cc *ServerSession, params *CallToolParams) (*CallToolResult, error) {
 	s.mu.Lock()
 	tool, ok := s.tools.get(params.Name)
 	s.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("%s: unknown tool %q", jsonrpc2.ErrInvalidParams, params.Name)
 	}
-	return tool.Handler(ctx, cc, params.Arguments)
+	return tool.Handler(ctx, cc, params)
 }
 
-func (s *Server) listResources(_ context.Context, _ *ServerConnection, params *protocol.ListResourcesParams) (*protocol.ListResourcesResult, error) {
+func (s *Server) listResources(_ context.Context, _ *ServerSession, params *ListResourcesParams) (*ListResourcesResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res := new(protocol.ListResourcesResult)
+	res := new(ListResourcesResult)
 	for r := range s.resources.all() {
 		res.Resources = append(res.Resources, r.Resource)
 	}
 	return res, nil
 }
 
-func (s *Server) readResource(ctx context.Context, _ *ServerConnection, params *protocol.ReadResourceParams) (*protocol.ReadResourceResult, error) {
-	log.Printf("readResource")
-	defer log.Printf("done")
+func (s *Server) readResource(ctx context.Context, ss *ServerSession, params *ReadResourceParams) (*ReadResourceResult, error) {
 	uri := params.URI
 	// Look up the resource URI in the list we have.
 	// This is a security check as well as an information lookup.
@@ -233,7 +228,7 @@ func (s *Server) readResource(ctx context.Context, _ *ServerConnection, params *
 		// Treat an unregistered resource the same as a registered one that couldn't be found.
 		return nil, ResourceNotFoundError(uri)
 	}
-	res, err := resource.Handler(ctx, resource.Resource, params)
+	res, err := resource.Handler(ctx, ss, params)
 	if err != nil {
 		return nil, err
 	}
@@ -254,29 +249,29 @@ func (s *Server) readResource(ctx context.Context, _ *ServerConnection, params *
 //
 // Run blocks until the client terminates the connection.
 func (s *Server) Run(ctx context.Context, t Transport, opts *ConnectionOptions) error {
-	cc, err := s.Connect(ctx, t, opts)
+	ss, err := s.Connect(ctx, t, opts)
 	if err != nil {
 		return err
 	}
-	return cc.Wait()
+	return ss.Wait()
 }
 
-// bind implements the binder[*ServerConnection] interface, so that Servers can
+// bind implements the binder[*ServerSession] interface, so that Servers can
 // be connected using [connect].
-func (s *Server) bind(conn *jsonrpc2.Connection) *ServerConnection {
-	cc := &ServerConnection{conn: conn, server: s}
+func (s *Server) bind(conn *jsonrpc2.Connection) *ServerSession {
+	cc := &ServerSession{conn: conn, server: s}
 	s.mu.Lock()
 	s.conns = append(s.conns, cc)
 	s.mu.Unlock()
 	return cc
 }
 
-// disconnect implements the binder[*ServerConnection] interface, so that
+// disconnect implements the binder[*ServerSession] interface, so that
 // Servers can be connected using [connect].
-func (s *Server) disconnect(cc *ServerConnection) {
+func (s *Server) disconnect(cc *ServerSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.conns = slices.DeleteFunc(s.conns, func(cc2 *ServerConnection) bool {
+	s.conns = slices.DeleteFunc(s.conns, func(cc2 *ServerSession) bool {
 		return cc2 == cc
 	})
 }
@@ -287,35 +282,35 @@ func (s *Server) disconnect(cc *ServerConnection) {
 // It returns a connection object that may be used to terminate the connection
 // (with [Connection.Close]), or await client termination (with
 // [Connection.Wait]).
-func (s *Server) Connect(ctx context.Context, t Transport, opts *ConnectionOptions) (*ServerConnection, error) {
+func (s *Server) Connect(ctx context.Context, t Transport, opts *ConnectionOptions) (*ServerSession, error) {
 	return connect(ctx, t, opts, s)
 }
 
-// A ServerConnection is a connection from a single MCP client. Its methods can
-// be used to send requests or notifications to the client. Create a connection
-// by calling [Server.Connect].
+// A ServerSession is a logical connection from a single MCP client. Its
+// methods can be used to send requests or notifications to the client. Create
+// a session by calling [Server.Connect].
 //
-// Call [ServerConnection.Close] to close the connection, or await client
-// termination with [ServerConnection.Wait].
-type ServerConnection struct {
+// Call [ServerSession.Close] to close the connection, or await client
+// termination with [ServerSession.Wait].
+type ServerSession struct {
 	server *Server
 	conn   *jsonrpc2.Connection
 
 	mu               sync.Mutex
-	initializeParams *protocol.InitializeParams
+	initializeParams *initializeParams
 	initialized      bool
 }
 
 // Ping makes an MCP "ping" request to the client.
-func (cc *ServerConnection) Ping(ctx context.Context) error {
+func (cc *ServerSession) Ping(ctx context.Context, _ *PingParams) error {
 	return call(ctx, cc.conn, "ping", nil, nil)
 }
 
-func (cc *ServerConnection) ListRoots(ctx context.Context, params *protocol.ListRootsParams) (*protocol.ListRootsResult, error) {
-	return standardCall[protocol.ListRootsResult](ctx, cc.conn, "roots/list", params)
+func (cc *ServerSession) ListRoots(ctx context.Context, params *ListRootsParams) (*ListRootsResult, error) {
+	return standardCall[ListRootsResult](ctx, cc.conn, "roots/list", params)
 }
 
-func (cc *ServerConnection) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
+func (cc *ServerSession) handle(ctx context.Context, req *jsonrpc2.Request) (any, error) {
 	cc.mu.Lock()
 	initialized := cc.initialized
 	cc.mu.Unlock()
@@ -366,7 +361,7 @@ func (cc *ServerConnection) handle(ctx context.Context, req *jsonrpc2.Request) (
 	return nil, jsonrpc2.ErrNotHandled
 }
 
-func (cc *ServerConnection) initialize(ctx context.Context, _ *ServerConnection, params *protocol.InitializeParams) (*protocol.InitializeResult, error) {
+func (cc *ServerSession) initialize(ctx context.Context, _ *ServerSession, params *initializeParams) (*initializeResult, error) {
 	cc.mu.Lock()
 	cc.initializeParams = params
 	cc.mu.Unlock()
@@ -382,19 +377,19 @@ func (cc *ServerConnection) initialize(ctx context.Context, _ *ServerConnection,
 		cc.mu.Unlock()
 	}()
 
-	return &protocol.InitializeResult{
+	return &initializeResult{
 		// TODO(rfindley): support multiple protocol versions.
 		ProtocolVersion: "2024-11-05",
-		Capabilities: protocol.ServerCapabilities{
-			Prompts: &protocol.PromptCapabilities{
+		Capabilities: &serverCapabilities{
+			Prompts: &promptCapabilities{
 				ListChanged: false, // not yet supported
 			},
-			Tools: &protocol.ToolCapabilities{
+			Tools: &toolCapabilities{
 				ListChanged: false, // not yet supported
 			},
 		},
 		Instructions: cc.server.opts.Instructions,
-		ServerInfo: protocol.Implementation{
+		ServerInfo: &implementation{
 			Name:    cc.server.name,
 			Version: cc.server.version,
 		},
@@ -404,12 +399,12 @@ func (cc *ServerConnection) initialize(ctx context.Context, _ *ServerConnection,
 // Close performs a graceful shutdown of the connection, preventing new
 // requests from being handled, and waiting for ongoing requests to return.
 // Close then terminates the connection.
-func (cc *ServerConnection) Close() error {
+func (cc *ServerSession) Close() error {
 	return cc.conn.Close()
 }
 
 // Wait waits for the connection to be closed by the client.
-func (cc *ServerConnection) Wait() error {
+func (cc *ServerSession) Wait() error {
 	return cc.conn.Wait()
 }
 
@@ -417,7 +412,7 @@ func (cc *ServerConnection) Wait() error {
 //
 // Importantly, it returns nil if the handler returned an error, which is a
 // requirement of the jsonrpc2 package.
-func dispatch[TParams, TResult any](ctx context.Context, conn *ServerConnection, req *jsonrpc2.Request, f func(context.Context, *ServerConnection, TParams) (TResult, error)) (any, error) {
+func dispatch[TParams, TResult any](ctx context.Context, conn *ServerSession, req *jsonrpc2.Request, f func(context.Context, *ServerSession, TParams) (TResult, error)) (any, error) {
 	var params TParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, err

@@ -1,6 +1,6 @@
 # Go MCP SDK design
 
-This file discusses the design of a Go SDK for the [model context
+This document discusses the design of a Go SDK for the [model context
 protocol](https://modelcontextprotocol.io/specification/2025-03-26). It is
 intended to seed a GitHub discussion about the official Go MCP SDK.
 
@@ -18,7 +18,7 @@ writing, it is imported by over 400 packages that span over 200 modules.
 We admire mcp-go, and seriously considered simply adopting it as a starting
 point for this SDK. However, as we looked at doing so, we realized that a
 significant amount of its API would probably need to change. In some cases,
-mcp-go has older APIs that predated newer variations--an obvious opportunity
+mcp-go has older APIs that predated newer variations—an obvious opportunity
 for cleanup. In others, it took a batteries-included approach that is probably
 not viable for an official SDK. In yet others, we simply think there is room for
 API refinement, and we should take this opportunity to consider our options.
@@ -33,6 +33,7 @@ differences from its API in the sections below. Although the API here is not
 compatible with mcp-go, translating between them should be straightforward in
 most cases.
 (Later, we will provide a detailed translation guide.)
+
 
 # Requirements
 
@@ -123,6 +124,7 @@ type Stream interface {
     Close() error
 }
 ```
+
 Methods accept a Go `Context` and return an `error`,
 as is idiomatic for APIs that do I/O.
 
@@ -217,7 +219,7 @@ create `SSEServerTransport` instances themselves, for incoming GET requests.
 // A SSEServerTransport is a logical SSE session created through a hanging GET
 // request.
 //
-// When connected, it it returns the following [Stream] implementation:
+// When connected, it returns the following [Stream] implementation:
 //   - Writes are SSE 'message' events to the GET response.
 //   - Reads are received from POSTs to the session endpoint, via
 //     [SSEServerTransport.ServeHTTP].
@@ -281,6 +283,14 @@ func NewStreamableClientTransport(url string) *StreamableClientTransport {
 func (*StreamableClientTransport) Connect(context.Context) (Stream, error)
 ```
 
+Finally, we also provide an in-memory transport, for scenarios such as testing,
+where the MCP client and server are in the same process.
+
+```go
+type InMemoryTransport struct { /* ... */ }
+func NewInMemoryTransport() (*InMemoryTransport, *InMemoryTransport)
+```
+
 **Differences from mcp-go**: The Go team has a battle-tested JSON-RPC
 implementation that we use for gopls, our Go LSP server. We are using the new
 version of this library as part of our MCP SDK. It handles all JSON-RPC 2.0
@@ -322,15 +332,14 @@ marshalling/unmarshalling can be delegated to the business logic of the client
 or server.
 
 For union types, which can't be represented in Go (specifically `Content` and
-`Resource`), we prefer distinguished unions: struct types with fields
+`ResourceContents`), we prefer distinguished unions: struct types with fields
 corresponding to the union of all properties for union elements.
 
 For brevity, only a few examples are shown here:
 
 ```go
-type CallToolParams struct {
-	Arguments map[string]json.RawMessage `json:"arguments,omitempty"`
-	Name      string                     `json:"name"`
+type ReadResourceParams struct {
+	URI string `json:"uri"`
 }
 
 type CallToolResult struct {
@@ -344,22 +353,11 @@ type CallToolResult struct {
 // The Type field distinguishes the type of the content.
 // At most one of Text, MIMEType, Data, and Resource is non-zero.
 type Content struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	MIMEType string    `json:"mimeType,omitempty"`
-	Data     []byte    `json:"data,omitempty"`
-	Resource *Resource `json:"resource,omitempty"`
-}
-
-// Resource is the wire format for embedded resources.
-//
-// The URI field describes the resource location. At most one of Text and Blob
-// is non-zero.
-type Resource struct {
-	URI      string  `json:"uri,"`
-	MIMEType string  `json:"mimeType,omitempty"`
-	Text     string  `json:"text"`
-	Blob     []byte `json:"blob"`
+	Type     string            `json:"type"`
+	Text     string            `json:"text,omitempty"`
+	MIMEType string            `json:"mimeType,omitempty"`
+	Data     []byte            `json:"data,omitempty"`
+	Resource *ResourceContents `json:"resource,omitempty"`
 }
 ```
 
@@ -388,7 +386,7 @@ change.
 
 Following the terminology of the
 [spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#session-management),
-we call the logical connection between a client and server a "session". There
+we call the logical connection between a client and server a "session." There
 must necessarily be a `ClientSession` and a `ServerSession`, corresponding to
 the APIs available from the client and server perspective, respectively.
 
@@ -438,19 +436,17 @@ transport := mcp.NewCommandTransport(exec.Command("myserver"))
 session, err := client.Connect(ctx, transport)
 if err != nil { ... }
 // Call a tool on the server.
-content, err := session.CallTool(ctx, &CallToolParams{
-  Name: "greet",
-  Arguments: map[string]any{"name": "you"} ,
-})
+content, err := session.CallTool(ctx, "greet", map[string]any{"name": "you"}, nil)
 ...
 return session.Close()
 ```
+
 A server that can handle that client call would look like this:
 
 ```go
 // Create a server with a single tool.
 server := mcp.NewServer("greeter", "v1.0.0", nil)
-server.AddTool(mcp.NewTool("greet", "say hi", SayHi))
+server.AddTools(mcp.NewTool("greet", "say hi", SayHi))
 // Run the server over stdin/stdout, until the client disconnects.
 transport := mcp.NewStdIOTransport()
 session, err := server.Connect(ctx, transport)
@@ -464,8 +460,6 @@ session until the client disconnects:
 ```go
 func (*Server) Run(context.Context, Transport)
 ```
-
-
 
 **Differences from mcp-go**: the Server APIs are very similar to mcp-go,
 though the association between servers and transports is different. In
@@ -490,12 +484,26 @@ documentation.
 
 ### Spec Methods
 
-As we saw above, the `ClientSession` method for the specification's
-`CallTool` RPC takes a context and a params pointer as arguments, and returns a
-result pointer and error:
+In our SDK, RPC methods that are defined in the specification take a context and
+a params pointer as arguments, and return a result pointer and error:
+
 ```go
-func (*ClientSession) CallTool(context.Context, *CallToolParams) (*CallToolResult, error)
+func (*ClientSession) ListTools(context.Context, *ListToolsParams) (*ListToolsResult, error)
 ```
+
+Our SDK has a method for every RPC in the spec, and except for `CallTool`,
+their signatures all share this form.
+We do this, rather than providing more convenient shortcut signatures,
+to maintain backward compatibility if the spec makes backward-compatible changes
+such as adding a new property to the request parameters
+(as in [this commit](https://github.com/modelcontextprotocol/modelcontextprotocol/commit/2fce8a077688bf8011e80af06348b8fe1dae08ac),
+for example).
+To avoid boilerplate, we don't repeat this
+signature for RPCs defined in the spec; readers may assume it when we mention a
+"spec method."
+
+`CallTool` is the only exception: for convenience, it takes the tool name and
+arguments, with an options struct for additional request fields.
 Our SDK has a method for every RPC in the spec, and their signatures all share
 this form. To avoid boilerplate, we don't repeat this signature for RPCs
 defined in the spec; readers may assume it when we mention a "spec method."
@@ -506,10 +514,35 @@ Technically, the MCP spec could add a field to a request while preserving backwa
 compatibility, which would break the Go SDK's compatibility. But in the unlikely event
 that were to happen, we would add that field to the Params struct.
 
+We believe that any change to the spec that would require callers to pass a new a
+parameter is not backward compatible. Therefore, it will always work to pass
+`nil` for any `XXXParams` argument that isn't currently necessary. For example, it is okay to call `Ping` like so:
+
+```go
+err := session.Ping(ctx, nil)`
+```
+
+#### Iterator Methods
+
+For convenience, iterator methods handle pagination for the `List` spec methods
+automatically, traversing all pages. If Params are supplied, iteration begins
+from the provided cursor (if present).
+
+```go
+func (*ClientSession) Tools(context.Context, *ListToolsParams) iter.Seq2[Tool, error]
+
+func (*ClientSession) Prompts(context.Context, *ListPromptsParams) iter.Seq2[Prompt, error]
+
+func (*ClientSession) Resources(context.Context, *ListResourceParams) iter.Seq2[Resource, error]
+
+func (*ClientSession) ResourceTemplates(context.Context, *ListResourceTemplatesParams) iter.Seq2[ResourceTemplate, error]
+```
+
+
 ### Middleware
 
-We provide a mechanism to add MCP-level middleware, which runs after the
-request has been parsed, but before any normal handling.
+We provide a mechanism to add MCP-level middleware on the server side, which runs after the
+request has been parsed but before any normal handling.
 
 ```go
 // A Dispatcher dispatches an MCP message to the appropriate handler.
@@ -518,14 +551,14 @@ request has been parsed, but before any normal handling.
 type Dispatcher func(ctx context.Context, s *ServerSession, method string, params any) (result any, err error)
 
 // AddDispatchers calls each function from right to left on the previous result, beginning
-// with the server's current dispatcher, and installs the result as the new handler.
-func (*Server) AddDispatchers(middleware ...func(Handler) Handler))
+// with the server's current dispatcher, and installs the result as the new dispatcher.
+func (*Server) AddDispatchers(middleware ...func(Dispatcher) Dispatcher))
 ```
 
 As an example, this code adds server-side logging:
 
 ```go
-func withLogging(h mcp.Handler) mcp.Handler {
+func withLogging(h mcp.Dispatcher) mcp.Dispatcher {
     return func(ctx context.Context, s *mcp.ServerSession, method string, params any) (res any, err error) {
         log.Printf("request: %s %v", method, params)
         defer func() { log.Printf("response: %v, %v", res, err) }()
@@ -573,7 +606,7 @@ can cancel an operation by cancelling the associated context:
 
 ```go
 ctx, cancel := context.WithCancel(ctx)
-go session.CallTool(ctx, "slow", map[string]any{})
+go session.CallTool(ctx, "slow", map[string]any{}, nil)
 cancel()
 ```
 
@@ -588,11 +621,9 @@ The server observes a client cancellation as a cancelled context.
 A caller can request progress notifications by setting the `ProgressToken` field on any request.
 
 ```go
-type ProgressToken any // string or int
-
 type XXXParams struct { // where XXX is each type of call
   ...
-  ProgressToken ProgressToken
+  ProgressToken any // string or int
 }
 ```
 
@@ -648,7 +679,7 @@ Roots can be added and removed from a `Client` with `AddRoots` and `RemoveRoots`
 // AddRoots adds the given roots to the client,
 // replacing any with the same URIs,
 // and notifies any connected servers.
-func (*Client) AddRoots(roots ...Root)
+func (*Client) AddRoots(roots ...*Root)
 
 // RemoveRoots removes the roots with the given URIs.
 // and notifies any connected servers if the list has changed.
@@ -656,7 +687,7 @@ func (*Client) AddRoots(roots ...Root)
 func (*Client) RemoveRoots(uris ...string)
 ```
 
-Servers can call the spec method `ListRoots` to get the roots. If a server installs a
+Server sessions can call the spec method `ListRoots` to get the roots. If a server installs a
 `RootsChangedHandler`, it will be called when the client sends a roots-changed
 notification, which happens whenever the list of roots changes after a
 connection has been established.
@@ -672,7 +703,7 @@ type ServerOptions {
 ### Sampling
 
 Clients that support sampling are created with a `CreateMessageHandler` option
-for handling server calls. To perform sampling, a server calls the spec method `CreateMessage`.
+for handling server calls. To perform sampling, a server session calls the spec method `CreateMessage`.
 
 ```go
 type ClientOptions struct {
@@ -696,7 +727,7 @@ type Tool struct {
 	Name string                    `json:"name"`
 }
 
-type ToolHandler func(context.Context, *ServerSession, map[string]json.RawMessage) (*CallToolResult, error)
+type ToolHandler func(context.Context, *ServerSession, *CallToolParams) (*CallToolResult, error)
 
 type ServerTool struct {
 	Tool    Tool
@@ -709,7 +740,7 @@ Add tools to a server with `AddTools`:
 ```go
 server.AddTools(
   mcp.NewTool("add", "add numbers", addHandler),
-  mcp.NewTools("subtract, subtract numbers", subHandler))
+  mcp.NewTool("subtract, subtract numbers", subHandler))
 ```
 
 Remove them by name with `RemoveTools`:
@@ -803,8 +834,11 @@ Schemas are validated on the server before the tool handler is called.
 Since all the fields of the Tool struct are exported, a Tool can also be created
 directly with assignment or a struct literal.
 
+Client sessions can call the spec method `ListTools` or an iterator method `Tools`
+to list the available tools.
+
 **Differences from mcp-go**: using variadic options to configure tools was
-signficantly inspired by mcp-go. However, the distinction between `ToolOption`
+significantly inspired by mcp-go. However, the distinction between `ToolOption`
 and `SchemaOption` allows for recursive application of schema options.
 For example, that limitation is visible in [this
 code](https://github.com/DCjanus/dida365-mcp-server/blob/master/cmd/mcp/tools.go#L315),
@@ -826,7 +860,7 @@ each occur only once (and in an SDK that wraps mcp-go).
 
 For registering tools, we provide only `AddTools`; mcp-go's `SetTools`,
 `AddTool`, `AddSessionTool`, and `AddSessionTools` are deemed unnecessary.
-(similarly for Delete/Remove).
+(Similarly for Delete/Remove).
 
 ### Prompts
 
@@ -857,7 +891,8 @@ server.AddPrompts(
 server.RemovePrompts("code_review")
 ```
 
-Clients can call the spec method `ListPrompts` to list the available prompts and the spec method `GetPrompt` to get one.
+Client sessions can call the spec method `ListPrompts` or the iterator method `Prompts`
+to list the available prompts, and the spec method `GetPrompt` to get one.
 
 **Differences from mcp-go**: We provide a `NewPrompt` helper to bind a prompt
 handler to a Go function using reflection to derive its arguments. We provide
@@ -865,57 +900,67 @@ handler to a Go function using reflection to derive its arguments. We provide
 
 ### Resources and resource templates
 
-To add a resource or resource template to a server, users call the `AddResource` and
-`AddResourceTemplate` methods, passing the resource or template and a function for reading it:
+In our design, each resource and resource template is associated with a function that reads it,
+with this signature:
 ```go
-type ReadResourceHandler func(context.Context, *ServerSession, *Resource, *ReadResourceParams) (*ReadResourceResult, error)
-
-func (*Server) AddResource(*Resource, ReadResourceHandler)
-func (*Server) AddResourceTemplate(*ResourceTemplate, ReadResourceHandler)
+type ResourceHandler func(context.Context, *ServerSession, *ReadResourceParams) (*ReadResourceResult, error)
 ```
-The `Resource` is passed to the reader function even though it is redundant (the function could have closed over it)
-so a single handler can support multiple resources.
-If the incoming resource matches a template, a `Resource` argument is constructed
-from the fields in the `ResourceTemplate`.
-The `ServerSession` argument is there so the reader can observe the client's roots.
+The arguments include the `ServerSession` so the handler can observe the client's roots.
+The handler should return the resource contents in a `ReadResourceResult`, calling either `NewTextResourceContents`
+or `NewBlobResourceContents`. If the handler omits the URI or MIME type, the server will populate them from the
+resource.
 
-To read files from the local filesystem, we recommend using `FileReadResourceHandler` to construct a handler:
+The `ServerResource` and `ServerResourceTemplate` types hold the association between the resource and its handler:
 ```go
-// FileReadResourceHandler returns a ReadResourceHandler that reads paths using dir as a root directory.
+type ServerResource struct {
+  Resource Resource
+  Handler  ResourceHandler
+}
+
+type ServerResourceTemplate struct {
+  Template ResourceTemplate
+  Handler  ResourceHandler
+}
+```
+
+To add a resource or resource template to a server, users call the `AddResources` and
+`AddResourceTemplates` methods with one or more `ServerResource`s or `ServerResourceTemplate`s.
+We also provide methods to remove them.
+
+```go
+func (*Server) AddResources(...*ServerResource)
+func (*Server) AddResourceTemplates(...*ServerResourceTemplate)
+
+func (s *Server) RemoveResources(uris ...string)
+func (s *Server) RemoveResourceTemplates(uriTemplates ...string)
+```
+
+The `ReadResource` method finds a resource or resource template matching the argument URI and calls
+its assocated handler.
+
+To read files from the local filesystem, we recommend using `FileResourceHandler` to construct a handler:
+```go
+// FileResourceHandler returns a ResourceHandler that reads paths using dir as a root directory.
 // It protects against path traversal attacks.
-// It will not read any file that is not in the root set of the client requesting the resource.
-func (*Server) FileReadResourceHandler(dir string) ReadResourceHandler
+// It will not read any file that is not in the root set of the client session requesting the resource.
+func (*Server) FileResourceHandler(dir string) ResourceHandler
 ```
-It guards against [path traversal attacks](https://go.dev/blog/osroot)
-and observes the client's roots.
 Here is an example:
+
 ```go
 // Safely read "/public/puppies.txt".
-s.AddResource(
-  &mcp.Resource{URI: "file:///puppies.txt"},
-  s.FileReadResourceHandler("/public"))
+s.AddResources(&mcp.ServerResource{
+  Resource: mcp.Resource{URI: "file:///puppies.txt"},
+  Handler: s.FileReadResourceHandler("/public")})
 ```
 
-There are also server methods to remove resources and resource templates.
-```go
-func (*Server) RemoveResources(uris ...string)
-func (*Server) RemoveResourceTemplates(names ...string)
-```
-Resource templates don't have unique identifiers, so removing a name will remove all
-resource templates with that name.
-
-Servers support all of the resource-related spec methods:
-- `ListResources` and `ListResourceTemplates` for listings.
-- `ReadResource` to get the contents of a resource.
-- `Subscribe` and `Unsubscribe` to manage subscriptions on resources.
-
-`ReadResource` checks the incoming URI against the server's list of
-resources and resource templates to make sure it matches one of them,
-then returns the result of calling the associated reader function.
+Server sessions also support the spec methods `ListResources` and `ListResourceTemplates`,
+and the corresponding iterator methods `Resources` and `ResourceTemplates`.
 
 #### Subscriptions
 
 ClientSessions can manage change notifications on particular resources:
+
 ```go
 func (*ClientSession) Subscribe(context.Context, *SubscribeParams) error
 func (*ClientSession) Unsubscribe(context.Context, *UnsubscribeParams) error
@@ -929,6 +974,7 @@ user doesn't have to.
 If a server author wants to support resource subscriptions, they must provide handlers
 to be called when clients subscribe and unsubscribe. It is an error to provide only
 one of these handlers.
+
 ```go
 type ServerOptions struct {
   ...
@@ -940,9 +986,11 @@ type ServerOptions struct {
 ```
 
 User code should call `ResourceUpdated` when a subscribed resource changes.
+
 ```go
 func (*Server) ResourceUpdated(context.Context, *ResourceUpdatedNotification) error
 ```
+
 The server routes these notifications to the server sessions that subscribed to the resource.
 
 ### ListChanged notifications
@@ -957,6 +1005,7 @@ type ClientOptions struct {
   ...
   ToolListChangedHandler func(context.Context, *ClientSession, *ToolListChangedParams)
   PromptListChangedHandler func(context.Context, *ClientSession, *PromptListChangedParams)
+  // For both resources and resource templates.
   ResourceListChangedHandler func(context.Context, *ClientSession, *ResourceListChangedParams)
 }
 ```
@@ -984,13 +1033,13 @@ type ServerOptions {
   // The value for the "logger" field of the notification.
   LoggerName string
   // Log notifications to a single ClientSession will not be
-  // send more frequently than this duration.
+  // sent more frequently than this duration.
   LogInterval time.Duration
 }
 ```
 
-ServerSessions have access to a `slog.Logger` that writes to the client. A call to
-a log method like `Info`is translated to a `LoggingMessageNotification` as
+Server sessions have a field `Logger` holding a `slog.Logger` that writes to the client session.
+A call to a log method like `Info` is translated to a `LoggingMessageNotification` as
 follows:
 
 - The attributes and the message populate the "data" property with the
@@ -1000,13 +1049,14 @@ follows:
 - If the `LoggerName` server option is set, it populates the "logger" property.
 
 - The standard slog levels `Info`, `Debug`, `Warn` and `Error` map to the
-  corresponding levels in the MCP spec. The other spec levels will be mapped
+  corresponding levels in the MCP spec. The other spec levels map
   to integers between the slog levels. For example, "notice" is level 2 because
   it is between "warning" (slog value 4) and "info" (slog value 0).
   The `mcp` package defines consts for these levels. To log at the "notice"
-  level, a handler would call `session.Log(ctx, mcp.LevelNotice, "message")`.
+  level, a handler would call `session.Logger.Log(ctx, mcp.LevelNotice, "message")`.
 
 A client that wishes to receive log messages must provide a handler:
+
 ```go
 type ClientOptions struct {
   ...
@@ -1016,4 +1066,27 @@ type ClientOptions struct {
 
 ### Pagination
 
-<!-- TODO: needs design -->
+Servers initiate pagination for `ListTools`, `ListPrompts`, `ListResources`,
+and `ListResourceTemplates`, dictating the page size and providing a
+`NextCursor` field in the Result if more pages exist. The SDK implements keyset
+pagination, using the unique ID of the feature as the key for a stable sort order and encoding
+the cursor as an opaque string.
+
+For server implementations, the page size for the list operation may be
+configured via the `ServerOptions.PageSize` field. PageSize must be a
+non-negative integer. If zero, a sensible default is used.
+
+```go
+type ServerOptions {
+  ...
+  PageSize int
+}
+```
+
+Client requests for List methods include an optional Cursor field for
+pagination. Server responses for List methods include a `NextCursor` field if
+more pages exist.
+
+In addition to the `List` methods, the SDK provides an iterator method for each
+list operation. This simplifies pagination for clients by automatically handling
+the underlying pagination logic. See [Iterator Methods](#iterator-methods) above.

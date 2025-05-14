@@ -2,15 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:generate go run generate.go
+
 // The mcp package provides an SDK for writing model context protocol clients
 // and servers.
 //
 // To get started, create either a [Client] or [Server], and connect it to a
 // peer using a [Transport]. The diagram below illustrates how this works:
 //
-//	Client                                    Server
-//	  ⇅          (jsonrpc2)                     ⇅
-//	Client Transport ⇄ Server Transport ⇄ ServerConnection
+//	Client                                   Server
+//	  ⇅          (jsonrpc2)                    ⇅
+//	Client Transport ⇄ Server Transport ⇄ ServerSession
 //
 // A [Client] is an MCP client, which can be configured with various client
 // capabilities. Clients may be connected to a [Server] instance
@@ -19,7 +21,7 @@
 // Similarly, a [Server] is an MCP server, which can be configured with various
 // server capabilities. Servers may be connected to one or more [Client]
 // instances using the [Server.Connect] method, which creates a
-// [ServerConnection].
+// [ServerSession].
 //
 // A [Transport] connects a bidirectional [Stream] of jsonrpc2 messages. In
 // practice, transports in the MCP spec are are either client transports or

@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	jsonrpc2 "golang.org/x/tools/internal/jsonrpc2_v2"
-	"golang.org/x/tools/internal/mcp/protocol"
 	"golang.org/x/tools/internal/xcontext"
 )
 
@@ -49,27 +48,39 @@ type ConnectionOptions struct {
 	Logger    io.Writer // if set, write RPC logs
 }
 
-// An IOTransport is a [Transport] that communicates using newline-delimited
+// A StdIOTransport is a [Transport] that communicates over stdin/stdout using
+// newline-delimited JSON.
+type StdIOTransport struct {
+	ioTransport
+}
+
+// An ioTransport is a [Transport] that communicates using newline-delimited
 // JSON over an io.ReadWriteCloser.
-type IOTransport struct {
+type ioTransport struct {
 	rwc io.ReadWriteCloser
 }
 
-func (t *IOTransport) Connect(context.Context) (Stream, error) {
+func (t *ioTransport) Connect(context.Context) (Stream, error) {
 	return newIOStream(t.rwc), nil
 }
 
 // NewStdIOTransport constructs a transport that communicates over
 // stdin/stdout.
-func NewStdIOTransport() *IOTransport {
-	return &IOTransport{rwc{os.Stdin, os.Stdout}}
+func NewStdIOTransport() *StdIOTransport {
+	return &StdIOTransport{ioTransport{rwc{os.Stdin, os.Stdout}}}
 }
 
-// NewLocalTransport returns two in-memory transports that connect to
-// each other, for testing purposes.
-func NewLocalTransport() (*IOTransport, *IOTransport) {
+// An InMemoryTransport is a [Transport] that communicates over an in-memory
+// network connection, using newline-delimited JSON.
+type InMemoryTransport struct {
+	ioTransport
+}
+
+// NewInMemoryTransport returns two InMemoryTransports that connect to each
+// other.
+func NewInMemoryTransport() (*InMemoryTransport, *InMemoryTransport) {
 	c1, c2 := net.Pipe()
-	return &IOTransport{c1}, &IOTransport{c2}
+	return &InMemoryTransport{ioTransport{c1}}, &InMemoryTransport{ioTransport{c2}}
 }
 
 // handler is an unexported version of jsonrpc2.Handler.
@@ -131,7 +142,7 @@ type canceller struct {
 // Preempt implements jsonrpc2.Preempter.
 func (c *canceller) Preempt(ctx context.Context, req *jsonrpc2.Request) (result any, err error) {
 	if req.Method == "notifications/cancelled" {
-		var params protocol.CancelledParams
+		var params CancelledParams
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return nil, err
 		}
@@ -156,7 +167,7 @@ func call(ctx context.Context, conn *jsonrpc2.Connection, method string, params,
 		return fmt.Errorf("calling %q: %w", method, ErrConnectionClosed)
 	case ctx.Err() != nil:
 		// Notify the peer of cancellation.
-		err := conn.Notify(xcontext.Detach(ctx), "notifications/cancelled", &protocol.CancelledParams{
+		err := conn.Notify(xcontext.Detach(ctx), "notifications/cancelled", &CancelledParams{
 			Reason:    ctx.Err().Error(),
 			RequestID: call.ID().Raw(),
 		})

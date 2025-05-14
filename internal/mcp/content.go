@@ -5,126 +5,124 @@
 package mcp
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
-
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
-// Content is the union of supported content types: [TextContent],
-// [ImageContent], [AudioContent], and [ResourceContent].
+// Content is the wire format for content.
+// It represents the protocol types TextContent, ImageContent, AudioContent
+// and EmbeddedResource.
+// Use [NewTextContent], [NewImageContent], [NewAudioContent] or [NewResourceContent]
+// to create one.
 //
-// ToWire converts content to its jsonrpc2 wire format.
-type Content interface {
-	// TODO: unexport this, and move the tests that use it to this package.
-	ToWire() protocol.Content
+// The Type field must be one of "text", "image", "audio" or "resource". The
+// constructors above populate this field appropriately.
+// Although at most one of Text, Data, and Resource should be non-zero, consumers of Content
+// use the Type field to determine which value to use; values in the other fields are ignored.
+type Content struct {
+	Type        string            `json:"type"`
+	Text        string            `json:"text,omitempty"`
+	MIMEType    string            `json:"mimeType,omitempty"`
+	Data        []byte            `json:"data,omitempty"`
+	Resource    *ResourceContents `json:"resource,omitempty"`
+	Annotations *Annotations      `json:"annotations,omitempty"`
 }
 
-// TextContent is a textual content.
-type TextContent struct {
-	Text string
-}
-
-func (c TextContent) ToWire() protocol.Content {
-	return protocol.Content{Type: "text", Text: c.Text}
-}
-
-// ImageContent contains base64-encoded image data.
-type ImageContent struct {
-	Data     []byte // base64-encoded
-	MIMEType string
-}
-
-func (c ImageContent) ToWire() protocol.Content {
-	return protocol.Content{Type: "image", MIMEType: c.MIMEType, Data: c.Data}
-}
-
-// AudioContent contains base64-encoded audio data.
-type AudioContent struct {
-	Data     []byte
-	MIMEType string
-}
-
-func (c AudioContent) ToWire() protocol.Content {
-	return protocol.Content{Type: "audio", MIMEType: c.MIMEType, Data: c.Data}
-}
-
-// ResourceContent contains embedded resources.
-type ResourceContent struct {
-	Resource EmbeddedResource
-}
-
-func (r ResourceContent) ToWire() protocol.Content {
-	res := r.Resource.toWire()
-	return protocol.Content{Type: "resource", Resource: &res}
-}
-
-type EmbeddedResource interface {
-	toWire() protocol.ResourceContents
-}
-
-// The {Text,Blob}ResourceContents types match the protocol definitions,
-// but we represent both as a single type on the wire.
-
-// A TextResourceContents is the contents of a text resource.
-type TextResourceContents struct {
-	URI      string
-	MIMEType string
-	Text     string
-}
-
-func (r TextResourceContents) toWire() protocol.ResourceContents {
-	return protocol.ResourceContents{
-		URI:      r.URI,
-		MIMEType: r.MIMEType,
-		Text:     r.Text,
-		// Blob is nil, indicating this is a TextResourceContents.
+func (c *Content) UnmarshalJSON(data []byte) error {
+	type wireContent Content // for naive unmarshaling
+	var c2 wireContent
+	if err := json.Unmarshal(data, &c2); err != nil {
+		return err
 	}
+	switch c2.Type {
+	case "text", "image", "audio", "resource":
+	default:
+		return fmt.Errorf("unrecognized content type %s", c.Type)
+	}
+	*c = Content(c2)
+	return nil
 }
 
-// A BlobResourceContents is the contents of a blob resource.
-type BlobResourceContents struct {
-	URI      string
-	MIMEType string
-	Blob     []byte
+// NewTextContent creates a [Content] with text.
+func NewTextContent(text string) *Content {
+	return &Content{Type: "text", Text: text}
 }
 
-func (r BlobResourceContents) toWire() protocol.ResourceContents {
-	return protocol.ResourceContents{
+// NewImageContent creates a [Content] with image data.
+func NewImageContent(data []byte, mimeType string) *Content {
+	return &Content{Type: "image", Data: data, MIMEType: mimeType}
+}
+
+// NewAudioContent creates a [Content] with audio data.
+func NewAudioContent(data []byte, mimeType string) *Content {
+	return &Content{Type: "audio", Data: data, MIMEType: mimeType}
+}
+
+// NewResourceContent creates a [Content] with an embedded resource.
+func NewResourceContent(resource *ResourceContents) *Content {
+	return &Content{Type: "resource", Resource: resource}
+}
+
+// ResourceContents represents the union of the spec's {Text,Blob}ResourceContents types.
+// See https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-03-26/schema.ts#L524-L551
+// for the inheritance structure.
+
+// A ResourceContents is either a TextResourceContents or a BlobResourceContents.
+// Use [NewTextResourceContents] or [NextBlobResourceContents] to create one.
+type ResourceContents struct {
+	URI      string `json:"uri"` // resource location; must not be empty
+	MIMEType string `json:"mimeType,omitempty"`
+	Text     string `json:"text"`
+	Blob     []byte `json:"blob,omitempty"` // if nil, then text; else blob
+}
+
+func (r ResourceContents) MarshalJSON() ([]byte, error) {
+	// If we could assume Go 1.24, we could use omitzero for Blob and avoid this method.
+	if r.URI == "" {
+		return nil, errors.New("ResourceContents missing URI")
+	}
+	if r.Blob == nil {
+		// Text. Marshal normally.
+		type wireResourceContents ResourceContents // (lacks MarshalJSON method)
+		return json.Marshal((wireResourceContents)(r))
+	}
+	// Blob.
+	if r.Text != "" {
+		return nil, errors.New("ResourceContents has non-zero Text and Blob fields")
+	}
+	// r.Blob may be the empty slice, so marshal with an alternative definition.
+	br := struct {
+		URI      string `json:"uri,omitempty"`
+		MIMEType string `json:"mimeType,omitempty"`
+		Blob     []byte `json:"blob"`
+	}{
 		URI:      r.URI,
 		MIMEType: r.MIMEType,
 		Blob:     r.Blob,
 	}
+	return json.Marshal(br)
 }
 
-// ContentFromWireContent converts content from the jsonrpc2 wire format to a
-// typed Content value.
-func ContentFromWireContent(c protocol.Content) Content {
-	switch c.Type {
-	case "text":
-		return TextContent{Text: c.Text}
-	case "image":
-		return ImageContent{Data: c.Data, MIMEType: c.MIMEType}
-	case "audio":
-		return AudioContent{Data: c.Data, MIMEType: c.MIMEType}
-	case "resource":
-		r := ResourceContent{}
-		if c.Resource != nil {
-			if c.Resource.Blob != nil {
-				r.Resource = BlobResourceContents{
-					URI:      c.Resource.URI,
-					MIMEType: c.Resource.MIMEType,
-					Blob:     c.Resource.Blob,
-				}
-			} else {
-				r.Resource = TextResourceContents{
-					URI:      c.Resource.URI,
-					MIMEType: c.Resource.MIMEType,
-					Text:     c.Resource.Text,
-				}
-			}
-		}
-		return r
-	default:
-		panic(fmt.Sprintf("unrecognized wire content type %q", c.Type))
+// NewTextResourceContents returns a [ResourceContents] containing text.
+func NewTextResourceContents(uri, mimeType, text string) *ResourceContents {
+	return &ResourceContents{
+		URI:      uri,
+		MIMEType: mimeType,
+		Text:     text,
+		// Blob is nil, indicating this is a TextResourceContents.
+	}
+}
+
+// NewTextResourceContents returns a [ResourceContents] containing a byte slice.
+func NewBlobResourceContents(uri, mimeType string, blob []byte) *ResourceContents {
+	// The only way to distinguish text from blob is a non-nil Blob field.
+	if blob == nil {
+		blob = []byte{}
+	}
+	return &ResourceContents{
+		URI:      uri,
+		MIMEType: mimeType,
+		Blob:     blob,
 	}
 }

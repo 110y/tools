@@ -12,7 +12,6 @@ import (
 	"os"
 
 	"golang.org/x/tools/internal/mcp"
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 var httpAddr = flag.String("http", "", "if set, use SSE HTTP at this address, instead of stdin/stdout")
@@ -21,17 +20,17 @@ type HiParams struct {
 	Name string `json:"name"`
 }
 
-func SayHi(ctx context.Context, cc *mcp.ServerConnection, params *HiParams) ([]mcp.Content, error) {
-	return []mcp.Content{
-		mcp.TextContent{Text: "Hi " + params.Name},
+func SayHi(ctx context.Context, cc *mcp.ServerSession, params *HiParams) ([]*mcp.Content, error) {
+	return []*mcp.Content{
+		mcp.NewTextContent("Hi " + params.Name),
 	}, nil
 }
 
-func PromptHi(ctx context.Context, cc *mcp.ServerConnection, params *HiParams) (*protocol.GetPromptResult, error) {
-	return &protocol.GetPromptResult{
+func PromptHi(ctx context.Context, cc *mcp.ServerSession, params *HiParams) (*mcp.GetPromptResult, error) {
+	return &mcp.GetPromptResult{
 		Description: "Code review prompt",
-		Messages: []protocol.PromptMessage{
-			{Role: "user", Content: mcp.TextContent{Text: "Say hi to " + params.Name}.ToWire()},
+		Messages: []*mcp.PromptMessage{
+			{Role: "user", Content: mcp.NewTextContent("Say hi to " + params.Name)},
 		},
 	}, nil
 }

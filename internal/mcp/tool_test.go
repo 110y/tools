@@ -15,13 +15,13 @@ import (
 )
 
 // testToolHandler is used for type inference in TestNewTool.
-func testToolHandler[T any](context.Context, *mcp.ServerConnection, T) ([]mcp.Content, error) {
+func testToolHandler[T any](context.Context, *mcp.ServerSession, T) ([]*mcp.Content, error) {
 	panic("not implemented")
 }
 
 func TestNewTool(t *testing.T) {
 	tests := []struct {
-		tool *mcp.Tool
+		tool *mcp.ServerTool
 		want *jsonschema.Schema
 	}{
 		{

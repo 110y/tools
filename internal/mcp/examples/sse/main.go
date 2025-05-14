@@ -19,9 +19,9 @@ type SayHiParams struct {
 	Name string `json:"name" mcp:"the name to say hi to"`
 }
 
-func SayHi(ctx context.Context, cc *mcp.ServerConnection, params *SayHiParams) ([]mcp.Content, error) {
-	return []mcp.Content{
-		mcp.TextContent{Text: "Hi " + params.Name},
+func SayHi(ctx context.Context, cc *mcp.ServerSession, params *SayHiParams) ([]*mcp.Content, error) {
+	return []*mcp.Content{
+		mcp.NewTextContent("Hi " + params.Name),
 	}, nil
 }
 

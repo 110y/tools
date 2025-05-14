@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/tools/internal/mcp/protocol"
 )
 
 func TestSSEServer(t *testing.T) {
@@ -24,8 +23,8 @@ func TestSSEServer(t *testing.T) {
 
 			sseHandler := NewSSEHandler(func(*http.Request) *Server { return server })
 
-			conns := make(chan *ServerConnection, 1)
-			sseHandler.onConnection = func(cc *ServerConnection) {
+			conns := make(chan *ServerSession, 1)
+			sseHandler.onConnection = func(cc *ServerSession) {
 				select {
 				case conns <- cc:
 				default:
@@ -40,16 +39,16 @@ func TestSSEServer(t *testing.T) {
 			if err := c.Start(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.Ping(ctx); err != nil {
+			if err := c.Ping(ctx, nil); err != nil {
 				t.Fatal(err)
 			}
 			cc := <-conns
-			gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"})
+			gotHi, err := c.CallTool(ctx, "greet", map[string]any{"name": "user"}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantHi := &protocol.CallToolResult{
-				Content: []protocol.Content{{Type: "text", Text: "hi user"}},
+			wantHi := &CallToolResult{
+				Content: []*Content{{Type: "text", Text: "hi user"}},
 			}
 			if diff := cmp.Diff(wantHi, gotHi); diff != "" {
 				t.Errorf("tools/call 'greet' mismatch (-want +got):\n%s", diff)
