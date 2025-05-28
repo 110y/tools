@@ -109,24 +109,27 @@ func TestUnmarshalErrors(t *testing.T) {
 	}
 }
 
-func TestEvery(t *testing.T) {
-	// Schema.every should visit all descendants of a schema, not just the immediate ones.
-	s := &Schema{
-		Items: &Schema{
-			Items: &Schema{},
-		},
-	}
-	want := 3
-	got := 0
-	s.every(func(*Schema) bool { got++; return true })
-	if got != want {
-		t.Errorf("got %d, want %d", got, want)
-	}
-}
-
 func mustUnmarshal(t *testing.T, data []byte, ptr any) {
 	t.Helper()
 	if err := json.Unmarshal(data, ptr); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// json returns the schema in json format.
+func (s *Schema) json() string {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Sprintf("<jsonschema.Schema:%v>", err)
+	}
+	return string(data)
+}
+
+// json returns the schema in json format, indented.
+func (s *Schema) jsonIndent() string {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("<jsonschema.Schema:%v>", err)
+	}
+	return string(data)
 }

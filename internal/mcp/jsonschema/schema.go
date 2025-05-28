@@ -11,9 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"net/url"
+	"reflect"
 	"regexp"
+	"slices"
 )
 
 // A Schema is a JSON schema object.
@@ -139,6 +142,10 @@ type Schema struct {
 	//   s.base == s <=> s.uri != nil
 	uri *url.URL
 
+	// The JSON Pointer path from the root schema to here.
+	// Used in errors.
+	path string
+
 	// The schema to which Ref refers.
 	resolvedRef *Schema
 
@@ -175,12 +182,16 @@ type anchorInfo struct {
 // String returns a short description of the schema.
 func (s *Schema) String() string {
 	if s.uri != nil {
-		return s.uri.String()
+		if u := s.uri.String(); u != "" {
+			return u
+		}
 	}
 	if a := cmp.Or(s.Anchor, s.DynamicAnchor); a != "" {
 		return fmt.Sprintf("%q, anchor %s", s.base.uri.String(), a)
 	}
-	// TODO: return something better, like a JSON Pointer from the base.
+	if s.path != "" {
+		return s.path
+	}
 	return "<anonymous schema>"
 }
 
@@ -190,15 +201,6 @@ func (s *Schema) String() string {
 // [Schema.Resolve] was called on it or one of its ancestors.
 func (s *Schema) ResolvedRef() *Schema {
 	return s.resolvedRef
-}
-
-// json returns the schema in json format.
-func (s *Schema) json() string {
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("<jsonschema.Schema:%v>", err)
-	}
-	return string(data)
 }
 
 func (s *Schema) basicChecks() error {
@@ -358,43 +360,40 @@ func (ip *integer) UnmarshalJSON(data []byte) error {
 func Ptr[T any](x T) *T { return &x }
 
 // every applies f preorder to every schema under s including s.
+// The second argument to f is the path to the schema appended to the argument path.
 // It stops when f returns false.
 func (s *Schema) every(f func(*Schema) bool) bool {
-	return s == nil ||
-		f(s) && s.everyChild(func(s *Schema) bool { return s.every(f) })
+	return f(s) && s.everyChild(func(s *Schema) bool { return s.every(f) })
 }
 
 // everyChild reports whether f is true for every immediate child schema of s.
-//
-// It does not call f on nil-valued fields holding individual schemas, like Contains,
-// because a nil value indicates that the field is absent.
-// It does call f on nils when they occur in slices and maps, so those invalid values
-// can be detected when the schema is validated.
 func (s *Schema) everyChild(f func(*Schema) bool) bool {
-	// Fields that contain individual schemas. A nil is valid: it just means the field isn't present.
-	for _, c := range []*Schema{
-		s.Items, s.AdditionalItems, s.Contains, s.PropertyNames, s.AdditionalProperties,
-		s.If, s.Then, s.Else, s.Not, s.UnevaluatedItems, s.UnevaluatedProperties,
-	} {
-		if c != nil && !f(c) {
-			return false
-		}
-	}
-	// Fields that contain slices of schemas. Yield nils so we can check for their presence.
-	for _, sl := range [][]*Schema{s.PrefixItems, s.AllOf, s.AnyOf, s.OneOf} {
-		for _, c := range sl {
-			if !f(c) {
+	v := reflect.ValueOf(s)
+	for _, info := range schemaFieldInfos {
+		fv := v.Elem().FieldByIndex(info.sf.Index)
+		switch info.sf.Type {
+		case schemaType:
+			// A field that contains an individual schema. A nil is valid: it just means the field isn't present.
+			c := fv.Interface().(*Schema)
+			if c != nil && !f(c) {
 				return false
 			}
-		}
-	}
-	// Fields that are maps of schemas. Ditto about nils.
-	for _, m := range []map[string]*Schema{
-		s.Defs, s.Definitions, s.Properties, s.PatternProperties, s.DependentSchemas,
-	} {
-		for _, c := range m {
-			if !f(c) {
-				return false
+
+		case schemaSliceType:
+			slice := fv.Interface().([]*Schema)
+			for _, c := range slice {
+				if !f(c) {
+					return false
+				}
+			}
+
+		case schemaMapType:
+			// Sort keys for determinism.
+			m := fv.Interface().(map[string]*Schema)
+			for _, k := range slices.Sorted(maps.Keys(m)) {
+				if !f(m[k]) {
+					return false
+				}
 			}
 		}
 	}
@@ -409,4 +408,36 @@ func (s *Schema) all() iter.Seq[*Schema] {
 // children wraps everyChild in an iterator.
 func (s *Schema) children() iter.Seq[*Schema] {
 	return func(yield func(*Schema) bool) { s.everyChild(yield) }
+}
+
+var (
+	schemaType      = reflect.TypeFor[*Schema]()
+	schemaSliceType = reflect.TypeFor[[]*Schema]()
+	schemaMapType   = reflect.TypeFor[map[string]*Schema]()
+)
+
+type structFieldInfo struct {
+	sf       reflect.StructField
+	jsonName string
+}
+
+var (
+	// the visible fields of Schema that have a JSON name, sorted by that name
+	schemaFieldInfos []structFieldInfo
+	// map from JSON name to field
+	schemaFieldMap = map[string]reflect.StructField{}
+)
+
+func init() {
+	for _, sf := range reflect.VisibleFields(reflect.TypeFor[Schema]()) {
+		if name, ok := jsonName(sf); ok {
+			schemaFieldInfos = append(schemaFieldInfos, structFieldInfo{sf, name})
+		}
+	}
+	slices.SortFunc(schemaFieldInfos, func(i1, i2 structFieldInfo) int {
+		return cmp.Compare(i1.jsonName, i2.jsonName)
+	})
+	for _, info := range schemaFieldInfos {
+		schemaFieldMap[info.jsonName] = info.sf
+	}
 }
