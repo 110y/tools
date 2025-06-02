@@ -24,7 +24,7 @@ type Client struct {
 	mu             sync.Mutex
 	roots          *featureSet[*Root]
 	sessions       []*ClientSession
-	methodHandler_ MethodHandler[ClientSession]
+	methodHandler_ MethodHandler[*ClientSession]
 }
 
 // NewClient creates a new Client.
@@ -37,7 +37,7 @@ func NewClient(name, version string, opts *ClientOptions) *Client {
 		name:           name,
 		version:        version,
 		roots:          newFeatureSet(func(r *Root) string { return r.URI }),
-		methodHandler_: defaultMethodHandler[ClientSession],
+		methodHandler_: defaultMethodHandler[*ClientSession],
 	}
 	if opts != nil {
 		c.opts = *opts
@@ -196,14 +196,14 @@ func (c *Client) createMessage(ctx context.Context, cs *ClientSession, params *C
 //
 // For example, AddMiddleware(m1, m2, m3) augments the client method handler as
 // m1(m2(m3(handler))).
-func (c *Client) AddMiddleware(middleware ...Middleware[ClientSession]) {
+func (c *Client) AddMiddleware(middleware ...Middleware[*ClientSession]) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	addMiddleware(&c.methodHandler_, middleware)
 }
 
 // clientMethodInfos maps from the RPC method name to serverMethodInfos.
-var clientMethodInfos = map[string]methodInfo[ClientSession]{
+var clientMethodInfos = map[string]methodInfo{
 	methodPing:                      newMethodInfo(sessionMethod((*ClientSession).ping)),
 	methodListRoots:                 newMethodInfo(clientMethod((*Client).listRoots)),
 	methodCreateMessage:             newMethodInfo(clientMethod((*Client).createMessage)),
@@ -213,9 +213,7 @@ var clientMethodInfos = map[string]methodInfo[ClientSession]{
 	notificationLoggingMessage:      newMethodInfo(clientMethod((*Client).callLoggingHandler)),
 }
 
-var _ session[ClientSession] = (*ClientSession)(nil)
-
-func (cs *ClientSession) methodInfos() map[string]methodInfo[ClientSession] {
+func (cs *ClientSession) methodInfos() map[string]methodInfo {
 	return clientMethodInfos
 }
 
@@ -223,7 +221,7 @@ func (cs *ClientSession) handle(ctx context.Context, req *jsonrpc2.Request) (any
 	return handleRequest(ctx, req, cs)
 }
 
-func (cs *ClientSession) methodHandler() MethodHandler[ClientSession] {
+func (cs *ClientSession) methodHandler() methodHandler {
 	cs.client.mu.Lock()
 	defer cs.client.mu.Unlock()
 	return cs.client.methodHandler_
@@ -258,33 +256,37 @@ func (cs *ClientSession) ListTools(ctx context.Context, params *ListToolsParams)
 
 // CallTool calls the tool with the given name and arguments.
 // Pass a [CallToolOptions] to provide additional request fields.
-func (cs *ClientSession) CallTool(ctx context.Context, name string, args map[string]any, opts *CallToolOptions) (_ *CallToolResult, err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("calling tool %q: %w", name, err)
-		}
-	}()
-
-	data, err := json.Marshal(args)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling arguments: %w", err)
-	}
-	params := &CallToolParams{
-		Name:      name,
-		Arguments: json.RawMessage(data),
-	}
+func (cs *ClientSession) CallTool(ctx context.Context, params *CallToolParams[json.RawMessage]) (*CallToolResult, error) {
 	return standardCall[CallToolResult](ctx, cs.conn, methodCallTool, params)
+}
+
+// CallTool is a helper to call a tool with any argument type. It returns an
+// error if params.Arguments fails to marshal to JSON.
+func CallTool[TArgs any](ctx context.Context, cs *ClientSession, params *CallToolParams[TArgs]) (*CallToolResult, error) {
+	wireParams, err := toWireParams(params)
+	if err != nil {
+		return nil, err
+	}
+	return cs.CallTool(ctx, wireParams)
+}
+
+func toWireParams[TArgs any](params *CallToolParams[TArgs]) (*CallToolParams[json.RawMessage], error) {
+	data, err := json.Marshal(params.Arguments)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal arguments: %v", err)
+	}
+	// The field mapping here must be kept up to date with the CallToolParams.
+	// This is partially enforced by TestToWireParams, which verifies that all
+	// comparable fields are mapped.
+	return &CallToolParams[json.RawMessage]{
+		Meta:      params.Meta,
+		Name:      params.Name,
+		Arguments: data,
+	}, nil
 }
 
 func (cs *ClientSession) SetLevel(ctx context.Context, params *SetLevelParams) error {
 	return call(ctx, cs.conn, methodSetLevel, params, nil)
-}
-
-// NOTE: the following struct should consist of all fields of callToolParams except name and arguments.
-
-// CallToolOptions contains options to [ClientSession.CallTool].
-type CallToolOptions struct {
-	ProgressToken any // string or int
 }
 
 // ListResources lists the resources that are currently available on the server.
@@ -319,27 +321,72 @@ func (c *Client) callLoggingHandler(ctx context.Context, cs *ClientSession, para
 // Tools provides an iterator for all tools available on the server,
 // automatically fetching pages and managing cursors.
 // The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
 func (cs *ClientSession) Tools(ctx context.Context, params *ListToolsParams) iter.Seq2[Tool, error] {
-	currentParams := &ListToolsParams{}
-	if params != nil {
-		*currentParams = *params
+	if params == nil {
+		params = &ListToolsParams{}
 	}
-	return func(yield func(Tool, error) bool) {
+	return paginate(ctx, params, cs.ListTools, func(res *ListToolsResult) []*Tool {
+		return res.Tools
+	})
+}
+
+// Resources provides an iterator for all resources available on the server,
+// automatically fetching pages and managing cursors.
+// The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
+func (cs *ClientSession) Resources(ctx context.Context, params *ListResourcesParams) iter.Seq2[Resource, error] {
+	if params == nil {
+		params = &ListResourcesParams{}
+	}
+	return paginate(ctx, params, cs.ListResources, func(res *ListResourcesResult) []*Resource {
+		return res.Resources
+	})
+}
+
+// Prompts provides an iterator for all prompts available on the server,
+// automatically fetching pages and managing cursors.
+// The `params` argument can set the initial cursor.
+// Iteration stops at the first encountered error, which will be yielded.
+func (cs *ClientSession) Prompts(ctx context.Context, params *ListPromptsParams) iter.Seq2[Prompt, error] {
+	if params == nil {
+		params = &ListPromptsParams{}
+	}
+	return paginate(ctx, params, cs.ListPrompts, func(res *ListPromptsResult) []*Prompt {
+		return res.Prompts
+	})
+}
+
+type ListParams interface {
+	// Returns a pointer to the param's Cursor field.
+	cursorPtr() *string
+}
+
+type ListResult[T any] interface {
+	// Returns a pointer to the param's NextCursor field.
+	nextCursorPtr() *string
+}
+
+// paginate is a generic helper function to provide a paginated iterator.
+func paginate[P ListParams, R ListResult[E], E any](ctx context.Context, params P, listFunc func(context.Context, P) (R, error), items func(R) []*E) iter.Seq2[E, error] {
+	return func(yield func(E, error) bool) {
 		for {
-			res, err := cs.ListTools(ctx, currentParams)
+			res, err := listFunc(ctx, params)
 			if err != nil {
-				yield(Tool{}, err)
+				var zero E
+				yield(zero, err)
 				return
 			}
-			for _, t := range res.Tools {
-				if !yield(*t, nil) {
+			for _, r := range items(res) {
+				if !yield(*r, nil) {
 					return
 				}
 			}
-			if res.NextCursor == "" {
+			nextCursorVal := res.nextCursorPtr()
+			if nextCursorVal == nil || *nextCursorVal == "" {
 				return
 			}
-			currentParams.Cursor = res.NextCursor
+			*params.cursorPtr() = *nextCursorVal
 		}
 	}
 }
