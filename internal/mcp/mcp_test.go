@@ -433,7 +433,7 @@ var (
 	errTestFailure = errors.New("mcp failure")
 
 	tools = map[string]*ServerTool{
-		"greet": NewTool("greet", "say hi", sayHi),
+		"greet": NewServerTool("greet", "say hi", sayHi),
 		"fail": {
 			Tool: &Tool{Name: "fail"},
 			Handler: func(context.Context, *ServerSession, *CallToolParamsFor[map[string]any]) (*CallToolResult, error) {
@@ -443,7 +443,7 @@ var (
 	}
 
 	prompts = map[string]*ServerPrompt{
-		"code_review": NewPrompt("code_review", "do a code review",
+		"code_review": NewServerPrompt("code_review", "do a code review",
 			func(_ context.Context, _ *ServerSession, params struct{ Code string }, _ *GetPromptParams) (*GetPromptResult, error) {
 				return &GetPromptResult{
 					Description: "Code review prompt",
@@ -452,7 +452,7 @@ var (
 					},
 				}, nil
 			}),
-		"fail": NewPrompt("fail", "", func(_ context.Context, _ *ServerSession, args struct{}, _ *GetPromptParams) (*GetPromptResult, error) {
+		"fail": NewServerPrompt("fail", "", func(_ context.Context, _ *ServerSession, args struct{}, _ *GetPromptParams) (*GetPromptResult, error) {
 			return nil, errTestFailure
 		}),
 	}
@@ -556,7 +556,7 @@ func basicConnection(t *testing.T, tools ...*ServerTool) (*ServerSession, *Clien
 }
 
 func TestServerClosing(t *testing.T) {
-	cc, cs := basicConnection(t, NewTool("greet", "say hi", sayHi))
+	cc, cs := basicConnection(t, NewServerTool("greet", "say hi", sayHi))
 	defer cs.Close()
 
 	ctx := context.Background()
@@ -597,8 +597,8 @@ func TestBatching(t *testing.T) {
 	c := NewClient("testClient", "v1.0.0", nil)
 	// TODO: this test is broken, because increasing the batch size here causes
 	// 'initialize' to block. Therefore, we can only test with a size of 1.
+	// Since batching is being removed, we can probably just delete this.
 	const batchSize = 1
-	BatchSize(ct, batchSize)
 	cs, err := c.Connect(ctx, ct)
 	if err != nil {
 		t.Fatal(err)
