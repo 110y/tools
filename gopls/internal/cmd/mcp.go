@@ -11,10 +11,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 
+	"golang.org/x/tools/gopls/internal/cache"
 	"golang.org/x/tools/gopls/internal/filewatcher"
-	"golang.org/x/tools/gopls/internal/lsprpc"
 	"golang.org/x/tools/gopls/internal/mcp"
 	"golang.org/x/tools/gopls/internal/protocol"
 )
@@ -68,34 +69,64 @@ func (m *headlessMCP) Run(ctx context.Context, args ...string) error {
 	}
 	defer cli.terminate(ctx)
 
-	w, eventsChan, errorChan, err := filewatcher.New(1*time.Second, nil)
+	var (
+		queueMu  sync.Mutex
+		queue    []protocol.FileEvent
+		nonempty = make(chan struct{}) // receivable when len(queue) > 0
+		stop     = make(chan struct{}) // closed when Run returns
+	)
+	defer close(stop)
+
+	// This goroutine forwards file change events to the LSP server.
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-nonempty:
+				queueMu.Lock()
+				q := queue
+				queue = nil
+				queueMu.Unlock()
+
+				if len(q) > 0 {
+					if err := cli.server.DidChangeWatchedFiles(ctx, &protocol.DidChangeWatchedFilesParams{
+						Changes: q,
+					}); err != nil {
+						log.Printf("failed to notify changed files: %v", err)
+					}
+				}
+
+			}
+		}
+	}()
+
+	w, err := filewatcher.New(500*time.Millisecond, nil, func(events []protocol.FileEvent, err error) {
+		if err != nil {
+			log.Printf("watch error: %v", err)
+			return
+		}
+
+		if len(events) == 0 {
+			return
+		}
+
+		// Since there is no promise [protocol.Server.DidChangeWatchedFiles]
+		// will return immediately, we should buffer the captured events and
+		// sent them whenever available in a separate go routine.
+		queueMu.Lock()
+		queue = append(queue, events...)
+		queueMu.Unlock()
+
+		select {
+		case nonempty <- struct{}{}:
+		default:
+		}
+	})
 	if err != nil {
 		return err
 	}
 	defer w.Close()
-
-	// Start listening for events.
-	go func() {
-		for {
-			select {
-			case events, ok := <-eventsChan:
-				if !ok {
-					return
-				}
-				if err := cli.server.DidChangeWatchedFiles(ctx, &protocol.DidChangeWatchedFilesParams{
-					Changes: events,
-				}); err != nil {
-					log.Printf("failed to notify changed files: %v", err)
-				}
-			case err, ok := <-errorChan:
-				if !ok {
-					return
-				}
-				log.Printf("error found: %v", err)
-				return
-			}
-		}
-	}()
 
 	// TODO(hxjiang): replace this with LSP initial param workspace root.
 	dir, err := os.Getwd()
@@ -106,28 +137,9 @@ func (m *headlessMCP) Run(ctx context.Context, args ...string) error {
 		return err
 	}
 
-	// Send a SessionStart event to trigger creation of an http handler.
 	if m.Address != "" {
 		countHeadlessMCPSSE.Inc()
-		// Specify a channel size of two so that the send operations are
-		// non-blocking.
-		eventChan := make(chan lsprpc.SessionEvent, 2)
-		go func() {
-			eventChan <- lsprpc.SessionEvent{
-				Session: sess,
-				Type:    lsprpc.SessionStart,
-				Server:  cli.server,
-			}
-		}()
-		defer func() {
-			eventChan <- lsprpc.SessionEvent{
-				Session: sess,
-				Type:    lsprpc.SessionEnd,
-				Server:  cli.server,
-			}
-		}()
-
-		return mcp.Serve(ctx, m.Address, eventChan, false)
+		return mcp.Serve(ctx, m.Address, &staticSessions{sess, cli.server}, false)
 	} else {
 		countHeadlessMCPStdIO.Inc()
 		var rpcLog io.Writer
@@ -137,4 +149,24 @@ func (m *headlessMCP) Run(ctx context.Context, args ...string) error {
 		log.Printf("Listening for MCP messages on stdin...")
 		return mcp.StartStdIO(ctx, sess, cli.server, rpcLog)
 	}
+}
+
+// staticSessions implements the [mcp.Sessions] interface for a single gopls
+// session.
+type staticSessions struct {
+	session *cache.Session
+	server  protocol.Server
+}
+
+func (s *staticSessions) SetSessionExitFunc(func(string)) {}
+
+func (s *staticSessions) FirstSession() (*cache.Session, protocol.Server) {
+	return s.session, s.server
+}
+
+func (s *staticSessions) Session(id string) (*cache.Session, protocol.Server) {
+	if s.session.ID() == id {
+		return s.session, s.server
+	}
+	return nil, nil
 }
