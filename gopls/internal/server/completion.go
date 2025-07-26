@@ -143,18 +143,21 @@ func toProtocolCompletionItems(candidates []completion.CompletionItem, surroundi
 		}
 
 		var doc *protocol.Or_CompletionItem_documentation
-		if candidate.Documentation != "" {
-			var value any
-			if options.PreferredContentFormat == protocol.Markdown {
-				value = protocol.MarkupContent{
-					Kind:  protocol.Markdown,
-					Value: golang.DocCommentToMarkdown(candidate.Documentation, options),
-				}
-			} else {
-				value = candidate.Documentation
+
+		// 110y: populate documentation even if it is empty since ddc complains an error
+		// if candidate.Documentation != "" {
+		var value any
+		if options.PreferredContentFormat == protocol.Markdown {
+			value = protocol.MarkupContent{
+				Kind:  protocol.Markdown,
+				Value: golang.DocCommentToMarkdown(candidate.Documentation, options),
 			}
-			doc = &protocol.Or_CompletionItem_documentation{Value: value}
+		} else {
+			value = candidate.Documentation
 		}
+		doc = &protocol.Or_CompletionItem_documentation{Value: value}
+		// }
+
 		var edits *protocol.Or_CompletionItem_textEdit
 		if options.InsertReplaceSupported {
 			insertRng := insertRng0
