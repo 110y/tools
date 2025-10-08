@@ -20,7 +20,6 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/analysisinternal/generated"
-	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/moreiters"
 	"golang.org/x/tools/internal/stdlib"
 	"golang.org/x/tools/internal/versions"
@@ -45,6 +44,7 @@ var Suite = []*analysis.Analyzer{
 	SlicesContainsAnalyzer,
 	// SlicesDeleteAnalyzer, // not nil-preserving!
 	SlicesSortAnalyzer,
+	stditeratorsAnalyzer,
 	StringsCutPrefixAnalyzer,
 	StringsSeqAnalyzer,
 	StringsBuilderAnalyzer,
@@ -64,12 +64,6 @@ func skipGenerated(pass *analysis.Pass) {
 		}
 		report(diag)
 	}
-}
-
-// equalSyntax reports whether x and y are syntactically equal (ignoring comments).
-func equalSyntax(x, y ast.Expr) bool {
-	sameName := func(x, y *ast.Ident) bool { return x.Name == y.Name }
-	return astutil.Equal(x, y, sameName)
 }
 
 // formatExprs formats a comma-separated list of expressions.
@@ -124,12 +118,6 @@ func fileUses(info *types.Info, file *ast.File, version string) bool {
 	return !versions.Before(info.FileVersions[file], version)
 }
 
-// enclosingFile returns the syntax tree for the file enclosing c.
-func enclosingFile(c inspector.Cursor) *ast.File {
-	c, _ = moreiters.First(c.Enclosing((*ast.File)(nil)))
-	return c.Node().(*ast.File)
-}
-
 // within reports whether the current pass is analyzing one of the
 // specified standard packages or their dependencies.
 func within(pass *analysis.Pass, pkgs ...string) bool {
@@ -138,22 +126,13 @@ func within(pass *analysis.Pass, pkgs ...string) bool {
 		moreiters.Contains(stdlib.Dependencies(pkgs...), path)
 }
 
-// childOf reports whether cur.ParentEdge is ek.
-func childOf(cur inspector.Cursor, ek edge.Kind) bool {
-	got, _ := cur.ParentEdge()
-	return got == ek
-}
-
 // unparenEnclosing removes enclosing parens from cur in
 // preparation for a call to [Cursor.ParentEdge].
 func unparenEnclosing(cur inspector.Cursor) inspector.Cursor {
-	for {
-		ek, _ := cur.ParentEdge()
-		if ek != edge.ParenExpr_X {
-			return cur
-		}
+	for analysisinternal.IsChildOf(cur, edge.ParenExpr_X) {
 		cur = cur.Parent()
 	}
+	return cur
 }
 
 var (
@@ -171,44 +150,6 @@ var (
 	byteSliceType  = types.NewSlice(types.Typ[types.Byte])
 	omitemptyRegex = regexp.MustCompile(`(?:^json| json):"[^"]*(,omitempty)(?:"|,[^"]*")\s?`)
 )
-
-// noEffects reports whether the expression has no side effects, i.e., it
-// does not modify the memory state. This function is conservative: it may
-// return false even when the expression has no effect.
-func noEffects(info *types.Info, expr ast.Expr) bool {
-	noEffects := true
-	ast.Inspect(expr, func(n ast.Node) bool {
-		switch v := n.(type) {
-		case nil, *ast.Ident, *ast.BasicLit, *ast.BinaryExpr, *ast.ParenExpr,
-			*ast.SelectorExpr, *ast.IndexExpr, *ast.SliceExpr, *ast.TypeAssertExpr,
-			*ast.StarExpr, *ast.CompositeLit, *ast.ArrayType, *ast.StructType,
-			*ast.MapType, *ast.InterfaceType, *ast.KeyValueExpr:
-			// No effect
-		case *ast.UnaryExpr:
-			// Channel send <-ch has effects
-			if v.Op == token.ARROW {
-				noEffects = false
-			}
-		case *ast.CallExpr:
-			// Type conversion has no effects
-			if !info.Types[v.Fun].IsType() {
-				// TODO(adonovan): Add a case for built-in functions without side
-				// effects (by using callsPureBuiltin from tools/internal/refactor/inline)
-
-				noEffects = false
-			}
-		case *ast.FuncLit:
-			// A FuncLit has no effects, but do not descend into it.
-			return false
-		default:
-			// All other expressions have effects
-			noEffects = false
-		}
-
-		return noEffects
-	})
-	return noEffects
-}
 
 // lookup returns the symbol denoted by name at the position of the cursor.
 func lookup(info *types.Info, cur inspector.Cursor, name string) types.Object {

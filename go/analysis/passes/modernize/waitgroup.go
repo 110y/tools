@@ -17,6 +17,7 @@ import (
 	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/analysisinternal/generated"
 	typeindexanalyzer "golang.org/x/tools/internal/analysisinternal/typeindex"
+	"golang.org/x/tools/internal/astutil"
 	"golang.org/x/tools/internal/typesinternal/typeindex"
 )
 
@@ -107,13 +108,13 @@ func waitgroup(pass *analysis.Pass) (any, error) {
 		var doneStmt ast.Stmt
 		if deferStmt, ok := list[0].(*ast.DeferStmt); ok &&
 			typeutil.Callee(info, deferStmt.Call) == syncWaitGroupDone &&
-			equalSyntax(ast.Unparen(deferStmt.Call.Fun).(*ast.SelectorExpr).X, addCallRecv) {
+			astutil.EqualSyntax(ast.Unparen(deferStmt.Call.Fun).(*ast.SelectorExpr).X, addCallRecv) {
 			doneStmt = deferStmt // "defer wg.Done()"
 
 		} else if lastStmt, ok := list[len(list)-1].(*ast.ExprStmt); ok {
 			if doneCall, ok := lastStmt.X.(*ast.CallExpr); ok &&
 				typeutil.Callee(info, doneCall) == syncWaitGroupDone &&
-				equalSyntax(ast.Unparen(doneCall.Fun).(*ast.SelectorExpr).X, addCallRecv) {
+				astutil.EqualSyntax(ast.Unparen(doneCall.Fun).(*ast.SelectorExpr).X, addCallRecv) {
 				doneStmt = lastStmt // "wg.Done()"
 			}
 		}
@@ -125,10 +126,11 @@ func waitgroup(pass *analysis.Pass) (any, error) {
 			panic("can't find Cursor for 'done' statement")
 		}
 
-		file := enclosingFile(curAddCall)
+		file := analysisinternal.EnclosingFile(curAddCall)
 		if !fileUses(info, file, "go1.25") {
 			continue
 		}
+		tokFile := pass.Fset.File(file.Pos())
 
 		var addCallRecvText bytes.Buffer
 		err := printer.Fprint(&addCallRecvText, pass.Fset, addCallRecv)
@@ -144,9 +146,9 @@ func waitgroup(pass *analysis.Pass) (any, error) {
 				Message: "Simplify by using WaitGroup.Go",
 				TextEdits: slices.Concat(
 					// delete "wg.Add(1)"
-					analysisinternal.DeleteStmt(pass.Fset, curAddStmt),
+					analysisinternal.DeleteStmt(tokFile, curAddStmt),
 					// delete "wg.Done()" or "defer wg.Done()"
-					analysisinternal.DeleteStmt(pass.Fset, curDoneStmt),
+					analysisinternal.DeleteStmt(tokFile, curDoneStmt),
 					[]analysis.TextEdit{
 						// go    func()
 						// ------
