@@ -2,16 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package analysisflags
+// Package driverutil defines implementation helper functions for
+// analysis drivers such as unitchecker, {single,multi}checker, and
+// analysistest.
+package driverutil
 
 // This file defines the -fix logic common to unitchecker and
 // {single,multi}checker.
-
-// TODO(adonovan): move this file, and most of the contents of
-// internal/analysisinternal, into a new package, internal/driverlib,
-// since the library is for the driver, not analyzer, side of the
-// analysis API. Turn any dependencies on analysisflags state (i.e.
-// diffFlag) into explicit parameters (of ApplyFix).
 
 import (
 	"bytes"
@@ -29,7 +26,6 @@ import (
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/astutil"
-	"golang.org/x/tools/internal/analysisinternal"
 	"golang.org/x/tools/internal/astutil/free"
 	"golang.org/x/tools/internal/diff"
 )
@@ -39,14 +35,15 @@ import (
 type FixAction struct {
 	Name         string         // e.g. "analyzer@package"
 	Pkg          *types.Package // (for import removal)
+	Files        []*ast.File
 	FileSet      *token.FileSet
-	ReadFileFunc analysisinternal.ReadFileFunc
+	ReadFileFunc ReadFileFunc
 	Diagnostics  []analysis.Diagnostic
 }
 
 // ApplyFixes attempts to apply the first suggested fix associated
 // with each diagnostic reported by the specified actions.
-// All fixes must have been validated by [analysisinternal.ValidateFixes].
+// All fixes must have been validated by [ValidateFixes].
 //
 // Each fix is treated as an independent change; fixes are merged in
 // an arbitrary deterministic order as if by a three-way diff tool
@@ -94,12 +91,15 @@ type FixAction struct {
 // applyFixes returns success if all fixes are valid, could be cleanly
 // merged, and the corresponding files were successfully updated.
 //
-// If the -diff flag was set, instead of updating the files it display the final
-// patch composed of all the cleanly merged fixes.
+// If printDiff (from the -diff flag) is set, instead of updating the
+// files it display the final patch composed of all the cleanly merged
+// fixes.
 //
 // TODO(adonovan): handle file-system level aliases such as symbolic
 // links using robustio.FileID.
-func ApplyFixes(actions []FixAction, verbose bool) error {
+func ApplyFixes(actions []FixAction, printDiff, verbose bool) error {
+	generated := make(map[*token.File]bool)
+
 	// Select fixes to apply.
 	//
 	// If there are several for a given Diagnostic, choose the first.
@@ -110,6 +110,15 @@ func ApplyFixes(actions []FixAction, verbose bool) error {
 	}
 	var fixes []*fixact
 	for _, act := range actions {
+		for _, file := range act.Files {
+			tokFile := act.FileSet.File(file.FileStart)
+			// Memoize, since there may be many actions
+			// for the same package (list of files).
+			if _, seen := generated[tokFile]; !seen {
+				generated[tokFile] = ast.IsGenerated(file)
+			}
+		}
+
 		for _, diag := range act.Diagnostics {
 			for i := range diag.SuggestedFixes {
 				fix := &diag.SuggestedFixes[i]
@@ -133,7 +142,7 @@ func ApplyFixes(actions []FixAction, verbose bool) error {
 	// packages are not disjoint, due to test variants, so this
 	// would not really address the issue.)
 	baselineContent := make(map[string][]byte)
-	getBaseline := func(readFile analysisinternal.ReadFileFunc, filename string) ([]byte, error) {
+	getBaseline := func(readFile ReadFileFunc, filename string) ([]byte, error) {
 		content, ok := baselineContent[filename]
 		if !ok {
 			var err error
@@ -155,6 +164,14 @@ func ApplyFixes(actions []FixAction, verbose bool) error {
 	)
 fixloop:
 	for _, fixact := range fixes {
+		// Skip a fix if any of its edits touch a generated file.
+		for _, edit := range fixact.fix.TextEdits {
+			file := fixact.act.FileSet.File(edit.Pos)
+			if generated[file] {
+				continue fixloop
+			}
+		}
+
 		// Convert analysis.TextEdits to diff.Edits, grouped by file.
 		// Precondition: a prior call to validateFix succeeded.
 		fileEdits := make(map[string][]diff.Edit)
@@ -237,7 +254,7 @@ fixloop:
 			final = formatted
 		}
 
-		if diffFlag {
+		if printDiff {
 			// Since we formatted the file, we need to recompute the diff.
 			unified := diff.Unified(file+" (old)", file+" (new)", string(baseline), string(final))
 			// TODO(adonovan): abstract the I/O.
@@ -287,7 +304,7 @@ fixloop:
 	//
 	// TODO(adonovan): should we log that n files were updated in case of total victory?
 	if badFixes > 0 || filesUpdated < totalFiles {
-		if diffFlag {
+		if printDiff {
 			return fmt.Errorf("%d of %d fixes skipped (e.g. due to conflicts)", badFixes, len(fixes))
 		} else {
 			return fmt.Errorf("applied %d of %d fixes; %d files updated. (Re-run the command to apply more.)",

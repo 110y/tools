@@ -1121,8 +1121,7 @@ func (c *completer) populateCommentCompletions(comment *ast.CommentGroup) {
 				_, named := typesinternal.ReceiverNamed(recv)
 				if named != nil {
 					if recvStruct, ok := named.Underlying().(*types.Struct); ok {
-						for i := range recvStruct.NumFields() {
-							field := recvStruct.Field(i)
+						for field := range recvStruct.Fields() {
 							c.deepState.enqueue(candidate{obj: field, score: lowScore})
 						}
 					}
@@ -1621,14 +1620,14 @@ func (c *completer) methodsAndFields(typ types.Type, addressable bool, imp *impo
 		c.methodSetCache[methodSetKey{typ, addressable}] = mset
 	}
 
-	for i := range mset.Len() {
-		obj := mset.At(i).Obj()
+	for method := range mset.Methods() {
+		obj := method.Obj()
 		// to the other side of the cb() queue?
 		if c.tooNew(obj) {
 			continue // std method too new for file's Go version
 		}
 		cb(candidate{
-			obj:         mset.At(i).Obj(),
+			obj:         method.Obj(),
 			score:       stdScore,
 			imp:         imp,
 			addressable: addressable || isPointer(typ),
@@ -2177,8 +2176,8 @@ func expectedCompositeLiteralType(clInfo *compLitInfo, pos token.Pos) types.Type
 		// value side. The expected type of the value will be determined from the key.
 		if clInfo.kv != nil {
 			if key, ok := clInfo.kv.Key.(*ast.Ident); ok {
-				for i := range t.NumFields() {
-					if field := t.Field(i); field.Name() == key.Name {
+				for field := range t.Fields() {
+					if field.Name() == key.Name {
 						return field.Type()
 					}
 				}
@@ -2844,8 +2843,8 @@ func (c *completer) expectedCallParamType(inf candidateInference, node *ast.Call
 	// call. Record the assignees so we can favor function
 	// calls that return matching values.
 	if len(node.Args) <= 1 && exprIdx == 0 {
-		for i := range sig.Params().Len() {
-			inf.assignees = append(inf.assignees, sig.Params().At(i).Type())
+		for v := range sig.Params().Variables() {
+			inf.assignees = append(inf.assignees, v.Type())
 		}
 
 		// Record that we may be completing into variadic parameters.
