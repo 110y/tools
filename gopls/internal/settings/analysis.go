@@ -70,6 +70,8 @@ import (
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/internal/goplsexport"
 	"honnef.co/go/tools/analysis/lint"
+
+	"github.com/110y/go-unnecessary-export/unnecessaryexport"
 )
 
 var AllAnalyzers = slices.Concat(DefaultAnalyzers, StaticcheckAnalyzers)
@@ -282,6 +284,9 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: nonewvars.Analyzer},
 	{analyzer: noresultvalues.Analyzer},
 	{analyzer: unusedvariable.Analyzer},
+
+	// 110y: custom analyzers
+	{analyzer: unnecessaryexport.Analyzer},
 }
 
 func init() {
