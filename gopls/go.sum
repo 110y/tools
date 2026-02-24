@@ -1,5 +1,5 @@
-github.com/110y/go-unnecessary-export v0.0.0-20260223051708-b69e53de950a h1:+jhKp0TuA+lMbFyGhbC6EWUyq8jdIbbLondge7Ngdss=
-github.com/110y/go-unnecessary-export v0.0.0-20260223051708-b69e53de950a/go.mod h1:3nDBLtrHwoicChgpaD4XzTBRgeIA5rQps2ObE+un0gs=
+github.com/110y/go-unnecessary-export v0.0.0-20260224065134-7128595e8fa6 h1:A+yqlKWrkxKzJ4ICX6pwuWPt9YuXiGL12s12HQtkbCU=
+github.com/110y/go-unnecessary-export v0.0.0-20260224065134-7128595e8fa6/go.mod h1:3nDBLtrHwoicChgpaD4XzTBRgeIA5rQps2ObE+un0gs=
 github.com/BurntSushi/toml v1.5.0 h1:W5quZX/G/csjUnuI8SUYlsHs9M38FC7znL0lIO+DvMg=
 github.com/BurntSushi/toml v1.5.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/fatih/camelcase v1.0.0 h1:hxNvNX/xYBp0ovncs8WyWZrOrpBNub/JfaMvbURyft8=
