@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/110y/go-unnecessary-export v0.0.0-20260224065134-7128595e8fa6
+	github.com/110y/go-unnecessary-import-name v0.0.0-20260227031520-0d2fba1c19f2
 	github.com/fatih/gomodifytags v1.17.1-0.20250423142747-f3939df9aa3c
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/go-cmp v0.7.0

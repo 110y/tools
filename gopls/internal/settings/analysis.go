@@ -73,6 +73,7 @@ import (
 	"honnef.co/go/tools/analysis/lint"
 
 	"github.com/110y/go-unnecessary-export/unnecessaryexport"
+	"github.com/110y/go-unnecessary-import-name/unnecessaryimportname"
 )
 
 var AllAnalyzers = slices.Concat(DefaultAnalyzers, StaticcheckAnalyzers)
@@ -289,6 +290,7 @@ var DefaultAnalyzers = []*Analyzer{
 
 	// 110y: custom analyzers
 	{analyzer: unnecessaryexport.Analyzer},
+	{analyzer: unnecessaryimportname.Analyzer},
 }
 
 func init() {
