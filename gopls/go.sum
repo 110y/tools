@@ -1,5 +1,7 @@
 github.com/110y/go-unnecessary-export v0.0.0-20260227044244-93ffd6232b39 h1:bwOR/rSYyq+CDMPU647HvjY2O3ILz4+4qcQ0Ynd1ZZo=
 github.com/110y/go-unnecessary-export v0.0.0-20260227044244-93ffd6232b39/go.mod h1:3nDBLtrHwoicChgpaD4XzTBRgeIA5rQps2ObE+un0gs=
+github.com/110y/go-unnecessary-export v0.0.0-20260304095401-2394f195dda5 h1:uLMUUg30m8JP/77V+/mY+vA8fz/BZwPXXrkCvMVtxFM=
+github.com/110y/go-unnecessary-export v0.0.0-20260304095401-2394f195dda5/go.mod h1:3nDBLtrHwoicChgpaD4XzTBRgeIA5rQps2ObE+un0gs=
 github.com/110y/go-unnecessary-import-name v0.0.0-20260227044130-9d6b46c50dc3 h1:wbWt9uzpyYwE8O4NJfdkfQMFgKszmW4UAT8FNFhfBP4=
 github.com/110y/go-unnecessary-import-name v0.0.0-20260227044130-9d6b46c50dc3/go.mod h1:ZwznC48LwZ+FJA34q3v5s/BeJvpjJidiCh5ZN6cFSdw=
 github.com/BurntSushi/toml v1.5.0 h1:W5quZX/G/csjUnuI8SUYlsHs9M38FC7znL0lIO+DvMg=
