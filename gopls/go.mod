@@ -3,7 +3,7 @@ module golang.org/x/tools/gopls
 go 1.25.0
 
 require (
-	github.com/110y/go-unnecessary-export v0.0.0-20260304095401-2394f195dda5
+	github.com/110y/go-unnecessary-export v0.0.0-20260305063406-a7d06c470463
 	github.com/110y/go-unnecessary-import-name v0.0.0-20260227044130-9d6b46c50dc3
 	github.com/fatih/gomodifytags v1.17.1-0.20250423142747-f3939df9aa3c
 	github.com/fsnotify/fsnotify v1.9.0
