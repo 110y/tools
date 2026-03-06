@@ -1312,7 +1312,7 @@
 						},
 						{
 							"Name": "\"ST1019\"",
-							"Doc": "Importing the same package multiple times\n\nGo allows importing the same package multiple times, as long as\ndifferent import aliases are being used. That is, the following\nbit of code is valid:\n\n    import (\n        \"fmt\"\n        fumpt \"fmt\"\n        format \"fmt\"\n        _ \"fmt\"\n    )\n\nHowever, this is very rarely done on purpose. Usually, it is a\nsign of code that got refactored, accidentally adding duplicate\nimport statements. It is also a rarely known feature, which may\ncontribute to confusion.\n\nDo note that sometimes, this feature may be used\nintentionally (see for example\nhttps://github.com/golang/go/commit/3409ce39bfd7584523b7a8c150a310cea92d879d)\n– if you want to allow this pattern in your code base, you're\nadvised to disable this check.\n\nAvailable since\n    2020.1\n",
+							"Doc": "Importing the same package multiple times\n\nGo allows importing the same package multiple times, as long as\ndifferent import aliases are being used. That is, the following\nbit of code is valid:\n\n    import (\n        \"fmt\"\n        fumpt \"fmt\"\n        format \"fmt\"\n    )\n\nHowever, this is very rarely done on purpose. Usually, it is a\nsign of code that got refactored, accidentally adding duplicate\nimport statements. It is also a rarely known feature, which may\ncontribute to confusion.\n\nDo note that sometimes, this feature may be used\nintentionally (see for example\nhttps://github.com/golang/go/commit/3409ce39bfd7584523b7a8c150a310cea92d879d)\n– if you want to allow this pattern in your code base, you're\nadvised to disable this check.\n\nIt is acceptable to import the same package twice if one of the imports\nuses the blank identifier. This is allowed in order to increase\nresilience against erroneous changes when using the same package for its\nside effects as well as its exported API.\n\nAvailable since\n    2020.1\n",
 							"Default": "false",
 							"Status": ""
 						},
@@ -1367,6 +1367,12 @@
 						{
 							"Name": "\"assign\"",
 							"Doc": "check for useless assignments\n\nThis checker reports assignments of the form x = x or a[i] = a[i].\nThese are almost always useless, and even when they aren't they are\nusually a mistake.",
+							"Default": "true",
+							"Status": ""
+						},
+						{
+							"Name": "\"atomic\"",
+							"Doc": "replace basic types in sync/atomic calls with atomic types\n\nThe atomic analyzer suggests replacing the primitive sync/atomic functions with\nthe strongly typed atomic wrapper types introduced in Go1.19 (e.g.\natomic.Int32). For example,\n\n\tvar x int32\n\tatomic.AddInt32(\u0026x, 1)\n\nwould become\n\n\tvar x atomic.Int32\n\tx.Add(1)\n\nThe atomic types are safer because they don't allow non-atomic access, which is\na common source of bugs. These types also resolve memory alignment issues that\nplagued the old atomic functions on 32-bit architectures.",
 							"Default": "true",
 							"Status": ""
 						},
@@ -3241,7 +3247,7 @@
 		},
 		{
 			"Name": "ST1019",
-			"Doc": "Importing the same package multiple times\n\nGo allows importing the same package multiple times, as long as\ndifferent import aliases are being used. That is, the following\nbit of code is valid:\n\n    import (\n        \"fmt\"\n        fumpt \"fmt\"\n        format \"fmt\"\n        _ \"fmt\"\n    )\n\nHowever, this is very rarely done on purpose. Usually, it is a\nsign of code that got refactored, accidentally adding duplicate\nimport statements. It is also a rarely known feature, which may\ncontribute to confusion.\n\nDo note that sometimes, this feature may be used\nintentionally (see for example\nhttps://github.com/golang/go/commit/3409ce39bfd7584523b7a8c150a310cea92d879d)\n– if you want to allow this pattern in your code base, you're\nadvised to disable this check.\n\nAvailable since\n    2020.1\n",
+			"Doc": "Importing the same package multiple times\n\nGo allows importing the same package multiple times, as long as\ndifferent import aliases are being used. That is, the following\nbit of code is valid:\n\n    import (\n        \"fmt\"\n        fumpt \"fmt\"\n        format \"fmt\"\n    )\n\nHowever, this is very rarely done on purpose. Usually, it is a\nsign of code that got refactored, accidentally adding duplicate\nimport statements. It is also a rarely known feature, which may\ncontribute to confusion.\n\nDo note that sometimes, this feature may be used\nintentionally (see for example\nhttps://github.com/golang/go/commit/3409ce39bfd7584523b7a8c150a310cea92d879d)\n– if you want to allow this pattern in your code base, you're\nadvised to disable this check.\n\nIt is acceptable to import the same package twice if one of the imports\nuses the blank identifier. This is allowed in order to increase\nresilience against erroneous changes when using the same package for its\nside effects as well as its exported API.\n\nAvailable since\n    2020.1\n",
 			"URL": "https://staticcheck.dev/docs/checks/#ST1019",
 			"Default": false
 		},
@@ -3297,6 +3303,12 @@
 			"Name": "assign",
 			"Doc": "check for useless assignments\n\nThis checker reports assignments of the form x = x or a[i] = a[i].\nThese are almost always useless, and even when they aren't they are\nusually a mistake.",
 			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/assign",
+			"Default": true
+		},
+		{
+			"Name": "atomic",
+			"Doc": "replace basic types in sync/atomic calls with atomic types\n\nThe atomic analyzer suggests replacing the primitive sync/atomic functions with\nthe strongly typed atomic wrapper types introduced in Go1.19 (e.g.\natomic.Int32). For example,\n\n\tvar x int32\n\tatomic.AddInt32(\u0026x, 1)\n\nwould become\n\n\tvar x atomic.Int32\n\tx.Add(1)\n\nThe atomic types are safer because they don't allow non-atomic access, which is\na common source of bugs. These types also resolve memory alignment issues that\nplagued the old atomic functions on 32-bit architectures.",
+			"URL": "https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#atomic",
 			"Default": true
 		},
 		{
