@@ -3201,6 +3201,8 @@ Package documentation: [fillreturns](https://pkg.go.dev/golang.org/x/tools/gopls
 
 The fmtappendf analyzer suggests replacing \`\[]byte(fmt.Sprintf(...))\` with \`fmt.Appendf(nil, ...)\`. This avoids the intermediate allocation of a string by Sprintf, making the code more efficient. The suggestion also applies to fmt.Sprint and fmt.Sprintln.
 
+Since its fix is not a Pareto improvement, fmtappendf is disabled by default in the \`go fix\` analyzer suite; see golang/go#77581.
+
 
 Default: on.
 
@@ -4121,6 +4123,8 @@ is replaced by:
 	use(s.String())
 
 This avoids quadratic memory allocation and improves performance.
+
+No diagnostics are issued in tests, where data sizes are often small and asymptotic performance is not a security concern.
 
 The analyzer requires that all references to s before the final uses are += operations. To avoid warning about trivial cases, at least one must appear within a loop. The variable s must be a local variable, not a global or parameter.
 
