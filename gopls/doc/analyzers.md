@@ -3139,7 +3139,10 @@ Package documentation: [embedlit](https://pkg.go.dev/golang.org/x/tools/go/analy
 <a id='errorsas'></a>
 ## `errorsas`: report passing non-pointer or non-error values to errors.As
 
-The errorsas analyzer reports calls to errors.As where the type of the second argument is not a pointer to a type implementing error.
+The errorsas analyzer reports calls to errors.As where the type of the second argument is not a pointer to a type implementing error. For example:
+
+	var unwrappedErr net.DNSError
+	errors.As(err, unwrappedErr) // should use &unwrappedErr, DNSError.Error has a pointer reciever
 
 
 Default: on.
@@ -3168,6 +3171,25 @@ The fix is only offered if the var declaration has the form shown and there are 
 Default: on.
 
 Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/go/analysis/passes/modernize#errorsastype)
+
+<a id='errorsastype'></a>
+## `errorsastype`: Reports misuse of errors.AsType[T] in if/else chains.
+
+For example:
+
+	err := f()
+	if err, ok := errors.AsType[*FooErr](err); ok {
+	    use(err)
+	} else if err, ok := errors.AsType[*BarErr](err); ok {
+	    use(err)
+	}
+
+In this case, the second call to errors.AsType does not operate on the original error. Instead, its operand is the zero value of type \*FooErr produced by the first if statement; this is invariably a mistake.
+
+
+Default: on.
+
+Package documentation: [errorsastype](https://pkg.go.dev/golang.org/x/tools/gopls/internal/analysis/errorsastype)
 
 <a id='fieldalignment'></a>
 ## `fieldalignment`: find structs that would use less memory if their fields were sorted

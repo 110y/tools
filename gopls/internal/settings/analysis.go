@@ -8,6 +8,10 @@ import (
 	"log"
 	"slices"
 
+	"github.com/110y/go-unnecessary-export/unnecessaryexport"
+	"github.com/110y/go-unnecessary-import-name/unnecessaryimportname"
+	"honnef.co/go/tools/analysis/lint"
+
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/appends"
 	"golang.org/x/tools/go/analysis/passes/asmdecl"
@@ -56,6 +60,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/waitgroup"
 	"golang.org/x/tools/gopls/internal/analysis/deprecated"
 	"golang.org/x/tools/gopls/internal/analysis/embeddirective"
+	"golang.org/x/tools/gopls/internal/analysis/errorsastype"
 	"golang.org/x/tools/gopls/internal/analysis/fillreturns"
 	"golang.org/x/tools/gopls/internal/analysis/infertypeargs"
 	"golang.org/x/tools/gopls/internal/analysis/maprange"
@@ -72,10 +77,6 @@ import (
 	"golang.org/x/tools/gopls/internal/analysis/yield"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/internal/goplsexport"
-	"honnef.co/go/tools/analysis/lint"
-
-	"github.com/110y/go-unnecessary-export/unnecessaryexport"
-	"github.com/110y/go-unnecessary-import-name/unnecessaryimportname"
 )
 
 var AllAnalyzers = slices.Concat(DefaultAnalyzers, StaticcheckAnalyzers)
@@ -292,6 +293,8 @@ var DefaultAnalyzers = []*Analyzer{
 	{analyzer: nonewvars.Analyzer},
 	{analyzer: noresultvalues.Analyzer},
 	{analyzer: unusedvariable.Analyzer},
+
+	{analyzer: errorsastype.Analyzer},
 
 	// 110y: custom analyzers
 	{analyzer: unnecessaryexport.Analyzer},
