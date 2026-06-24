@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"golang.org/x/tools/gopls/internal/cache"
-	"golang.org/x/tools/gopls/internal/debug"
-	"golang.org/x/tools/gopls/internal/filecache"
 	"golang.org/x/tools/gopls/internal/lsprpc"
 	"golang.org/x/tools/gopls/internal/protocol"
 	"golang.org/x/tools/gopls/internal/protocol/command"
@@ -141,18 +139,18 @@ func New() *Application {
 	return app
 }
 
-// Name implements tool.Application returning the binary name.
+// Name implements tool.Command returning the binary name.
 func (app *Application) Name() string { return "gopls" }
 
-// Usage implements tool.Application returning empty extra argument usage.
+// Usage implements tool.Command returning empty extra argument usage.
 func (app *Application) Usage() string { return "" }
 
-// ShortHelp implements tool.Application returning the main binary help.
+// ShortHelp implements tool.Command returning the main binary help.
 func (app *Application) ShortHelp() string {
 	return ""
 }
 
-// DetailedHelp implements tool.Application returning the main binary help.
+// DetailedHelp implements tool.Command returning the main binary help.
 // This includes the short help for all the sub commands.
 func (app *Application) DetailedHelp(f *flag.FlagSet) {
 	w := tabwriter.NewWriter(f.Output(), 0, 0, 2, ' ', 0)
@@ -261,44 +259,19 @@ func isZeroValue(f *flag.Flag, value string) bool {
 	return value == z.Interface().(flag.Value).String()
 }
 
-// Run takes the args after top level flag processing, and invokes the correct
-// sub command as specified by the first argument.
-// If no arguments are passed it will invoke the server sub command, as a
-// temporary measure for compatibility.
-func (app *Application) Run(ctx context.Context, args ...string) error {
-	// In the category of "things we can do while waiting for the Go command":
-	// Pre-initialize the filecache, which takes ~50ms to hash the gopls
-	// executable, and immediately runs a gc.
-	filecache.Start()
-
-	ctx = debug.WithInstance(ctx, app.OTel)
-	if len(args) == 0 {
-		s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
-		return tool.Run(ctx, s, &app.serve, args)
-	}
-	command, args := args[0], args[1:]
-	for _, c := range app.Commands() {
-		if c.Name() == command {
-			s := flag.NewFlagSet(app.Name(), flag.ExitOnError)
-			return tool.Run(ctx, s, c, args)
-		}
-	}
-	return tool.CommandLineErrorf("Unknown command %v", command)
-}
-
 // Commands returns the set of commands supported by the gopls tool on the
 // command line.
 // The command is specified by the first non flag argument.
-func (app *Application) Commands() []tool.Application {
-	var commands []tool.Application
+func (app *Application) Commands() []tool.Command {
+	var commands []tool.Command
 	commands = append(commands, app.mainCommands()...)
 	commands = append(commands, app.featureCommands()...)
 	commands = append(commands, app.internalCommands()...)
 	return commands
 }
 
-func (app *Application) mainCommands() []tool.Application {
-	return []tool.Application{
+func (app *Application) mainCommands() []tool.Command {
+	return []tool.Command{
 		&app.serve,
 		&version{app: app},
 		&help{app: app},
@@ -307,14 +280,14 @@ func (app *Application) mainCommands() []tool.Application {
 	}
 }
 
-func (app *Application) internalCommands() []tool.Application {
-	return []tool.Application{
+func (app *Application) internalCommands() []tool.Command {
+	return []tool.Command{
 		&vulncheck{app: app},
 	}
 }
 
-func (app *Application) featureCommands() []tool.Application {
-	return []tool.Application{
+func (app *Application) featureCommands() []tool.Command {
+	return []tool.Command{
 		&callHierarchy{app: app},
 		&check{app: app, Severity: "warning"},
 		&codeaction{app: app},
