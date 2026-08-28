@@ -1,6 +1,6 @@
 module golang.org/x/tools/gopls
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/110y/go-unnecessary-export v0.0.0-20260305063406-a7d06c470463
