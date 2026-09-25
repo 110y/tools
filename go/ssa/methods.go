@@ -32,10 +32,18 @@ func (prog *Program) MethodValue(sel *types.Selection) *Function {
 		return nil // interface method or type parameter
 	}
 
-	// Selection.Type allocates a new Signature on each call, and
-	// isParameterized memoizes by type identity, so an uncanonicalized
+	// When the method has no type parameters of its own, the selection type
+	// is parameterized iff the receiver is, so the receiver check alone
+	// suffices and Selection.Type() — which allocates a new Signature on
+	// every call — need not be materialized. Only generic methods take the
+	// full check; there the type is canonicalized first, since
+	// isParameterized memoizes by type identity and an uncanonicalized
 	// argument would add one permanently retained entry per call (#81308).
-	if prog.isParameterized(T, prog.canon.Type(sel.Type())) {
+	if sel.Obj().(*types.Func).Signature().TypeParams().Len() == 0 {
+		if prog.isParameterized(T) {
+			return nil // method on generic type
+		}
+	} else if prog.isParameterized(T, prog.canon.Type(sel.Type())) {
 		return nil // method on generic type or generic method
 	}
 
@@ -134,11 +142,37 @@ func (prog *Program) objectMethod(obj *types.Func, targs []types.Type, b *builde
 // identified by (pkg, name).  It returns nil if the method exists but
 // is an interface method or generic method, and panics if T has no such method.
 func (prog *Program) LookupMethod(T types.Type, pkg *types.Package, name string) *Function {
+	// Fast path: the method was created and built by an earlier
+	// call. RTA calls LookupMethod once per (call site, concrete
+	// type) pair, so this is the common case; it avoids computing
+	// the method set of T and searching it, which dominates the
+	// cost of the slow path below.
+	if fn := prog.existingMethod(T, types.Id(pkg, name)); fn != nil {
+		return fn
+	}
+
 	sel := prog.MethodSets.MethodSet(T).Lookup(pkg, name)
 	if sel == nil {
 		panic(fmt.Sprintf("%s has no method %s", T, types.Id(pkg, name)))
 	}
 	return prog.MethodValue(sel)
+}
+
+// existingMethod returns the Function implementing method id of
+// the concrete type T if it has already been created and built, or
+// nil. A recorded method implies that T was found to be concrete and
+// non-parameterized and the method non-generic when it was created.
+//
+// Acquires prog.methodsMu.
+func (prog *Program) existingMethod(T types.Type, id string) *Function {
+	prog.methodsMu.Lock()
+	defer prog.methodsMu.Unlock()
+	if mset, ok := prog.methodSets.At(T).(*methodSet); ok {
+		if fn := mset.mapping[id]; fn != nil && fn.buildshared.isTransitivelyDone() {
+			return fn
+		}
+	}
+	return nil
 }
 
 // methodSet contains the (concrete) methods of a concrete type (non-interface, non-parameterized).

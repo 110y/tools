@@ -1225,7 +1225,7 @@ func (c *completer) populateCommentCompletions(comment *ast.CommentGroup) {
 				if recv == nil {
 					continue // may be nil if ill-typed
 				}
-				_, named := typesinternal.ReceiverNamed(recv)
+				_, named := typesinternal.RecvBase(fn)
 				if named != nil {
 					if recvStruct, ok := named.Underlying().(*types.Struct); ok {
 						for field := range recvStruct.Fields() {
