@@ -2020,6 +2020,12 @@ func TestInferredCompLits(t *testing.T) {
 }`,
 		},
 		{
+			"Argument to empty function is discarded.",
+			`type T struct{ x, y int }; func f(t T) {}`,
+			`func _() { v := 1; f({v, 2}) }`,
+			`func _() { v := 1; _ = T{v, 2} }`,
+		},
+		{
 			"Result assigned to new var.",
 			`type T struct{ x, y int }; func f() T { return {1, 2} }`,
 			`func _() { x := f(); _ = x }`,
@@ -2033,6 +2039,12 @@ func TestInferredCompLits(t *testing.T) {
 			`type T struct{ x, y int }; func f() T { return {1, 2} }`,
 			`func _() int { return f().x }`,
 			`func _() int { return T{1, 2}.x }`,
+		},
+		{
+			"Result discarded in statement context.",
+			`type T struct{ x, y int }; func f() T { return {1, 2} }`,
+			`func _() { f() }`,
+			`func _() { _ = T{1, 2} }`,
 		},
 		{
 			"Result of pointer type assigned to new var.",
